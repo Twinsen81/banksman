@@ -21,12 +21,18 @@ otherwise.
 banksman runs on one machine, as the user who calls it. It has no daemon, no listening
 port, and no network access. The design is in [docs/DESIGN.md](docs/DESIGN.md).
 
-**The lease state belongs to one user.** The reaper sends signals to the process groups
-that a lease file lists. If another local user could write lease files, that user could
-make the reaper kill the owner's processes. So the state directory is created with mode
-`0700`, and banksman refuses to use a directory, or a lease file, that another user owns or
-that group or others can write to. The kernel also checks every signal, so the reaper can
-never signal another user's processes.
+**The lease state belongs to one user.** When the operator turns stopping on, the reaper
+sends signals to the process groups that a lease file lists; by default it sends none. If
+another local user could write lease files, that user could make the reaper kill the
+owner's processes. So the state directory, `/tmp/banksman-<uid>`,
+is created with mode `0700`, and banksman refuses to use a directory, or a lease file, that
+another user owns or that group or others can write to. The kernel also checks every
+signal, so the reaper can never signal another user's processes. The kernel does not
+protect the user's own programs, so the reaper signals only a process group that a script
+created for its own work, and never a group that contains the agent or a program above it.
+Another local user can
+create the state directory first; banksman then refuses to run. That is a denial of
+service, not a takeover.
 
 **Configuration runs as code.** A kind's hooks are commands that banksman runs as the user.
 So banksman refuses a configuration file that another user owns or that group or others
@@ -38,7 +44,8 @@ from another holder, are operator commands under `banksman admin`. An agent's pe
 rules can refuse all of them with one pattern. That is a guardrail against a careless
 agent, not a boundary against a determined one: an agent that runs as the same user can
 edit files that user can edit. Running agents under a separate user account is the
-stronger option.
+stronger option. Such agents use that account's state directory, so banksman does not
+coordinate their leases with the leases of the operator's own account.
 
 **Holder text is untrusted.** The purpose that a caller gives with `--for` is written by
 an agent and read by people and by other agents, so it is a channel for prompt injection

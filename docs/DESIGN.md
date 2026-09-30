@@ -1,8 +1,10 @@
 # banksman design
 
-**Status:** the project scaffold exists: the package, the CLI with `version` and an empty
-`status`, the tests, and CI. Nothing below is implemented yet. Resolved decisions and how to
-change them are in [DECISIONS.md](../DECISIONS.md); the threat model is in
+**Status:** the project scaffold and the lease core exist. Section 3 is implemented, with
+`banksman reap` and a `status` that lists the leases. The rest is not implemented yet: no
+command can take a lease yet, and the reaper only deletes void leases, because the
+take-back step of sections 4 and 5 does not exist yet. Resolved decisions and how to change
+them are in [DECISIONS.md](../DECISIONS.md); the threat model is in
 [SECURITY.md](../SECURITY.md).
 
 ## 1. Goals and non-goals
@@ -12,7 +14,8 @@ Goals:
 - Parallel runs on one machine share scarce resources without using the same one at the
   same time. The resources are physical devices, emulators, memory for heavy builds, and
   things that live on a device, such as a signed-in account.
-- A dead, hung, or forgotten run can never hold a resource forever.
+- A dead, hung, or forgotten run can never hold a resource forever. If a script of a void
+  lease does not stop, the resource waits for a person (section 4).
 - A person and an agent can both see what exists, who holds it, why, and when it will be
   free.
 - It works the same for any coding agent, and for scripts that a person runs.
@@ -44,33 +47,68 @@ Non-goals:
 A lock held by "whoever started it" stays taken forever when that run dies. banksman uses
 leases instead.
 
-- **Lease files.** There is one lease file per resource, in a state directory that belongs
-  to the current user. Bookkeeping happens under a file lock that is held for milliseconds,
-  never while the resource is in use. The kernel releases that lock when its holder dies, so
-  there is no lock-stealing logic.
+- **Lease files.** There is one JSON lease file per resource, in a state directory that
+  belongs to the current user: `/tmp/banksman-<uid>`. The path is fixed on purpose. It does
+  not come from `$TMPDIR`, because the agents, sandboxes, and scheduled jobs of one user can
+  each have a different `$TMPDIR`, and callers that use different directories do not
+  exclude each other. `BANKSMAN_STATE_DIR` changes the path for tests; every caller must
+  then use the same value.
+- **One file lock.** Bookkeeping happens under one lock file in the state directory. The
+  lock is held for milliseconds, never while a resource is in use. Every write replaces a
+  file with a rename, so a reader never sees half a file. The kernel releases the lock when
+  its holder ends, so there is no lock-stealing logic. A holder that is alive but stopped,
+  for example with Ctrl-Z, keeps the lock, so a command waits at most 10 seconds and then
+  fails with an error that names the holder's pid.
 - **States.** `booting`, then `ready`, then `draining`, then released. A resource that
-  cannot be taken back safely becomes `quarantined`.
+  cannot be taken back safely becomes `quarantined`, and stays out of use until a person
+  releases it.
 - **Reserve before start.** A lease is written in the `booting` state, with its own
   deadline, before the resource is started. A resource that is still starting therefore
   always has a lease, and cannot be mistaken for an orphan.
 - **Void triggers.** A lease is void when any of these is true. The defaults are starting
-  values, to be tuned by measurement.
+  values, to be tuned by measurement. The operator can change each of them in the
+  configuration, for all kinds or for one kind. A lease keeps the values that it was
+  created with.
 
   | Trigger | Default | Catches |
   |---|---|---|
+  | the machine restarted after the lease was written | n/a | leases that describe an earlier boot |
   | `booting` past its boot deadline | 5 min | boots that never complete |
-  | owner process dead, and no touch for a grace period | 5 min | crashed or killed runs |
-  | no touch for the idle timeout | 20 min | hung runs, runs that forgot to release |
   | held longer than the hard cap | 3 h | runs that are alive but loop |
+  | owner process ended, and no touch for a grace period | 5 min | crashed or killed runs |
+  | no touch for the idle timeout | 20 min | hung runs, runs that forgot to release |
 
+- **Time is awake time.** Deadlines and timeouts count only the time while the machine is
+  awake: they use the monotonic clock, which stops while the machine sleeps. So a laptop
+  that sleeps for an hour does not find every lease void when it wakes, and a change of the
+  wall clock does not move a deadline. The cost: a deadline shown as a time of day moves
+  later when the machine sleeps.
+- **Owner liveness** is a pid together with that process's start time, so a pid that the
+  system gives to a new process does not keep a lease. A zombie process counts as ended.
 - **Owner death alone is not proof that a resource is idle.** Some agents keep a session's
   background commands running across a restart of the session process. Those commands keep
-  touching the lease, so the grace period lets a restarted run keep its resource, while a
-  run that is really gone frees it within minutes.
+  touching the lease, and a touch can record the new owner process. So a restarted run
+  keeps its resource if its lease is touched within the grace period; until that touch, the
+  grace period is its idle timeout. A run that is really gone frees its resource within
+  minutes.
 - **Renewal needs no agent cooperation.** A project's device scripts touch the lease on
   every call. A long-running script keeps a touch loop alive for its own lifetime.
 - **Reboots.** Lease state must not outlive a reboot, because the emulators it describes do
-  not. A lease records the machine's boot time, and a lease from an earlier boot is void.
+  not. A lease records the machine's boot session id, and a lease from an earlier boot is
+  void, also a quarantined one: no process of an earlier boot still runs. The awake-time
+  clock starts again at every boot, so this check also keeps the deadlines of two boots
+  apart.
+- **Reaping in two steps.** Under the lock, the reaper marks a void lease `draining`, which
+  fails every ownership check, and records its own pid and start time in the lease. Outside
+  the lock, it takes the resource back (section 4). Then, under the lock again, it deletes
+  the lease, but only if the file still holds the same lease. Only one reaper takes a lease
+  back: another reaper leaves a `draining` lease alone while the reaper named in it runs,
+  and finishes it only after that reaper has ended. So a late take-back never acts on a
+  newer lease.
+- **Damaged lease files.** A lease file with a newer `schema` stops every command, because
+  two versions of banksman must not share one state directory. A lease file that cannot be
+  read keeps its resource out of use, and `status` shows it. Other resources are not
+  affected.
 
 ## 4. Fencing, in both directions
 
@@ -81,15 +119,29 @@ minutes, and its lease can become void in the middle.
   group, start time) and leaves when it exits. A long-running script runs its work in its
   own process group, and its touch loop also checks ownership. When the lease is lost or
   draining, the loop kills its own process group.
-- **The reaper's side.** For a void lease, the reaper first marks it `draining`, so that no
-  further ownership check passes. Then it sends SIGTERM to every registered process group,
+- **The reaper's side: no signals by default.** For a void lease, the reaper first marks it
+  `draining`, so that no further ownership check passes. By default it sends no signal to
+  any process. It waits until every registered script has stopped itself, confirms that by
+  pid and start time, and then frees the resource. If a script still runs after a
+  deadline, the lease is quarantined: it is never handed on, and it stays in `status` until
+  a person runs `banksman admin release --force`. While stopping is off, `banksman log`
+  records which processes the reaper would have stopped. The reason: banksman must never
+  stop a process that the user did not expect, whatever agent the user runs. A blocked
+  device costs time; a stopped process costs trust.
+- **Stopping is opt-in.** The operator can turn stopping on for a kind in the
+  configuration. The reaper then sends SIGTERM to every registered process group or pid,
   waits, sends SIGKILL, and confirms death by pid and start time. It never trusts an exit
-  code alone.
-- **Killable and unkillable kinds.** For a resource that can be killed, such as an emulator,
-  the kill is the fence. A resource that cannot be killed, such as a physical device, is
-  released only after all its users are confirmed dead. If that cannot be confirmed, the
-  lease is quarantined: it is never handed on, and it stays in `status` until a person runs
-  `banksman admin release --force`.
+  code alone. For a resource that can be killed, such as an emulator, the operator can also
+  let the kind's `on_void` hook kill it; the kill is then the fence.
+- **Never the agent or the app.** When stopping is on, the reaper signals whole process
+  groups, and the kernel does not stop it from signalling the user's own programs. An agent
+  can share one process group with the app that runs it, so one signal to that group would
+  stop the app and every session in it. So `enter` accepts a process group only if the script created it for its
+  work: the group leader is the script or a process that the script started. A script
+  without its own group registers only its pid, and the reaper then signals only that pid.
+  `enter` also refuses a group that contains the owner agent process or any process above
+  it. Right before each signal, the reaper checks the pid and the start time again, so it
+  never signals a pid that the system gave to a new process.
 - **Reaping** runs at the start of every command, and whenever a caller runs `banksman reap`.
 
 ## 5. Kinds are configuration
@@ -99,8 +151,10 @@ not code.
 
 - A kind declares whether it is named or counted, how to `discover` its instances, what to
   run `on_acquire` to reset one, and what to run `on_void` to take one back.
-- Whether a void instance can be killed, or must be quarantined, is a property of the kind.
-  The reaper has no branch for a specific kind.
+- Whether the reaper may stop the scripts of a void instance, or kill the instance, is a
+  setting of the kind. It is off unless the operator turns it on, also in the presets. The
+  reaper has no branch for a specific kind.
+- A kind can set its own timeouts, for example no idle timeout for build slots.
 - Counted kinds need no hooks.
 - Hooks do device-level work only. App-level work stays in the project's scripts.
 - Presets can ship for common kinds: Android emulators, Android devices, and build slots.
@@ -220,7 +274,7 @@ kind in the same pool.
 
 ## 12. Command line (sketch)
 
-Only `version` and `status` exist today. The rest is the intended shape.
+Only `version`, `status`, and `reap` exist today. The rest is the intended shape.
 
 ```
 banksman acquire --where <attr><op><value> ... [--for <text>] [--expect <duration>] [--wait <duration>]
@@ -276,10 +330,10 @@ permission rules can refuse all of them with one pattern, including ones added l
 Done:
 
 - Project scaffold: package, CLI with `version` and `status`, tests, CI.
+- The lease core: lease files, the file lock, states, void triggers, reaping.
 
 Next:
 
-- The lease core: lease files, the file lock, states, void triggers, reaping.
 - Kinds as configuration, with presets for Android emulators, Android devices, and build
   slots.
 - Fencing in both directions and confirmed termination.
@@ -292,11 +346,23 @@ Next:
 ## 16. Open questions
 
 - Does each agent run its shell commands in their own process group? That decides how a
-  script isolates the group that the reaper signals.
+  script isolates the group that the reaper signals. Checked for Claude Code and Codex, both
+  as command-line tools and in their Mac apps: each shell command has its own process
+  group. In two of these setups, the agent shares one group with the app that runs it,
+  which is why the reaper never signals such a group (section 4). In the background-server
+  mode of the Codex command-line tool, the server runs the commands, and each command still
+  has its own group.
 - Does each agent run its commands as descendants of its own process, also inside a
-  sandbox, and also for background sessions? Holder identity depends on it.
+  sandbox, and also for background sessions? Holder identity depends on it. Checked for the
+  same setups: the parent of each command is the agent process. Still open: background
+  sessions, whether one agent process serves several sessions of an app, and whether the
+  Codex background server keeps running after its session ends.
 - Is the idle timeout longer than the longest silent period of a legitimate run, for
   example a cold build that also waits for a build slot?
+- Some agents run their shell commands in a sandbox. On macOS, a sandboxed command cannot
+  start `ps`, because `ps` is a setuid program, and banksman needs `ps` to check owner
+  processes. So banksman must run outside the agent's sandbox. Which setting does each agent
+  need for that?
 - A raw `adb -s` call from an agent is not fenced, because only the scripts register as
   users. An `adb` wrapper on `PATH`, or an agent hook that checks the lease before a device
   command, would enforce it.
