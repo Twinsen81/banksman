@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import time
 
 from banksman.system import Machine
 
@@ -37,8 +38,8 @@ def test_a_zombie_is_not_running():
     try:
         assert child.pid in Machine().running([child.pid])
         child.kill()
-        # Wait for the end without collecting the child, so that it stays a zombie.
-        os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+        # The child stays a zombie until the test collects it with wait().
+        _wait_until_zombie(child.pid)
         assert Machine().running([child.pid]) == {}
     finally:
         child.kill()
@@ -48,3 +49,14 @@ def test_a_zombie_is_not_running():
 def test_no_pids_need_no_process_list():
     assert Machine().running([]) == {}
 
+
+def _wait_until_zombie(pid):
+    give_up = time.monotonic() + 10
+    while time.monotonic() < give_up:
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.strip()
+        if state.startswith("Z"):
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"process {pid} did not become a zombie")
