@@ -1,0 +1,57 @@
+# Security policy
+
+## Supported versions
+
+banksman has no release yet. Security fixes go to the `main` branch until the first
+release; after that, to the latest release.
+
+## Reporting a vulnerability
+
+**Please do not open a public GitHub issue for security problems.**
+
+Report them privately through
+[GitHub private vulnerability reporting](https://github.com/Twinsen81/banksman/security/advisories/new).
+Include the version or commit, your platform, the steps to reproduce, and what an attacker
+could do. You will get an answer within a week. A fix is released in a new version,
+documented in [`CHANGELOG.md`](CHANGELOG.md), and credited to you unless you prefer
+otherwise.
+
+## Threat model
+
+banksman runs on one machine, as the user who calls it. It has no daemon, no listening
+port, and no network access. The design is in [docs/DESIGN.md](docs/DESIGN.md).
+
+**The lease state belongs to one user.** The reaper sends signals to the process groups
+that a lease file lists. If another local user could write lease files, that user could
+make the reaper kill the owner's processes. So the state directory is created with mode
+`0700`, and banksman refuses to use a directory, or a lease file, that another user owns or
+that group or others can write to. The kernel also checks every signal, so the reaper can
+never signal another user's processes.
+
+**Configuration runs as code.** A kind's hooks are commands that banksman runs as the user.
+So banksman refuses a configuration file that another user owns or that group or others
+can write to.
+
+**Agents are clients, not operators.** Agents acquire, touch, check, and release leases.
+Discovery, which decides what agents may use, and forced release, which takes a resource
+from another holder, are operator commands under `banksman admin`. An agent's permission
+rules can refuse all of them with one pattern. That is a guardrail against a careless
+agent, not a boundary against a determined one: an agent that runs as the same user can
+edit files that user can edit. Running agents under a separate user account is the
+stronger option.
+
+**Holder text is untrusted.** The purpose that a caller gives with `--for` is written by
+an agent and read by people and by other agents, so it is a channel for prompt injection
+between agents. The JSON that agents read by default carries only validated fields. The
+purpose appears in the human console, and in JSON only with `--verbose`. banksman removes
+terminal control sequences from all output and limits the length of the purpose.
+
+**No credentials.** For accounts on devices, banksman stores identifiers such as email
+addresses, never passwords or tokens. The account is already signed in on the device; a
+run needs the address, not a secret.
+
+**Fencing covers the scripts, not every command.** A script that registers as a user of a
+lease is stopped when the lease is lost. A raw device command that an agent types, for
+example `adb -s <serial> ...`, is not registered and is not stopped. See the open questions
+in the design.
+

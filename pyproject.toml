@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "banksman"
+dynamic = ["version"]
+description = "Lease shared devices, emulators, and build slots to parallel coding agents on one machine."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Evgenii Plokhov" }]
+keywords = ["android", "emulator", "device", "lease", "coding-agent", "worktree", "cli"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Testing",
+]
+# Runtime dependencies: standard library only.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Twinsen81/banksman"
+Repository = "https://github.com/Twinsen81/banksman"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+banksman = "banksman.cli:main"
+
+[tool.hatch.version]
+path = "src/banksman/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/banksman"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/banksman",
+    "tests",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+

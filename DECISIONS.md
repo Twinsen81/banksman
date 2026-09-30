@@ -1,0 +1,23 @@
+# Decisions
+
+This document records the resolved design decisions for banksman. Each entry states the
+**provisional** decision and its rationale. Every decision is reversible; the last column
+says what changing it would involve. The full design is in [docs/DESIGN.md](docs/DESIGN.md).
+
+| # | Decision | Provisional choice | Rationale | How to change |
+| - | -------- | ------------------ | --------- | ------------- |
+| 1 | Name and packaging | `banksman`: PyPI package, import package, and console script | One name for the tool and its command. | Rename the package directory, the `pyproject.toml` entries, and the configuration paths in one change. |
+| 2 | License and contributions | Apache-2.0, DCO sign-off | Permissive, with a patent grant. DCO avoids a CLA. | Relicensing needs every contributor's consent. Decide before accepting outside contributions. |
+| 3 | Runtime | Python 3.11+, standard library only | `fcntl`, `json`, `tomllib`, `subprocess`, and `argparse` cover the need. A tool that other tools call from their scripts must install with no friction and a small supply chain. | Add a dependency only with a justification in the PR; keep test-only dependencies separate. |
+| 4 | Platform | macOS first; Linux expected to work | The core uses POSIX primitives only: file locks, process groups, signals. CI runs both. | A platform without `flock` and process groups needs its own implementation of the lease store. |
+| 5 | Leases, not locks | Every hold expires: owner gone, idle, or past a hard cap | A lock held by "whoever started it" stays taken forever when that run dies. | n/a: this is the point of the tool. |
+| 6 | State | One lease file per resource in a per-user directory; bookkeeping under a file lock held for milliseconds | The kernel releases the lock when its holder dies, so there is no stealing logic. No daemon has to stay alive. | A daemon could hold the state in memory, but it would add a process that must survive everything the leases survive. |
+| 7 | Interface | A command with `KEY=value` and JSON output, versioned by a `schema` number; no library API | Project scripts, build hooks, and other tools all call the same command, so a machine has one lease implementation. | A library API needs a promise that it and the command never disagree about the lease files. |
+| 8 | Kinds | Declared in configuration: named or counted, with `discover`, `on_acquire`, and `on_void` hooks | A new kind of resource needs configuration, not code, and the reaper has no branch for a specific kind. | Presets for common kinds ship with the tool; they are configuration too. |
+| 9 | Access | An allowlist that is closed by default; `discover` is a human gate; no default pattern | A machine with test devices usually has something personal on it too. Excluding a test device by mistake costs one re-scan; including a personal one gives an agent real credentials. | Only the operator widens access, never a request. |
+| 10 | Requests | By properties: facts from discovery and tags from the operator; an unknown attribute is an error | A run knows what it needs, not which device has it. | New facts come from a kind's `discover` hook. |
+| 11 | Holder identity | Derived from facts every caller has: worktree, issue id, and the nearest known agent process | It must work for any agent and for a person, and a caller cannot forget it. | Agent-specific values are optional extras, never required. |
+| 12 | Scope | banksman knows devices, their facts, and leases, and nothing about any app | App setup, app data, test accounts, and app ports differ in every project and belong in that project's scripts. | n/a: an app-specific need goes into the project's scripts or a hook. |
+| 13 | Operator commands | All under `banksman admin` | An agent's permission rules can refuse every operator command with one pattern, including ones added later. | n/a. |
+| 14 | Optional use | A project's scripts check for the command and behave as before without it | A silent dependency would break the machine of every developer who does not install it. | n/a. |
+
