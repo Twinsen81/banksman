@@ -333,15 +333,23 @@ Next:
 ## 16. Open questions
 
 - Does each agent run its shell commands in their own process group? That decides how a
-  script isolates the group that the reaper signals. Checked for Claude Code 2.1.284 started
-  by a desktop app: each shell command has its own process group, but Claude Code shares
-  one group with the app. Not checked for the other agents.
+  script isolates the group that the reaper signals. Checked for Claude Code and Codex, both
+  as command-line tools and in their Mac apps: each shell command has its own process
+  group. In two of these setups, the agent shares one group with the app that runs it,
+  which is why the reaper never signals such a group (section 4). In the background-server
+  mode of the Codex command-line tool, the server runs the commands, and each command still
+  has its own group.
 - Does each agent run its commands as descendants of its own process, also inside a
-  sandbox, and also for background sessions? Holder identity depends on it.
+  sandbox, and also for background sessions? Holder identity depends on it. Checked for the
+  same setups: the parent of each command is the agent process. Still open: background
+  sessions, whether one agent process serves several sessions of an app, and whether the
+  Codex background server keeps running after its session ends.
 - Is the idle timeout longer than the longest silent period of a legitimate run, for
   example a cold build that also waits for a build slot?
-- Some agents run their shell commands in a sandbox that limits where a command can write.
-  Which sandbox settings let banksman write to its state directory, `/tmp/banksman-<uid>`?
+- Some agents run their shell commands in a sandbox. On macOS, a sandboxed command cannot
+  start `ps`, because `ps` is a setuid program, and banksman needs `ps` to check owner
+  processes. So banksman must run outside the agent's sandbox. Which setting does each agent
+  need for that?
 - A raw `adb -s` call from an agent is not fenced, because only the scripts register as
   users. An `adb` wrapper on `PATH`, or an agent hook that checks the lease before a device
   command, would enforce it.

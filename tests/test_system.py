@@ -3,7 +3,10 @@ import subprocess
 import sys
 import time
 
-from banksman.system import Machine
+import pytest
+
+from banksman import system
+from banksman.system import Machine, MachineError
 
 # These tests read the real machine: its boot id, its clock, and processes that the tests
 # start themselves. They change nothing.
@@ -48,6 +51,42 @@ def test_a_zombie_is_not_running():
 
 def test_no_pids_need_no_process_list():
     assert Machine().running([]) == {}
+
+
+def test_a_process_list_without_banksman_itself_is_an_error(monkeypatch):
+    # For example inside an agent's sandbox: every owner would look ended.
+    monkeypatch.setattr(system, "_running_from_ps", lambda pids: {})
+    monkeypatch.setattr(system, "_running_from_proc", lambda pids: {})
+    with pytest.raises(MachineError, match="outside the sandbox"):
+        Machine().running([os.getpid() + 1])
+
+
+def test_a_ps_that_cannot_start_is_an_error(monkeypatch):
+    def blocked(*args, **kwargs):
+        raise PermissionError(1, "Operation not permitted", "ps")
+
+    monkeypatch.setattr(system.subprocess, "run", blocked)
+    with pytest.raises(MachineError, match="cannot run ps.*outside the sandbox"):
+        system._running_from_ps([os.getpid()])
+
+
+def test_a_failing_ps_is_an_error(monkeypatch):
+    def failing(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="ps: not permitted")
+
+    monkeypatch.setattr(system.subprocess, "run", failing)
+    with pytest.raises(MachineError, match="exit status 1.*outside the sandbox"):
+        system._running_from_ps([os.getpid()])
+
+
+def test_the_answer_holds_only_the_asked_pids():
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    assert Machine().running([child.pid]) == {}
+
+
+def test_a_pid_that_cannot_exist_is_not_running():
+    assert Machine().running([1_000_000]) == {}
 
 
 def _wait_until_zombie(pid):

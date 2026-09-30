@@ -16,6 +16,10 @@ from typing import Protocol
 from banksman.errors import BanksmanError
 
 _TIMEOUT_SECONDS = 5.0
+_MAX_MACOS_PID = 99_999
+_OUTSIDE_SANDBOX = (
+    "If banksman runs inside an agent's sandbox, let the agent run it outside the sandbox."
+)
 
 
 class MachineError(BanksmanError):
@@ -56,12 +60,19 @@ class Machine:
         return time.time()
 
     def running(self, pids: Iterable[int]) -> dict[int, str]:
-        wanted = sorted({pid for pid in pids if pid > 0})
+        wanted = {pid for pid in pids if pid > 0}
         if not wanted:
             return {}
-        if sys.platform.startswith("linux"):
-            return _running_from_proc(wanted)
-        return _running_from_ps(wanted)
+        own = os.getpid()
+        read = _running_from_proc if sys.platform.startswith("linux") else _running_from_ps
+        running = read(sorted(wanted | {own}))
+        # A process list that cannot see other processes, as inside an agent's sandbox, would
+        # make every owner look ended. banksman itself always runs, so it must be in the list.
+        if own not in running:
+            raise MachineError(
+                f"the process list does not show banksman itself. {_OUTSIDE_SANDBOX}"
+            )
+        return {pid: started for pid, started in running.items() if pid in wanted}
 
 
 def _read_boot_id() -> str:
@@ -80,7 +91,9 @@ def _read_boot_id() -> str:
                 check=True,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise MachineError(f"cannot read the boot session id: {exc}") from exc
+            raise MachineError(
+                f"cannot read the boot session id: {exc}. {_OUTSIDE_SANDBOX}"
+            ) from exc
         value = result.stdout.strip()
     else:
         raise MachineError(f"banksman does not support this platform: {sys.platform}")
@@ -108,12 +121,14 @@ def _running_from_proc(pids: list[int]) -> dict[int, str]:
 
 
 def _running_from_ps(pids: list[int]) -> dict[int, str]:
+    # macOS gives out pids up to 99999, and ps refuses a whole query that has a larger one.
+    possible = [pid for pid in pids if pid <= _MAX_MACOS_PID]
     # A fixed locale and time zone make every caller get the same start time for one
     # process, whatever its own environment is.
     env = {**os.environ, "LC_ALL": "C", "TZ": "UTC"}
     try:
         result = subprocess.run(
-            ["ps", "-o", "pid=,stat=,lstart=", "-p", ",".join(str(pid) for pid in pids)],
+            ["ps", "-o", "pid=,stat=,lstart=", "-p", ",".join(str(pid) for pid in possible)],
             capture_output=True,
             text=True,
             env=env,
@@ -121,10 +136,11 @@ def _running_from_ps(pids: list[int]) -> dict[int, str]:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise MachineError(f"cannot list processes with ps: {exc}") from exc
-    # ps exits with status 1 when none of the processes runs.
-    if result.returncode not in (0, 1):
-        raise MachineError(f"ps failed with exit status {result.returncode}")
+        # On macOS, ps is a setuid program, and a sandboxed process cannot start one.
+        raise MachineError(f"cannot run ps: {exc}. {_OUTSIDE_SANDBOX}") from exc
+    # The query always includes banksman itself, so ps must find at least one process.
+    if result.returncode != 0:
+        raise MachineError(f"ps failed with exit status {result.returncode}. {_OUTSIDE_SANDBOX}")
     running = {}
     for line in result.stdout.splitlines():
         fields = line.split()
