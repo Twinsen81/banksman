@@ -99,9 +99,12 @@ leases instead.
   clock starts again at every boot, so this check also keeps the deadlines of two boots
   apart.
 - **Reaping in two steps.** Under the lock, the reaper marks a void lease `draining`, which
-  fails every ownership check. Outside the lock, it takes the resource back (section 4).
-  Then, under the lock again, it deletes the lease, but only if the file still holds the
-  same lease. The next reaper finishes a `draining` lease that a reaper left when it died.
+  fails every ownership check, and records its own pid and start time in the lease. Outside
+  the lock, it takes the resource back (section 4). Then, under the lock again, it deletes
+  the lease, but only if the file still holds the same lease. Only one reaper takes a lease
+  back: another reaper leaves a `draining` lease alone while the reaper named in it runs,
+  and finishes it only after that reaper has ended. So a late take-back never acts on a
+  newer lease.
 - **Damaged lease files.** A lease file with a newer `schema` stops every command, because
   two versions of banksman must not share one state directory. A lease file that cannot be
   read keeps its resource out of use, and `status` shows it. Other resources are not

@@ -82,8 +82,8 @@ class Reaped:
 
 
 # Frees the resource of a void lease. Returns False when that cannot be confirmed; the lease
-# is then quarantined. It must be safe to run twice for one lease: two reapers can take the
-# same lease back at the same time, and a reaper that died leaves its lease to the next one.
+# is then quarantined. Only one reaper at a time runs it for a lease, but a reaper that ended
+# in the middle leaves the lease to the next one, so it must be safe to run again.
 TakeBack = Callable[[Lease], bool]
 
 
@@ -160,37 +160,44 @@ class Store:
     def reap(self) -> list[Reaped]:
         """Take back the resources of void leases, and delete those leases."""
         with self._lock():
+            leases = [entry for entry in self._scan() if isinstance(entry, Lease)]
+            if not leases:
+                return []
             boot_id = self.system.boot_id()
             now = self.system.clock()
-            leases = [entry for entry in self._scan() if isinstance(entry, Lease)]
-            running = self._running_owners(leases, boot_id)
-            draining = []
+            running = self._running(leases, boot_id)
+            me = self._me(running)
+            mine = []
             for lease in leases:
                 reason = self._reap_reason(lease, boot_id, now, running)
                 if reason is not None:
-                    lease = self._write(replace(lease, state=DRAINING, void_reason=reason))
-                if lease.state == DRAINING:
-                    draining.append(lease)
+                    lease = replace(lease, state=DRAINING, void_reason=reason)
+                elif lease.state != DRAINING or _other_reaper_runs(lease, boot_id, running, me):
+                    continue
+                # Only one reaper takes a lease back, and another one takes it over only after
+                # that reaper has ended. So a late take-back never acts on a newer lease.
+                mine.append(self._write(replace(lease, reaper_pid=me[0], reaper_started=me[1])))
         reaped = []
-        for lease in draining:
+        for lease in mine:
             # Taking a resource back can take seconds, for example to wait for processes to
             # end, so it runs outside the lock. No ownership check passes a draining lease.
             freed = self._take_back(lease)
             with self._lock():
                 current = self._read(lease.resource)
-                # Another reaper can have finished this lease, and the resource can have a
-                # new lease already.
                 if (
                     not isinstance(current, Lease)
                     or current.lease_id != lease.lease_id
                     or current.state != DRAINING
+                    or (current.reaper_pid, current.reaper_started) != me
                 ):
                     continue
                 if freed:
                     self._delete(lease.resource)
                     reaped.append(Reaped(current, RELEASED))
                 else:
-                    quarantined = self._write(replace(current, state=QUARANTINED))
+                    quarantined = self._write(
+                        replace(current, state=QUARANTINED, reaper_pid=None, reaper_started=None)
+                    )
                     reaped.append(Reaped(quarantined, QUARANTINED))
         return reaped
 
@@ -272,14 +279,24 @@ class Store:
             running=self.system.running(pids) if pids else {},
         )
 
-    def _running_owners(self, leases: list[Lease], boot_id: str) -> dict[int, str]:
-        # A pid from an earlier boot names a different process, if it names one at all.
-        pids = [
-            lease.owner_pid
-            for lease in leases
-            if lease.owner_pid is not None and lease.boot_id == boot_id and lease.state in HELD
-        ]
-        return self.system.running(pids) if pids else {}
+    def _running(self, leases: list[Lease], boot_id: str) -> dict[int, str]:
+        pids = {os.getpid()}
+        for lease in leases:
+            # A pid from an earlier boot names a different process, if it names one at all.
+            if lease.boot_id != boot_id:
+                continue
+            if lease.state in HELD and lease.owner_pid is not None:
+                pids.add(lease.owner_pid)
+            if lease.state == DRAINING and lease.reaper_pid is not None:
+                pids.add(lease.reaper_pid)
+        return self.system.running(pids)
+
+    @staticmethod
+    def _me(running: dict[int, str]) -> tuple[int, str]:
+        started = running.get(os.getpid())
+        if started is None:
+            raise StoreError("cannot read the start time of this banksman process")
+        return os.getpid(), started
 
     @staticmethod
     def _reap_reason(
@@ -430,6 +447,15 @@ class Store:
             if name.startswith(_TEMP_PREFIX):
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(self.directory / name)
+
+
+def _other_reaper_runs(
+    lease: Lease, boot_id: str, running: dict[int, str], me: tuple[int, str]
+) -> bool:
+    claim = (lease.reaper_pid, lease.reaper_started)
+    if lease.reaper_pid is None or claim == me or lease.boot_id != boot_id:
+        return False
+    return running.get(lease.reaper_pid) == lease.reaper_started
 
 
 def _check_ownership(path: Path, info: os.stat_result) -> None:

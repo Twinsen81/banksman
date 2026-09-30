@@ -1,10 +1,9 @@
 import json
-import os
 import subprocess
 import sys
 
 import pytest
-from helpers import SRC, edit_lease
+from helpers import age_lease, edit_lease, reap_in_child
 
 from banksman import SCHEMA_VERSION, __version__
 from banksman.cli import main
@@ -61,7 +60,7 @@ def test_status_lists_the_leases(capsys, state_dir):
 
 def test_status_reaps_first(capsys, state_dir):
     Store(state_dir, Machine()).acquire("phone-1", "device", OWNER)
-    _age_lease(state_dir, "phone-1", 21 * 60)
+    age_lease(state_dir, "phone-1", 21 * 60)
     assert main(["status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["leases"] == []
 
@@ -77,7 +76,7 @@ def test_status_removes_terminal_control_sequences(capsys, state_dir):
 
 def test_reap_reports_what_it_took_back(capsys, state_dir):
     Store(state_dir, Machine()).acquire("phone-1", "device", OWNER)
-    _age_lease(state_dir, "phone-1", 21 * 60)
+    age_lease(state_dir, "phone-1", 21 * 60)
     assert main(["reap", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "schema": SCHEMA_VERSION,
@@ -91,6 +90,13 @@ def test_reap_reports_what_it_took_back(capsys, state_dir):
             }
         ],
     }
+
+
+def test_status_survives_a_lease_file_with_infinity(capsys, state_dir):
+    Store(state_dir, Machine()).acquire("phone-1", "device", OWNER)
+    edit_lease(state_dir, "phone-1", lambda data: data.update(acquired_at=float("inf")))
+    assert main(["status"]) == 0
+    assert "unreadable lease file" in capsys.readouterr().out
 
 
 def test_reap_with_nothing_to_do(capsys):
@@ -112,11 +118,11 @@ def test_a_killed_owner_frees_its_lease(state_dir):
     try:
         Store(state_dir, Machine()).acquire("phone-1", "device", OWNER, owner_pid=owner.pid)
         # The last touch was 6 minutes ago: past the grace period, not yet idle.
-        _age_lease(state_dir, "phone-1", 6 * 60)
-        assert _reap_in_child(state_dir) == []
+        age_lease(state_dir, "phone-1", 6 * 60)
+        assert reap_in_child(state_dir) == []
         owner.kill()
         owner.wait()
-        (reaped,) = _reap_in_child(state_dir)
+        (reaped,) = reap_in_child(state_dir)
         assert (reaped["resource"], reaped["void_reason"], reaped["outcome"]) == (
             "phone-1",
             "owner_gone",
@@ -137,24 +143,3 @@ def test_abbreviated_flags_are_refused():
     with pytest.raises(SystemExit) as exc:
         main(["status", "--js"])
     assert exc.value.code == 2
-
-
-def _age_lease(state_dir, resource, seconds):
-    def change(data):
-        data["awake"]["touched"] -= seconds
-        data["touched_at"] -= seconds
-
-    edit_lease(state_dir, resource, change)
-
-
-def _reap_in_child(state_dir):
-    result = subprocess.run(
-        [sys.executable, "-m", "banksman", "reap", "--json"],
-        env={**os.environ, "BANKSMAN_STATE_DIR": str(state_dir), "PYTHONPATH": SRC},
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=60,
-    )
-    return json.loads(result.stdout)["reaped"]
-

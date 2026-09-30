@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -35,6 +36,8 @@ RESOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}")
 KIND_NAME = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _MAX_OWNER_LENGTH = 1024
+# The last second that a date can show: 9999-12-31 23:59:59 UTC.
+_MAX_WALL_TIME = 253_402_300_799
 
 
 class LeaseFormatError(BanksmanError):
@@ -75,6 +78,9 @@ class Lease:
     idle_timeout: float | None
     owner_grace: float
     void_reason: str | None = None
+    # The reaper that takes a draining lease back.
+    reaper_pid: int | None = None
+    reaper_started: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -97,6 +103,8 @@ class Lease:
             "idle_timeout": self.idle_timeout,
             "owner_grace": self.owner_grace,
             "void_reason": self.void_reason,
+            "reaper_pid": self.reaper_pid,
+            "reaper_started": self.reaper_started,
         }
 
     @classmethod
@@ -117,17 +125,23 @@ class Lease:
             owner_pid=_get(data, "owner_pid", _optional(_is_pid)),
             owner_started=_get(data, "owner_started", _optional(_is_text)),
             boot_id=_get(data, "boot_id", _is_text),
-            acquired_at=_get(data, "acquired_at", _is_number),
-            touched_at=_get(data, "touched_at", _is_number),
+            acquired_at=_get(data, "acquired_at", _is_wall_time),
+            touched_at=_get(data, "touched_at", _is_wall_time),
             touched=_get(awake, "touched", _is_number),
             boot_deadline=_get(awake, "boot_deadline", _optional(_is_number)),
             hard_deadline=_get(awake, "hard_deadline", _is_number),
             idle_timeout=_get(data, "idle_timeout", _optional(_is_number)),
             owner_grace=_get(data, "owner_grace", _is_number),
             void_reason=_get(data, "void_reason", _optional(_is_void_reason)),
+            reaper_pid=_get(data, "reaper_pid", _optional(_is_pid)),
+            reaper_started=_get(data, "reaper_started", _optional(_is_text)),
         )
         if (lease.owner_pid is None) != (lease.owner_started is None):
             raise LeaseFormatError("owner_pid and owner_started must both be set or both be null")
+        if (lease.reaper_pid is None) != (lease.reaper_started is None):
+            raise LeaseFormatError(
+                "reaper_pid and reaper_started must both be set or both be null"
+            )
         if lease.state == BOOTING and lease.boot_deadline is None:
             raise LeaseFormatError("a booting lease needs a boot deadline")
         if lease.state not in HELD and lease.void_reason is None:
@@ -189,7 +203,12 @@ def _is_text(value: object) -> bool:
 
 
 def _is_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    # json.loads accepts NaN and Infinity, and either would stop a lease from expiring.
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _is_wall_time(value: object) -> bool:
+    return _is_number(value) and 0 <= value <= _MAX_WALL_TIME  # type: ignore[operator]
 
 
 def _is_pid(value: object) -> bool:

@@ -7,7 +7,7 @@ import sys
 import time
 
 import pytest
-from helpers import SRC, edit_lease
+from helpers import SRC, age_lease, edit_lease, reap_in_child
 
 from banksman import SCHEMA_VERSION
 from banksman.errors import BanksmanError
@@ -32,6 +32,7 @@ from banksman.store import (
     Unreadable,
     default_state_dir,
 )
+from banksman.system import Machine
 
 OWNER = "/work/tree-a"
 OTHER = "/work/tree-b"
@@ -242,6 +243,7 @@ def test_a_resource_that_cannot_be_taken_back_is_quarantined(state_dir, system):
     system.advance(24 * 60 * 60)
     assert reaped(store) == []
     assert lease_file(state_dir, "phone-1")["state"] == QUARANTINED
+    assert lease_file(state_dir, "phone-1")["reaper_pid"] is None
     with pytest.raises(Busy, match="quarantined"):
         store.acquire("phone-1", "device", OTHER)
     # After a restart, no process of the earlier boot can still use the resource.
@@ -270,6 +272,73 @@ def test_a_draining_lease_left_by_a_dead_reaper_is_finished(store, system, state
     store.acquire("phone-1", "device", OWNER)
     edit_lease(state_dir, "phone-1", lambda data: data.update(state=DRAINING, void_reason=IDLE))
     assert reaped(store) == [("phone-1", IDLE, RELEASED)]
+
+
+def taken_back_by(pid):
+    return lambda data: data.update(
+        state=DRAINING, void_reason=IDLE, reaper_pid=pid, reaper_started=f"start-{pid}"
+    )
+
+
+def test_a_lease_that_a_running_reaper_takes_back_is_left_to_it(store, system, state_dir):
+    store.acquire("phone-1", "device", OWNER)
+    system.processes = {4242: "start-4242"}
+    edit_lease(state_dir, "phone-1", taken_back_by(4242))
+    assert reaped(store) == []
+    assert lease_file(state_dir, "phone-1")["reaper_pid"] == 4242
+
+
+def test_the_lease_of_a_reaper_that_ended_is_taken_over(store, system, state_dir):
+    store.acquire("phone-1", "device", OWNER)
+    edit_lease(state_dir, "phone-1", taken_back_by(4242))
+    assert reaped(store) == [("phone-1", IDLE, RELEASED)]
+
+
+def test_a_reaper_finishes_its_own_lease_after_a_failed_take_back(state_dir, system):
+    attempts = []
+
+    def take_back(lease):
+        attempts.append(lease.lease_id)
+        if len(attempts) == 1:
+            raise OSError("the device did not answer")
+        return True
+
+    store = Store(state_dir, system, take_back=take_back)
+    store.acquire("phone-1", "device", OWNER)
+    system.advance(20 * 60)
+    with pytest.raises(OSError):
+        store.reap()
+    assert reaped(store) == [("phone-1", IDLE, RELEASED)]
+    assert len(attempts) == 2
+
+
+def test_a_reaper_leaves_a_lease_that_another_reaper_took_over(state_dir, system):
+    def take_back(lease):
+        system.processes = {4242: "start-4242"}
+        edit_lease(state_dir, "phone-1", taken_back_by(4242))
+        return True
+
+    store = Store(state_dir, system, take_back=take_back)
+    store.acquire("phone-1", "device", OWNER)
+    system.advance(20 * 60)
+    assert reaped(store) == []
+    assert lease_file(state_dir, "phone-1")["reaper_pid"] == 4242
+
+
+def test_only_one_reaper_takes_a_lease_back(state_dir):
+    # Two reapers in two processes: the second one runs while the first takes the lease back.
+    machine = Machine()
+    Store(state_dir, machine).acquire("phone-1", "device", OWNER)
+    age_lease(state_dir, "phone-1", 21 * 60)
+    second = []
+
+    def take_back(lease):
+        second.append(reap_in_child(state_dir))
+        return True
+
+    first = Store(state_dir, machine, take_back=take_back).reap()
+    assert second == [[]]
+    assert [(item.lease.resource, item.outcome) for item in first] == [("phone-1", RELEASED)]
 
 
 def test_the_reaper_does_not_delete_a_newer_lease(state_dir, system):

@@ -1,6 +1,9 @@
 """Fakes and helpers that the tests share."""
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import banksman
@@ -28,7 +31,9 @@ class FakeSystem:
         return self.wall
 
     def running(self, pids):
-        return {pid: self.processes[pid] for pid in pids if pid in self.processes}
+        # Like the real machine, the process that asks always runs.
+        known = {os.getpid(): "start-self", **self.processes}
+        return {pid: known[pid] for pid in pids if pid in known}
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
@@ -41,3 +46,26 @@ def edit_lease(state_dir: Path, resource: str, change) -> None:
     data = json.loads(path.read_text())
     change(data)
     path.write_text(json.dumps(data))
+
+
+def age_lease(state_dir: Path, resource: str, seconds: float) -> None:
+    """Move the last touch of a lease into the past."""
+
+    def change(data):
+        data["awake"]["touched"] -= seconds
+        data["touched_at"] -= seconds
+
+    edit_lease(state_dir, resource, change)
+
+
+def reap_in_child(state_dir: Path) -> list:
+    """Run `banksman reap --json` in its own process and return what it reaped."""
+    result = subprocess.run(
+        [sys.executable, "-m", "banksman", "reap", "--json"],
+        env={**os.environ, "BANKSMAN_STATE_DIR": str(state_dir), "PYTHONPATH": SRC},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    return json.loads(result.stdout)["reaped"]

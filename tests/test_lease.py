@@ -91,7 +91,9 @@ def test_a_lease_without_an_idle_timeout_lives_until_its_hard_cap():
 
 
 def test_json_round_trip():
-    for lease in (LEASE, OWNED, replace(LEASE, state=BOOTING, boot_deadline=START + 300)):
+    draining = replace(LEASE, state=DRAINING, void_reason=IDLE, reaper_pid=7, reaper_started="s")
+    booting = replace(LEASE, state=BOOTING, boot_deadline=START + 300)
+    for lease in (LEASE, OWNED, booting, draining):
         assert Lease.from_json(lease.to_json()) == lease
 
 
@@ -115,6 +117,12 @@ def _without_awake(data):
         lambda data: data.update(owner_pid=42),
         lambda data: data.update(void_reason=["idle"]),
         lambda data: data["awake"].update(touched="soon"),
+        lambda data: data["awake"].update(hard_deadline=float("nan")),
+        lambda data: data["awake"].update(touched=float("-inf")),
+        lambda data: data.update(acquired_at=float("inf")),
+        lambda data: data.update(touched_at=1e300),
+        lambda data: data.update(idle_timeout=float("inf")),
+        lambda data: data.update(reaper_pid=7),
         lambda data: data.update(state=BOOTING),
         lambda data: data.update(state=DRAINING),
         _without_awake,
