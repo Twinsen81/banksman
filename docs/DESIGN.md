@@ -14,7 +14,8 @@ Goals:
 - Parallel runs on one machine share scarce resources without using the same one at the
   same time. The resources are physical devices, emulators, memory for heavy builds, and
   things that live on a device, such as a signed-in account.
-- A dead, hung, or forgotten run can never hold a resource forever.
+- A dead, hung, or forgotten run can never hold a resource forever. If a script of a void
+  lease does not stop, the resource waits for a person (section 4).
 - A person and an agent can both see what exists, who holds it, why, and when it will be
   free.
 - It works the same for any coding agent, and for scripts that a person runs.
@@ -65,7 +66,9 @@ leases instead.
   deadline, before the resource is started. A resource that is still starting therefore
   always has a lease, and cannot be mistaken for an orphan.
 - **Void triggers.** A lease is void when any of these is true. The defaults are starting
-  values, to be tuned by measurement.
+  values, to be tuned by measurement. The operator can change each of them in the
+  configuration, for all kinds or for one kind. A lease keeps the values that it was
+  created with.
 
   | Trigger | Default | Catches |
   |---|---|---|
@@ -113,24 +116,29 @@ minutes, and its lease can become void in the middle.
   group, start time) and leaves when it exits. A long-running script runs its work in its
   own process group, and its touch loop also checks ownership. When the lease is lost or
   draining, the loop kills its own process group.
-- **The reaper's side.** For a void lease, the reaper first marks it `draining`, so that no
-  further ownership check passes. Then it sends SIGTERM to every registered process group
-  or pid, waits, sends SIGKILL, and confirms death by pid and start time. It never trusts
-  an exit code alone.
-- **Never the agent or the app.** The reaper signals whole process groups, and the kernel
-  does not stop it from signalling the user's own programs. An agent can share one process
-  group with the app that runs it, so one signal to that group would stop the app and every
-  session in it. So `enter` accepts a process group only if the script created it for its
+- **The reaper's side: no signals by default.** For a void lease, the reaper first marks it
+  `draining`, so that no further ownership check passes. By default it sends no signal to
+  any process. It waits until every registered script has stopped itself, confirms that by
+  pid and start time, and then frees the resource. If a script still runs after a
+  deadline, the lease is quarantined: it is never handed on, and it stays in `status` until
+  a person runs `banksman admin release --force`. While stopping is off, `banksman log`
+  records which processes the reaper would have stopped. The reason: banksman must never
+  stop a process that the user did not expect, whatever agent the user runs. A blocked
+  device costs time; a stopped process costs trust.
+- **Stopping is opt-in.** The operator can turn stopping on for a kind in the
+  configuration. The reaper then sends SIGTERM to every registered process group or pid,
+  waits, sends SIGKILL, and confirms death by pid and start time. It never trusts an exit
+  code alone. For a resource that can be killed, such as an emulator, the operator can also
+  let the kind's `on_void` hook kill it; the kill is then the fence.
+- **Never the agent or the app.** When stopping is on, the reaper signals whole process
+  groups, and the kernel does not stop it from signalling the user's own programs. An agent
+  can share one process group with the app that runs it, so one signal to that group would
+  stop the app and every session in it. So `enter` accepts a process group only if the script created it for its
   work: the group leader is the script or a process that the script started. A script
   without its own group registers only its pid, and the reaper then signals only that pid.
   `enter` also refuses a group that contains the owner agent process or any process above
   it. Right before each signal, the reaper checks the pid and the start time again, so it
   never signals a pid that the system gave to a new process.
-- **Killable and unkillable kinds.** For a resource that can be killed, such as an emulator,
-  the kill is the fence. A resource that cannot be killed, such as a physical device, is
-  released only after all its users are confirmed dead. If that cannot be confirmed, the
-  lease is quarantined: it is never handed on, and it stays in `status` until a person runs
-  `banksman admin release --force`.
 - **Reaping** runs at the start of every command, and whenever a caller runs `banksman reap`.
 
 ## 5. Kinds are configuration
@@ -140,8 +148,10 @@ not code.
 
 - A kind declares whether it is named or counted, how to `discover` its instances, what to
   run `on_acquire` to reset one, and what to run `on_void` to take one back.
-- Whether a void instance can be killed, or must be quarantined, is a property of the kind.
-  The reaper has no branch for a specific kind.
+- Whether the reaper may stop the scripts of a void instance, or kill the instance, is a
+  setting of the kind. It is off unless the operator turns it on, also in the presets. The
+  reaper has no branch for a specific kind.
+- A kind can set its own timeouts, for example no idle timeout for build slots.
 - Counted kinds need no hooks.
 - Hooks do device-level work only. App-level work stays in the project's scripts.
 - Presets can ship for common kinds: Android emulators, Android devices, and build slots.

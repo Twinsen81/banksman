@@ -21,9 +21,10 @@ otherwise.
 banksman runs on one machine, as the user who calls it. It has no daemon, no listening
 port, and no network access. The design is in [docs/DESIGN.md](docs/DESIGN.md).
 
-**The lease state belongs to one user.** The reaper sends signals to the process groups
-that a lease file lists. If another local user could write lease files, that user could
-make the reaper kill the owner's processes. So the state directory, `/tmp/banksman-<uid>`,
+**The lease state belongs to one user.** When the operator turns stopping on, the reaper
+sends signals to the process groups that a lease file lists; by default it sends none. If
+another local user could write lease files, that user could make the reaper kill the
+owner's processes. So the state directory, `/tmp/banksman-<uid>`,
 is created with mode `0700`, and banksman refuses to use a directory, or a lease file, that
 another user owns or that group or others can write to. The kernel also checks every
 signal, so the reaper can never signal another user's processes. The kernel does not
