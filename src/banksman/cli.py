@@ -9,11 +9,12 @@ import time
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
-from banksman import SCHEMA_VERSION, __version__
+from banksman import SCHEMA_VERSION, __version__, hooks
+from banksman.config import Config, load_config
 from banksman.errors import BanksmanError
 from banksman.lease import QUARANTINED, VOID_REASONS, Lease
 from banksman.sanitize import clean
-from banksman.store import Reaped, Store, default_state_dir
+from banksman.store import Reaped, Store, TakeBack, default_state_dir
 from banksman.system import Machine
 
 VERSION_LINE = f"banksman {__version__} (schema {SCHEMA_VERSION})"
@@ -69,7 +70,17 @@ def _local(timestamp: float) -> str:
 
 
 def _open_store() -> Store:
-    return Store(default_state_dir(), Machine())
+    return Store(default_state_dir(), Machine(), take_back=_take_back(load_config()))
+
+
+def _take_back(config: Config) -> TakeBack:
+    def take_back(lease: Lease) -> bool:
+        failure = hooks.take_back(config.kinds, lease)
+        if failure is not None:
+            print(clean(f"banksman: cannot take back {lease.resource}: {failure}"), file=sys.stderr)
+        return failure is None
+
+    return take_back
 
 
 def _lease_json(lease: Lease) -> dict[str, object]:

@@ -48,12 +48,13 @@ class LeaseFormatError(BanksmanError):
 class Timeouts:
     """How long a lease can live, in seconds of awake time.
 
-    The defaults are starting values, to be tuned by measurement.
+    The field names are the keys of the configuration file. The defaults are starting values,
+    to be tuned by measurement.
     """
 
-    boot: float = 5 * 60
+    boot_timeout: float = 5 * 60
     owner_grace: float = 5 * 60
-    idle: float | None = 20 * 60
+    idle_timeout: float | None = 20 * 60
     hard_cap: float = 3 * 60 * 60
 
 

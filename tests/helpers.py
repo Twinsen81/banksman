@@ -40,6 +40,18 @@ class FakeSystem:
         self.wall += seconds
 
 
+def write_config(path: Path, text: str) -> Path:
+    """Write a configuration file that banksman accepts, whatever the umask is."""
+    path.write_text(text)
+    path.chmod(0o600)
+    return path
+
+
+def hook(code: str, *args: str) -> list[str]:
+    """Return a hook command that runs Python code in a new interpreter."""
+    return [sys.executable, "-c", code, *args]
+
+
 def edit_lease(state_dir: Path, resource: str, change) -> None:
     """Change a lease file in place, as a crash or another banksman could leave it."""
     path = state_dir / f"{resource}.json"

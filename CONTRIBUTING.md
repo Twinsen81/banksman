@@ -26,7 +26,9 @@ that already run on the machine.
 ## Project layout
 
 - `src/banksman/`: the package. `cli.py` is the entry point, `store.py` keeps the lease
-  files, and `system.py` is the only module that reads the process list and the boot id.
+  files, `config.py` reads the configuration file, `hooks.py` is the only module that runs
+  hook programs, and `system.py` is the only module that reads the process list and the
+  boot id.
 - `tests/`: the pytest suite.
 - `docs/DESIGN.md`: architecture and behavior. Read it before proposing structural changes.
 - `DECISIONS.md`: resolved design decisions and how to change them.
