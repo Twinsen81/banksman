@@ -15,13 +15,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from banksman.errors import BanksmanError
-from banksman.lease import KIND_NAME, Timeouts
+from banksman.lease import KIND_NAME, RESOURCE_NAME, Timeouts
 
 CONFIG_ENV = "BANKSMAN_CONFIG"
 MAX_COUNT = 1000
 
 _TIMEOUT_KEYS = ("boot_timeout", "owner_grace", "idle_timeout", "hard_cap")
-_KIND_KEYS = ("count", "on_void", *_TIMEOUT_KEYS)
+_KIND_KEYS = ("count", "instances", "on_void", *_TIMEOUT_KEYS)
 _DURATION = re.compile(r"([0-9]{1,7})([smh])")
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 60 * 60}
 _OFF = "off"
@@ -35,18 +35,24 @@ class ConfigError(BanksmanError):
 class Kind:
     name: str
     timeouts: Timeouts = Timeouts()
-    # A counted kind has this many interchangeable instances. A named kind has None: its
-    # instances come from discovery.
+    # A counted kind has this many interchangeable instances.
     count: int | None = None
+    # The instances that the operator lists by name with the `instances` key, for example
+    # port numbers.
+    listed: tuple[str, ...] = ()
     # The command that ends a void instance. The reaper ends an instance only if the operator
     # declares one.
     on_void: tuple[str, ...] | None = None
 
     def instances(self) -> tuple[str, ...]:
-        """Return the resources of a counted kind: `<name>-0`, `<name>-1`, and so on."""
-        if self.count is None:
-            return ()
-        return tuple(f"{self.name}-{index}" for index in range(self.count))
+        """Return the instances that the configuration declares.
+
+        A counted kind has `<name>-0`, `<name>-1`, and so on. A kind with neither `count` nor
+        `instances` gets its instances from discovery.
+        """
+        if self.count is not None:
+            return tuple(f"{self.name}-{index}" for index in range(self.count))
+        return self.listed
 
 
 @dataclass(frozen=True)
@@ -127,11 +133,10 @@ def _config(data: dict[str, object]) -> Config:
     table = _table(data.get("defaults", {}), "defaults")
     _check_keys(table, "defaults", _TIMEOUT_KEYS)
     defaults = _timeouts(table, "defaults", Timeouts())
-    kinds = _table(data.get("kinds", {}), "kinds")
-    return Config(
-        defaults=defaults,
-        kinds={name: _kind(name, value, defaults) for name, value in kinds.items()},
-    )
+    table = _table(data.get("kinds", {}), "kinds")
+    kinds = {name: _kind(name, value, defaults) for name, value in table.items()}
+    _check_unique_instances(kinds)
+    return Config(defaults=defaults, kinds=kinds)
 
 
 def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
@@ -144,12 +149,30 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
         )
     table = _table(value, where)
     _check_keys(table, where, _KIND_KEYS)
+    count = _count(table.get("count"), f"{where}.count")
+    listed = _instances(table.get("instances"), f"{where}.instances")
+    if count is not None and listed:
+        raise _Invalid(f"{where}.instances", "a kind has either count or instances, not both")
     return Kind(
         name=name,
         timeouts=_timeouts(table, where, defaults),
-        count=_count(table.get("count"), f"{where}.count"),
+        count=count,
+        listed=listed,
         on_void=_command(table.get("on_void"), f"{where}.on_void"),
     )
+
+
+def _check_unique_instances(kinds: Mapping[str, Kind]) -> None:
+    # Each resource has one lease file, so two kinds must not declare the same instance.
+    owners: dict[str, str] = {}
+    for kind in kinds.values():
+        for instance in kind.instances():
+            other = owners.setdefault(instance, kind.name)
+            if other != kind.name:
+                key = "instances" if kind.listed else "count"
+                raise _Invalid(
+                    f"kinds.{kind.name}.{key}", f"{instance!r} is also an instance of kind {other}"
+                )
 
 
 def _timeouts(table: dict[str, object], where: str, base: Timeouts) -> Timeouts:
@@ -185,6 +208,28 @@ def _count(value: object, where: str) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= MAX_COUNT:
         raise _Invalid(where, f"must be a whole number from 1 to {MAX_COUNT}")
     return value
+
+
+def _instances(value: object, where: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= MAX_COUNT
+        or not all(isinstance(name, str) and RESOURCE_NAME.fullmatch(name) for name in value)
+    ):
+        raise _Invalid(
+            where,
+            f'must be a list of 1 to {MAX_COUNT} resource names, such as ["9101", "9102"]. A'
+            " resource name starts with a letter or a digit, has only letters, digits, '.',"
+            " '_', ':', '@', '+', and '-', and has at most 128 characters",
+        )
+    seen: set[str] = set()
+    for name in value:
+        if name in seen:
+            raise _Invalid(where, f"lists {name!r} twice")
+        seen.add(name)
+    return tuple(value)
 
 
 def _command(value: object, where: str) -> tuple[str, ...] | None:

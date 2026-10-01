@@ -36,8 +36,8 @@ Non-goals:
 |---|---|
 | Resource | One thing that can be leased: a device serial, an emulator, a build slot, an account. |
 | Kind | A class of resources, declared in configuration: how to find instances, how to reset one, how to take one back. |
-| Named kind | Instances have identities: serials, emulator names, account addresses. |
-| Counted kind | Instances are interchangeable slots: build slots, ports, licence seats. |
+| Named kind | Instances have identities: serials, emulator names, account addresses, or names that the operator lists, such as port numbers. |
+| Counted kind | Instances are interchangeable slots: build slots, licence seats. |
 | Lease | The record that one holder may use one resource until the lease is released or void. |
 | Holder | Who holds a lease: the worktree, the issue, the agent process, and a purpose. |
 | Inventory | The allowlist of resources that agents may use at all. |
@@ -164,8 +164,11 @@ not code.
   uses the default timeouts. A key that banksman does not know is an error, so that a
   misspelled key is never ignored.
 - **Kinds.** Each `[kinds.<name>]` table declares a kind. A kind with `count` is counted:
-  its instances are `<name>-0`, `<name>-1`, and so on. A kind without `count` is named, and
-  its instances come from discovery (section 8). Counted kinds need no hooks.
+  its instances are `<name>-0`, `<name>-1`, and so on. A kind can instead list its
+  instances by name with `instances`, for example port numbers; a run then gets the port
+  itself as its resource. A kind with neither gets its instances from discovery
+  (section 8). An instance name must be unique across all kinds, because each resource has
+  one lease file. Counted kinds need no hooks.
 - **Timeouts.** `[defaults]` sets the timeouts of section 3 for every kind, and a kind can
   set its own. A duration is a whole number and a unit: `90s`, `20m`, or `3h`.
   `idle_timeout = "off"` turns the idle timeout off, for example for build slots. An
@@ -184,6 +187,9 @@ not code.
   count = 4
   owner_grace = "0s"
   idle_timeout = "off"
+
+  [kinds.port]
+  instances = ["9101", "9102", "9103"]
 
   [kinds.emulator]
   boot_timeout = "8m"
@@ -387,8 +393,8 @@ Done:
 
 - Project scaffold: package, CLI with `version` and `status`, tests, CI.
 - The lease core: lease files, the file lock, states, void triggers, reaping.
-- Kinds as configuration: the configuration file, counted kinds, timeouts for each kind,
-  and the `on_void` hook.
+- Kinds as configuration: the configuration file, counted kinds, kinds that list their
+  instances, timeouts for each kind, and the `on_void` hook.
 
 Next:
 

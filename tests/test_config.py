@@ -73,6 +73,14 @@ def test_a_counted_kind_has_numbered_instances_and_a_named_kind_has_none(config_
     assert kinds["device"].instances() == ()
 
 
+def test_a_kind_can_list_its_instances_by_name(config_path, store):
+    write_config(config_path, '[kinds.port]\ninstances = ["9101", "9102", "9103"]\n')
+    port = load_config().kinds["port"]
+    assert (port.count, port.instances()) == (None, ("9101", "9102", "9103"))
+    lease = store.acquire(port.instances()[1], port.name, OWNER, timeouts=port.timeouts)
+    assert (lease.resource, lease.kind) == ("9102", "port")
+
+
 def test_on_void_is_a_program_and_its_arguments(config_path):
     write_config(config_path, '[kinds.emulator]\non_void = ["/opt/bin/stop-avd", "--now"]\n')
     assert load_config().kinds["emulator"].on_void == ("/opt/bin/stop-avd", "--now")
@@ -128,6 +136,23 @@ def test_text_that_is_not_a_duration_is_refused(text):
         ("[kinds.build]\ncount = true", "kinds.build.count"),
         (f"[kinds.build]\ncount = {MAX_COUNT + 1}", "kinds.build.count"),
         ("[kinds.build]\nowner_grace = '-1s'", "kinds.build.owner_grace"),
+        ("[kinds.port]\ninstances = []", "kinds.port.instances"),
+        ("[kinds.port]\ninstances = '9101'", "kinds.port.instances"),
+        ("[kinds.port]\ninstances = [9101]", "kinds.port.instances"),
+        ("[kinds.port]\ninstances = ['../9101']", "kinds.port.instances"),
+        ("[kinds.port]\ninstances = ['91 01']", "kinds.port.instances"),
+        ("[kinds.port]\ninstances = ['9101', '9102', '9101']", "kinds.port.instances"),
+        (
+            "[kinds.port]\ninstances = [" + ", ".join(f"'{n}'" for n in range(MAX_COUNT + 1)) + "]",
+            "kinds.port.instances",
+        ),
+        ("[kinds.port]\ncount = 2\ninstances = ['9101']", "kinds.port.instances"),
+        ("[kinds.build]\ncount = 2\n[kinds.port]\ninstances = ['build-1']", "kinds.port.instances"),
+        ("[kinds.port]\ninstances = ['build-1']\n[kinds.build]\ncount = 2", "kinds.build.count"),
+        (
+            "[kinds.port]\ninstances = ['9101']\n[kinds.web]\ninstances = ['9101']",
+            "kinds.web.instances",
+        ),
         ("[kinds.emulator]\non_void = 'stop-avd'", "kinds.emulator.on_void"),
         ("[kinds.emulator]\non_void = []", "kinds.emulator.on_void"),
         ("[kinds.emulator]\non_void = ['', 'x']", "kinds.emulator.on_void"),
