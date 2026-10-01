@@ -9,6 +9,7 @@ import contextlib
 import fcntl
 import json
 import os
+import pwd
 import stat
 import tempfile
 import time
@@ -18,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from banksman import SCHEMA_VERSION
+from banksman import SCHEMA_VERSION, fencing
 from banksman.errors import BanksmanError
 from banksman.lease import (
     BOOTING,
@@ -27,18 +28,24 @@ from banksman.lease import (
     QUARANTINED,
     READY,
     REBOOTED,
+    RELEASE,
     VOID_REASONS,
     Lease,
     LeaseFormatError,
     Timeouts,
+    User,
     check_names,
+    check_resource,
     void_reason,
 )
-from banksman.system import System
+from banksman.system import OUTSIDE_SANDBOX, System
 
 STATE_DIR_ENV = "BANKSMAN_STATE_DIR"
+QUARANTINE_DIR_ENV = "BANKSMAN_QUARANTINE_DIR"
 LOCK_WAIT_SECONDS = 10.0
 RELEASED = "released"
+# A take-back that this many reapers started and none finished is quarantined.
+TAKE_BACK_ATTEMPTS = 3
 
 _LOCK_FILE = ".lock"
 _TEMP_PREFIX = ".tmp-"
@@ -78,13 +85,20 @@ class Snapshot:
 @dataclass(frozen=True)
 class Reaped:
     lease: Lease
-    outcome: str  # RELEASED or QUARANTINED
+    outcome: str  # RELEASED, DRAINING, or QUARANTINED
+    # The scripts that still ran: the lease waits for them, or is quarantined because of them.
+    running: tuple[User, ...] = ()
+    # Why the lease is quarantined, when the reaper itself found the reason.
+    problem: str | None = None
 
 
-# Frees the resource of a void lease. Returns False when that cannot be confirmed; the lease
-# is then quarantined. Only one reaper at a time runs it for a lease, but a reaper that ended
-# in the middle leaves the lease to the next one, so it must be safe to run again.
+# Ends the instance of a void lease, for example with the on_void hook of its kind. Returns
+# False when that cannot be confirmed; the lease is then quarantined. Only one reaper at a time
+# runs it for a lease, but a reaper that ended in the middle leaves the lease to the next one,
+# so it must be safe to run again.
 TakeBack = Callable[[Lease], bool]
+# Whether the reaper may signal the scripts of a void lease.
+Stopping = Callable[[Lease], bool]
 
 
 def default_state_dir() -> Path:
@@ -97,8 +111,34 @@ def default_state_dir() -> Path:
     return Path(f"/tmp/banksman-{os.geteuid()}")
 
 
+def default_quarantine_dir() -> Path:
+    override = os.environ.get(QUARANTINE_DIR_ENV)
+    if override:
+        return Path(override)
+    # Every command restores the quarantines into its state directory, so a state directory
+    # for tests keeps its own quarantines, and never mixes them with the real ones.
+    state_dir = os.environ.get(STATE_DIR_ENV)
+    if state_dir:
+        return Path(state_dir).with_name(f"{Path(state_dir).name}-quarantine")
+    # Outside /tmp: cleaners of temporary files delete old files there, and macOS empties it at
+    # boot, but a quarantine lasts until a person releases it. The home directory comes from
+    # the user database, as for the configuration file, so that every caller of one user finds
+    # the same quarantines.
+    try:
+        home = pwd.getpwuid(os.geteuid()).pw_dir
+    except KeyError as exc:
+        raise StoreError(
+            f"cannot find the home directory of user {os.geteuid()}; set {QUARANTINE_DIR_ENV}"
+        ) from exc
+    return Path(home) / ".local" / "state" / "banksman" / "quarantine"
+
+
 def _take_back_nothing(lease: Lease) -> bool:
     return True
+
+
+def _stop_nothing(lease: Lease) -> bool:
+    return False
 
 
 class Store:
@@ -108,11 +148,17 @@ class Store:
         system: System,
         *,
         take_back: TakeBack = _take_back_nothing,
+        stopping: Stopping = _stop_nothing,
+        quarantine_dir: Path | None = None,
         lock_wait: float = LOCK_WAIT_SECONDS,
     ) -> None:
         self.directory = Path(directory)
+        self.quarantine_dir = (
+            default_quarantine_dir() if quarantine_dir is None else Path(quarantine_dir)
+        )
         self.system = system
         self._take_back = take_back
+        self._stopping = stopping
         self._lock_wait = lock_wait
         self._locked = False
 
@@ -140,18 +186,60 @@ class Store:
         """Write a `ready` lease, for a resource that needs no start."""
         return self._grant(resource, kind, owner, owner_pid, READY, timeouts)
 
-    def ready(self, resource: str, owner: str) -> Lease:
+    def ready(self, resource: str, lease_id: str) -> Lease:
         with self._lock():
-            lease = self._held(resource, owner)
+            lease = self._held(resource, lease_id)
             if lease.state == READY:
                 return lease
             return self._write(replace(self._touched(lease, None), state=READY, boot_deadline=None))
 
     def touch(self, resource: str, owner: str, owner_pid: int | None = None) -> Lease:
         with self._lock():
-            return self._write(self._touched(self._held(resource, owner), owner_pid))
+            return self._write(self._touched(self._owned(resource, owner), owner_pid))
 
-    def release(self, resource: str, owner: str) -> None:
+    def enter(self, resource: str, lease_id: str, pid: int, pgid: int | None = None) -> Lease:
+        """Check the lease, touch it, and register a script as a user of the resource."""
+        with self._lock():
+            lease = self._held(resource, lease_id)
+            table = self.system.process_table()
+            user = fencing.register(table, lease, pid, pgid)
+            # A new record replaces the one of the same process and group, and the records of
+            # scripts that have ended go. Another group of the same process can still run.
+            users = [
+                other
+                for other in lease.users
+                if (other.pid, other.started, other.pgid) != (user.pid, user.started, user.pgid)
+                and fencing.runs(other, table)
+            ]
+            return self._write(replace(self._touched(lease, None), users=(*users, user)))
+
+    def check(self, resource: str, lease_id: str) -> Lease:
+        """Touch the lease while the caller may still use the resource, or raise NotHeld."""
+        with self._lock():
+            return self._write(self._touched(self._held(resource, lease_id), None))
+
+    def leave(self, resource: str, lease_id: str, pid: int) -> None:
+        """Remove the record of a script that no longer uses the resource."""
+        with self._lock():
+            lease = self._current(resource, lease_id)
+            if not any(user.pid == pid for user in lease.users):
+                return
+            table = self.system.process_table()
+            # The script runs this command itself, so banksman and the processes above it do
+            # not count. Any other process of the script still uses the resource.
+            caller = {os.getpid(), *fencing.ancestors(table, os.getpid())}
+            for user in lease.users:
+                still = fencing.processes_of(user, table) - caller if user.pid == pid else set()
+                if still:
+                    raise BanksmanError(
+                        f"process {min(still)} of the script still runs; stop the processes of the"
+                        " script before it leaves"
+                    )
+            others = tuple(user for user in lease.users if user.pid != pid)
+            self._write(replace(lease, users=others))
+
+    def release(self, resource: str, owner: str) -> Lease | None:
+        """Give the resource back. Return the lease while it drains, or None when it is free."""
         with self._lock():
             lease = self._read(resource)
             if (
@@ -161,7 +249,39 @@ class Store:
                 or lease.state not in HELD
             ):
                 raise NotHeld(f"{resource} is not held by this owner")
+            running = self._running_users(lease)
+            if not running:
+                self._delete(resource)
+                return None
+            # The scripts must end before the resource is handed on, as for a void lease. The
+            # holder gives the instance back as it is, so no hook ends it.
+            drained = _drained(replace(lease, users=running), RELEASE, self.system.clock())
+            return self._write(drained)
+
+    def force_release(self, resource: str) -> tuple[Lease | Unreadable, tuple[User, ...]]:
+        """Remove the lease on a resource in any state, without a hook and without a signal.
+
+        Return what was removed, and the registered scripts that still run.
+        """
+        with self._lock():
+            current = self._read(resource)
+            if current is None:
+                raise BanksmanError(f"{resource} has no lease")
+            # A take-back that still runs could end the instance of the next holder.
+            if (
+                isinstance(current, Lease)
+                and current.reaper_pid is not None
+                and current.boot_id == self.system.boot_id()
+                and self.system.running([current.reaper_pid]).get(current.reaper_pid)
+                == current.reaper_started
+            ):
+                raise BanksmanError(
+                    f"banksman process {current.reaper_pid} takes {resource} back now; run this"
+                    " command again when that process has ended"
+                )
+            running = self._running_users(current) if isinstance(current, Lease) else ()
             self._delete(resource)
+            return current, running
 
     def snapshot(self) -> Snapshot:
         with self._lock():
@@ -173,55 +293,103 @@ class Store:
 
     def reap(self) -> list[Reaped]:
         """Take back the resources of void leases, and delete those leases."""
+        reaped = []
         with self._lock():
             leases = [entry for entry in self._scan() if isinstance(entry, Lease)]
             if not leases:
                 return []
             boot_id = self.system.boot_id()
             now = self.system.clock()
-            running = self._running(leases, boot_id)
+            table = self.system.process_table()
+            running = {pid: process.started for pid, process in table.items()}
             me = self._me(running)
             mine = []
-            for lease in leases:
-                reason = self._reap_reason(lease, boot_id, now, running)
-                if reason is not None:
-                    lease = replace(lease, state=DRAINING, void_reason=reason)
-                elif lease.state != DRAINING or _other_reaper_runs(lease, boot_id, running, me):
+            for found in leases:
+                lease = found
+                if lease.state in HELD:
+                    reason = void_reason(lease, boot_id=boot_id, now=now, running=running)
+                    if reason is None:
+                        continue
+                    lease = _drained(lease, reason, now)
+                elif lease.boot_id != boot_id:
+                    lease = _restarted(lease, now)
+                elif lease.state != DRAINING or _other_reaper_runs(lease, running, me):
                     continue
-                # Only one reaper takes a lease back, and another one takes it over only after
-                # that reaper has ended. So a late take-back never acts on a newer lease. The
-                # claim records this boot: with the boot id of an earlier boot, other reapers
-                # would read it as the claim of a reaper from that boot, and take the lease
-                # over at once. A quarantine then also belongs to this boot, so that later
-                # commands do not run a failed take-back again.
-                mine.append(
-                    self._write(
-                        replace(lease, boot_id=boot_id, reaper_pid=me[0], reaper_started=me[1])
+                # The lease records this boot from now on: with the boot id of an earlier boot,
+                # other reapers would read a claim as the claim of a reaper from that boot, and
+                # take the lease over at once. A quarantine then also belongs to this boot, so
+                # that later commands do not run a failed take-back again.
+                lease = replace(lease, boot_id=boot_id)
+                if not lease.ended and lease.attempts >= TAKE_BACK_ATTEMPTS:
+                    # Every reaper so far ended before it finished, for example because its
+                    # caller stopped it. A take-back in every command would block every command.
+                    problem = f"{TAKE_BACK_ATTEMPTS} take-backs started and none finished"
+                    quarantined = self._write(_quarantined(lease))
+                    reaped.append(Reaped(quarantined, QUARANTINED, problem=problem))
+                    continue
+                if not lease.ended:
+                    # Only one reaper takes a lease back, and another one takes it over only
+                    # after that reaper has ended. So a late take-back never acts on a newer
+                    # lease.
+                    claimed = replace(
+                        lease, attempts=lease.attempts + 1, reaper_pid=me[0], reaper_started=me[1]
                     )
-                )
-        reaped = []
+                    mine.append(self._write(claimed))
+                    continue
+                outcome, users = _settled(lease, table, now)
+                if outcome != DRAINING:
+                    reaped.append(self._finish(lease, outcome, users))
+                elif replace(lease, users=users) != found:
+                    self._write(replace(lease, users=users))
         for lease in mine:
-            # Taking a resource back can take seconds, for example to wait for processes to
-            # end, so it runs outside the lock. No ownership check passes a draining lease.
-            freed = self._take_back(lease)
-            with self._lock():
-                current = self._read(lease.resource)
-                if (
-                    not isinstance(current, Lease)
-                    or current.lease_id != lease.lease_id
-                    or current.state != DRAINING
-                    or (current.reaper_pid, current.reaper_started) != me
-                ):
-                    continue
-                if freed:
-                    self._delete(lease.resource)
-                    reaped.append(Reaped(current, RELEASED))
-                else:
-                    quarantined = self._write(
-                        replace(current, state=QUARANTINED, reaper_pid=None, reaper_started=None)
-                    )
-                    reaped.append(Reaped(quarantined, QUARANTINED))
+            reaped.extend(self._end(lease, me))
         return reaped
+
+    def _end(self, lease: Lease, me: tuple[int, str]) -> list[Reaped]:
+        # Taking a resource back can take seconds, for example to end an emulator or to wait
+        # for processes to end, so it runs outside the lock. No ownership check passes a
+        # draining lease.
+        freed = lease.void_reason == RELEASE or self._take_back(lease)
+        if lease.users and self._stopping(lease):
+            # A script that left meanwhile no longer uses the resource, so it is not stopped.
+            fencing.stop(replace(lease, users=self._users_now(lease)), self.system)
+        with self._lock():
+            current = self._read(lease.resource)
+            if (
+                not isinstance(current, Lease)
+                or current.lease_id != lease.lease_id
+                or current.state != DRAINING
+                or (current.reaper_pid, current.reaper_started) != me
+            ):
+                return []
+            if not freed:
+                return [Reaped(self._write(_quarantined(current)), QUARANTINED)]
+            ended = replace(current, ended=True, reaper_pid=None, reaper_started=None)
+            table = self.system.process_table() if ended.users else {}
+            outcome, users = _settled(ended, table, self.system.clock())
+            if outcome == DRAINING:
+                return [Reaped(self._write(replace(ended, users=users)), DRAINING, users)]
+            return [self._finish(ended, outcome, users)]
+
+    def _finish(self, lease: Lease, outcome: str, users: tuple[User, ...]) -> Reaped:
+        if outcome == RELEASED:
+            self._delete(lease.resource)
+            return Reaped(lease, RELEASED)
+        return Reaped(self._write(_quarantined(replace(lease, users=users))), QUARANTINED, users)
+
+    def _users_now(self, lease: Lease) -> tuple[User, ...]:
+        with self._lock():
+            current = self._read(lease.resource)
+        if isinstance(current, Lease) and current.lease_id == lease.lease_id:
+            return current.users
+        return ()
+
+    def _running_users(self, lease: Lease) -> tuple[User, ...]:
+        # The pids of an earlier boot name other processes now, if any.
+        if not lease.users or lease.boot_id != self.system.boot_id():
+            return ()
+        table = self.system.process_table()
+        return tuple(user for user in lease.users if fencing.runs(user, table))
 
     def _grant(
         self,
@@ -265,10 +433,26 @@ class Store:
                     hard_deadline=now + timeouts.hard_cap,
                     idle_timeout=timeouts.idle_timeout,
                     owner_grace=timeouts.owner_grace,
+                    drain_timeout=timeouts.drain_timeout,
                 )
             )
 
-    def _held(self, resource: str, owner: str) -> Lease:
+    def _current(self, resource: str, lease_id: str) -> Lease:
+        # A script passes the id of the lease that it started under, so a script of an earlier
+        # lease, for example one of the same worktree, never acts on a newer lease.
+        lease = self._read(resource)
+        if isinstance(lease, Unreadable):
+            raise NotHeld(f"{resource} has a lease file that cannot be read")
+        if lease is None or lease.resource != resource:
+            raise NotHeld(f"{resource} has no lease")
+        if lease.lease_id != lease_id:
+            raise NotHeld(f"{resource} has another lease now")
+        return lease
+
+    def _held(self, resource: str, lease_id: str) -> Lease:
+        return self._valid(self._current(resource, lease_id))
+
+    def _owned(self, resource: str, owner: str) -> Lease:
         lease = self._read(resource)
         if isinstance(lease, Unreadable):
             raise NotHeld(f"{resource} has a lease file that cannot be read")
@@ -276,11 +460,14 @@ class Store:
             raise NotHeld(f"{resource} has no lease")
         if lease.owner != owner:
             raise NotHeld(f"{resource} is held by another owner")
+        return self._valid(lease)
+
+    def _valid(self, lease: Lease) -> Lease:
         if lease.state not in HELD:
-            raise NotHeld(f"the lease on {resource} is {lease.state}")
+            raise NotHeld(f"the lease on {lease.resource} is {lease.state}")
         reason = self._void_reason(lease)
         if reason is not None:
-            raise NotHeld(f"the lease on {resource} is void: {VOID_REASONS[reason]}")
+            raise NotHeld(f"the lease on {lease.resource} is void: {VOID_REASONS[reason]}")
         return lease
 
     def _touched(self, lease: Lease, owner_pid: int | None) -> Lease:
@@ -307,18 +494,6 @@ class Store:
             running=self.system.running(pids) if pids else {},
         )
 
-    def _running(self, leases: list[Lease], boot_id: str) -> dict[int, str]:
-        pids = {os.getpid()}
-        for lease in leases:
-            # A pid from an earlier boot names a different process, if it names one at all.
-            if lease.boot_id != boot_id:
-                continue
-            if lease.state in HELD and lease.owner_pid is not None:
-                pids.add(lease.owner_pid)
-            if lease.state == DRAINING and lease.reaper_pid is not None:
-                pids.add(lease.reaper_pid)
-        return self.system.running(pids)
-
     @staticmethod
     def _me(running: dict[int, str]) -> tuple[int, str]:
         started = running.get(os.getpid())
@@ -326,23 +501,20 @@ class Store:
             raise StoreError("cannot read the start time of this banksman process")
         return os.getpid(), started
 
-    @staticmethod
-    def _reap_reason(
-        lease: Lease, boot_id: str, now: float, running: dict[int, str]
-    ) -> str | None:
-        if lease.state in HELD:
-            return void_reason(lease, boot_id=boot_id, now=now, running=running)
-        # No process of an earlier boot runs now, so a quarantined resource is safe again.
-        if lease.state == QUARANTINED and lease.boot_id != boot_id:
-            return REBOOTED
-        return None
-
     def _path(self, resource: str) -> Path:
+        check_resource(resource)
         return self.directory / f"{resource}{_LEASE_SUFFIX}"
 
     def _read(self, resource: str) -> Lease | Unreadable | None:
+        path = self._path(resource)
         try:
-            return self._load(self._path(resource))
+            return self._load(path)
+        except FileNotFoundError:
+            pass
+        # A cleaner of temporary files can delete a quarantined lease after this command has
+        # restored the missing ones. Its record still keeps the resource out of use.
+        try:
+            return self._load(self.quarantine_dir / path.name)
         except FileNotFoundError:
             return None
 
@@ -363,18 +535,7 @@ class Store:
 
     def _load(self, path: Path) -> Lease | Unreadable:
         resource = path.name[: -len(_LEASE_SUFFIX)]
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        except FileNotFoundError:
-            raise
-        except OSError as exc:
-            raise StoreError(f"cannot open {path}: {exc.strerror}") from exc
-        with os.fdopen(fd, "rb") as file:
-            info = os.fstat(file.fileno())
-            if not stat.S_ISREG(info.st_mode):
-                raise StoreError(f"{path} is not a regular file")
-            _check_ownership(path, info)
-            raw = file.read()
+        raw = _read_file(path)
         try:
             data = json.loads(raw)
         except ValueError:
@@ -391,22 +552,31 @@ class Store:
             return Unreadable(resource, str(exc))
 
     def _write(self, lease: Lease) -> Lease:
-        fd, temp = tempfile.mkstemp(prefix=_TEMP_PREFIX, dir=self.directory)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as file:
-                json.dump(lease.to_json(), file, indent=2)
-                file.write("\n")
-            # rename is atomic: a reader sees the old file or the new one, never a part.
-            os.replace(temp, self._path(lease.resource))
-        except BaseException:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temp)
-            raise
+        name = self._path(lease.resource).name
+        data = (json.dumps(lease.to_json(), indent=2) + "\n").encode()
+        if lease.state == QUARANTINED:
+            # A quarantine lasts until a person releases it, but cleaners of temporary files
+            # delete old files in the state directory, and macOS empties /tmp at boot. So a
+            # quarantined lease is also kept outside it, and every command first restores a
+            # lease file that has gone.
+            self._ensure_quarantine_dir()
+            try:
+                _replace_file(self.quarantine_dir, name, data)
+            except OSError as exc:
+                raise StoreError(
+                    f"cannot write {self.quarantine_dir / name}: {exc.strerror}. {OUTSIDE_SANDBOX}"
+                ) from exc
+        _replace_file(self.directory, name, data)
         return lease
 
     def _delete(self, resource: str) -> None:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(self._path(resource))
+        name = self._path(resource).name
+        # The record outside the state directory first: a command that ends between the two
+        # steps leaves a lease file without its record, never a released quarantine that the
+        # next command restores.
+        for directory in (self.quarantine_dir, self.directory):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(directory / name)
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
@@ -418,7 +588,8 @@ class Store:
         fd = self._take_lock()
         self._locked = True
         try:
-            self._remove_temp_files()
+            _remove_temp_files(self.directory)
+            self._restore_quarantines()
             yield
         finally:
             self._locked = False
@@ -463,36 +634,135 @@ class Store:
             raise StoreError(
                 f"cannot create the state directory {self.directory}: {exc.strerror}"
             ) from exc
-        info = os.lstat(self.directory)
-        if not stat.S_ISDIR(info.st_mode):
-            raise StoreError(f"{self.directory} is not a directory")
-        _check_ownership(self.directory, info)
+        _check_directory(self.directory)
 
-    def _remove_temp_files(self) -> None:
-        # Every write ends while the lock is held, so a temporary file that exists now was
-        # left by a process that ended in the middle of a write.
-        for name in os.listdir(self.directory):
-            if name.startswith(_TEMP_PREFIX):
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(self.directory / name)
+    def _ensure_quarantine_dir(self) -> None:
+        try:
+            self.quarantine_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.quarantine_dir.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise StoreError(
+                f"cannot create {self.quarantine_dir}: {exc.strerror}. {OUTSIDE_SANDBOX}"
+            ) from exc
+        _check_directory(self.quarantine_dir)
+
+    def _restore_quarantines(self) -> None:
+        if not os.path.lexists(self.quarantine_dir):
+            return
+        _check_directory(self.quarantine_dir)
+        _remove_temp_files(self.quarantine_dir)
+        for name in os.listdir(self.quarantine_dir):
+            if name.startswith(".") or not name.endswith(_LEASE_SUFFIX):
+                continue
+            if os.path.lexists(self.directory / name):
+                continue
+            with contextlib.suppress(FileNotFoundError):
+                _replace_file(self.directory, name, _read_file(self.quarantine_dir / name))
 
 
-def _other_reaper_runs(
-    lease: Lease, boot_id: str, running: dict[int, str], me: tuple[int, str]
-) -> bool:
+def _drained(lease: Lease, reason: str, now: float) -> Lease:
+    # The scripts of an earlier boot have ended, and their pids can name new processes now.
+    users = () if reason == REBOOTED else lease.users
+    return replace(
+        lease,
+        state=DRAINING,
+        void_reason=reason,
+        users=users,
+        ended=False,
+        attempts=0,
+        drain_deadline=now + lease.drain_timeout,
+    )
+
+
+def _restarted(lease: Lease, now: float) -> Lease:
+    """Return a draining or quarantined lease of an earlier boot, to take back on this boot."""
+    # No process of an earlier boot runs now. A quarantined instance, such as a physical
+    # device, can outlive a restart, so it is ended again before it is handed on.
+    if lease.state == QUARANTINED:
+        return _drained(lease, REBOOTED, now)
+    return replace(lease, users=(), drain_deadline=now + lease.drain_timeout)
+
+
+def _settled(
+    lease: Lease, table: fencing.Table, now: float
+) -> tuple[str, tuple[User, ...]]:
+    """Decide a draining lease whose instance has ended.
+
+    It is freed when its scripts have ended, quarantined when they still run at its drain
+    deadline, and otherwise it drains on.
+    """
+    users = tuple(user for user in lease.users if fencing.runs(user, table))
+    if not users:
+        return RELEASED, users
+    if lease.drain_deadline is None or now >= lease.drain_deadline:
+        return QUARANTINED, users
+    return DRAINING, users
+
+
+def _quarantined(lease: Lease) -> Lease:
+    return replace(lease, state=QUARANTINED, reaper_pid=None, reaper_started=None)
+
+
+def _other_reaper_runs(lease: Lease, running: dict[int, str], me: tuple[int, str]) -> bool:
     claim = (lease.reaper_pid, lease.reaper_started)
-    if lease.reaper_pid is None or claim == me or lease.boot_id != boot_id:
+    if lease.reaper_pid is None or claim == me:
         return False
     return running.get(lease.reaper_pid) == lease.reaper_started
 
 
 def _check_ownership(path: Path, info: os.stat_result) -> None:
-    # The reaper will signal the processes that a lease names, so a lease that another user
-    # can change could make it signal the owner's processes.
+    # The reaper can signal the processes that a lease names, so a lease that another user can
+    # change could make it signal the owner's processes.
     if info.st_uid != os.geteuid():
         raise StoreError(f"{path} belongs to another user")
     if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise StoreError(f"group or others can write to {path}")
+
+
+def _check_directory(path: Path) -> None:
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode):
+        raise StoreError(f"{path} is not a directory")
+    _check_ownership(path, info)
+
+
+def _read_file(path: Path) -> bytes:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise StoreError(f"cannot open {path}: {exc.strerror}") from exc
+    with os.fdopen(fd, "rb") as file:
+        info = os.fstat(file.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise StoreError(f"{path} is not a regular file")
+        _check_ownership(path, info)
+        return file.read()
+
+
+def _replace_file(directory: Path, name: str, data: bytes) -> None:
+    fd, temp = tempfile.mkstemp(prefix=_TEMP_PREFIX, dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as file:
+            file.write(data)
+        # rename is atomic: a reader sees the old file or the new one, never a part.
+        os.replace(temp, directory / name)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp)
+        raise
+
+
+def _remove_temp_files(directory: Path) -> None:
+    # Every write ends while the lock is held, so a temporary file that exists now was left by
+    # a process that ended in the middle of a write.
+    for name in os.listdir(directory):
+        if name.startswith(_TEMP_PREFIX):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(directory / name)
 
 
 def _open_lock_file(path: Path) -> int:
@@ -523,4 +793,3 @@ def _lock_holder(path: Path) -> str:
     except OSError:
         return "unknown"
     return content if content.isdigit() else "unknown"
-

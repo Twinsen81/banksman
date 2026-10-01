@@ -20,8 +20,8 @@ from banksman.lease import KIND_NAME, RESOURCE_NAME, Timeouts
 CONFIG_ENV = "BANKSMAN_CONFIG"
 MAX_COUNT = 1000
 
-_TIMEOUT_KEYS = ("boot_timeout", "owner_grace", "idle_timeout", "hard_cap")
-_KIND_KEYS = ("count", "instances", "on_void", *_TIMEOUT_KEYS)
+_TIMEOUT_KEYS = ("boot_timeout", "owner_grace", "idle_timeout", "hard_cap", "drain_timeout")
+_KIND_KEYS = ("count", "instances", "on_void", "stop", *_TIMEOUT_KEYS)
 _DURATION = re.compile(r"([0-9]{1,7})([smh])")
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 60 * 60}
 _OFF = "off"
@@ -43,6 +43,10 @@ class Kind:
     # The command that ends a void instance. The reaper ends an instance only if the operator
     # declares one.
     on_void: tuple[str, ...] | None = None
+    # Whether the reaper may signal the scripts of a void lease. Off unless the operator turns
+    # it on, because a stopped process that its user did not expect costs more than a blocked
+    # resource.
+    stop: bool = False
 
     def instances(self) -> tuple[str, ...]:
         """Return the instances that the configuration declares.
@@ -160,6 +164,7 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
         count=count,
         listed=listed,
         on_void=_command(table.get("on_void"), f"{where}.on_void"),
+        stop=_boolean(table.get("stop", False), f"{where}.stop"),
     )
 
 
@@ -197,10 +202,17 @@ def _duration(value: object, key: str, where: str) -> int | None:
     except ValueError:
         raise _Invalid(where, f"must be {expected}") from None
     # An owner grace of 0 frees the resource as soon as its owner ends, which suits a holder
-    # whose end is exact, such as a build. Any other timeout of 0 would void every lease at once.
+    # whose end is exact, such as a build. Any other timeout of 0 would void every lease at once,
+    # or quarantine a void lease before its scripts can see that it is lost.
     if seconds == 0 and key != "owner_grace":
         raise _Invalid(where, "must be longer than 0 seconds")
     return seconds
+
+
+def _boolean(value: object, where: str) -> bool:
+    if not isinstance(value, bool):
+        raise _Invalid(where, "must be true or false")
+    return value
 
 
 def _count(value: object, where: str) -> int | None:
