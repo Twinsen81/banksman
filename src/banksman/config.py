@@ -108,8 +108,9 @@ def _check_file(path: Path, info: os.stat_result) -> None:
     if not stat.S_ISREG(info.st_mode):
         raise ConfigError(f"{path} is not a regular file")
     # Hooks run as the user, so a file that another user can change could make banksman run
-    # that user's commands.
-    if info.st_uid != os.geteuid():
+    # that user's commands. A file of root is accepted, as by ssh: root can change any file,
+    # and a configuration that a system manager writes, such as Nix, belongs to root.
+    if info.st_uid not in (os.geteuid(), 0):
         raise ConfigError(f"{path} belongs to another user")
     if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise ConfigError(f"group or others can write to {path}")
@@ -239,11 +240,17 @@ def _command(value: object, where: str) -> tuple[str, ...] | None:
         not isinstance(value, list)
         or not value
         or not all(isinstance(part, str) and "\x00" not in part for part in value)
-        or not value[0]
     ):
         raise _Invalid(
             where,
             'must be a list of strings: a program and its arguments, such as ["/path/to/program"]',
+        )
+    # A hook runs in the environment of whichever command reaps, so a program that the PATH of
+    # that command finds, or a path that a shell would expand, can work for one caller and fail
+    # for another.
+    if not os.path.isabs(value[0]):
+        raise _Invalid(
+            where, f"the program must be an absolute path, such as /usr/bin/env, not {value[0]!r}"
         )
     return tuple(value)
 

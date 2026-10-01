@@ -207,14 +207,16 @@ not code.
   lease is also set for each kind (section 4). Ending an instance and signalling processes
   are two separate choices, because ending an emulator that banksman leased is much less
   risky than signalling a process. The reaper has no branch for a specific kind.
-- **The hook contract.** A hook is a list of strings: a program and its arguments. banksman
-  runs it without a shell, in the directory `/`, with no input, and with
+- **The hook contract.** A hook is a list of strings: a program and its arguments. The
+  program is an absolute path, because a hook runs in the environment of whichever command
+  reaps, and a program that one caller's `PATH` finds can be missing for another caller.
+  banksman runs it without a shell, in the directory `/`, with no input, and with
   `BANKSMAN_RESOURCE` and `BANKSMAN_KIND` in its environment, and it discards the output.
-  The hook runs in its own process group, which banksman kills after 60 seconds. A hook
-  runs in the environment of whichever command reaps, so give the program as an absolute
-  path. A reaper that ends in the middle leaves the lease to the next reaper, which runs the
-  hook again, so a hook must be safe to run again: for example, it exits with status 0 when
-  the instance is already gone.
+  The hook runs in its own process group. banksman kills that group after 60 seconds, and
+  also when the command that runs the hook ends first, for example because its caller
+  stopped it, so that a hook never outlives its reaper. A reaper that ends in the middle
+  leaves the lease to the next reaper, which runs the hook again, so a hook must be safe to
+  run again: for example, it exits with status 0 when the instance is already gone.
 - Hooks do device-level work only. App-level work stays in the project's scripts.
 - Still to come: `discover`, which finds the instances of a named kind, comes with
   discovery (section 8), and `on_acquire`, which resets an instance before a run gets it,

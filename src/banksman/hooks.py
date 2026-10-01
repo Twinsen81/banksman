@@ -1,6 +1,6 @@
 """Hooks: the commands that a kind declares in the configuration.
 
-This is the only module that runs them.
+This is the only module that runs them, through the supervisor program.
 """
 
 from __future__ import annotations
@@ -9,8 +9,10 @@ import contextlib
 import os
 import signal
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 
+from banksman import supervisor
 from banksman.config import Kind
 from banksman.lease import Lease
 
@@ -36,29 +38,31 @@ def take_back(
 def run(command: Sequence[str], lease: Lease, *, timeout: float) -> str | None:
     """Run a hook for the resource of a lease. Return None when it succeeded, or how it failed."""
     env = {**os.environ, "BANKSMAN_RESOURCE": lease.resource, "BANKSMAN_KIND": lease.kind}
-    try:
-        # No shell and no input. The output is discarded rather than inherited: a program that
-        # the hook leaves running would otherwise keep a caller that reads banksman's output
-        # waiting. A fixed working directory makes a hook behave the same for every caller.
-        process = subprocess.Popen(
-            list(command),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd="/",
-            env=env,
-            start_new_session=True,
-        )
-    except OSError as exc:
-        return f"could not start {command[0]}: {exc.strerror or exc}"
-    try:
-        status = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill(process)
-        return f"did not end within {timeout:g} s"
-    except BaseException:
-        _kill(process)
-        raise
+    # No shell and no input. The output is discarded rather than inherited: a program that the
+    # hook leaves running would otherwise keep a caller that reads banksman's output waiting.
+    # A fixed working directory makes a hook behave the same for every caller.
+    process = subprocess.Popen(
+        [sys.executable, "-I", supervisor.__file__, *command],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        cwd="/",
+        env=env,
+        start_new_session=True,
+    )
+    with process.stdin, process.stdout:  # type: ignore[union-attr]
+        try:
+            status = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill(process)
+            return f"did not end within {timeout:g} s"
+        except BaseException:
+            _kill(process)
+            raise
+        if status == supervisor.COULD_NOT_START:
+            reason = process.stdout.read().decode(errors="replace")  # type: ignore[union-attr]
+            if reason:
+                return f"could not start {command[0]}: {reason}"
     if status < 0:
         return f"was ended by signal {-status}"
     if status > 0:
@@ -67,8 +71,9 @@ def run(command: Sequence[str], lease: Lease, *, timeout: float) -> str | None:
 
 
 def _kill(process: subprocess.Popen[bytes]) -> None:
-    # The hook runs in a process group that banksman created for it, so the signal reaches the
-    # hook and the programs that it started, and nothing else.
+    # The supervisor leads a process group that banksman created for the hook, so the signal
+    # reaches the supervisor, the hook, and the programs that the hook started, and nothing
+    # else.
     if process.returncode is None:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, signal.SIGKILL)

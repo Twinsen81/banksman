@@ -34,11 +34,12 @@ Another local user can
 create the state directory first; banksman then refuses to run. That is a denial of
 service, not a takeover.
 
-**Configuration runs as code.** A kind's hooks are commands that banksman runs as the user.
-So banksman refuses a configuration file that another user owns or that group or others
-can write to. The reaper runs at the start of most commands, so a command that an agent runs
-can run the `on_void` hook of a void lease, in the environment of that command. Which hooks
-exist is the operator's choice: banksman ships no hook that ends anything.
+**Configuration runs as code.** A kind's hooks are commands that banksman runs as the
+user. So banksman refuses a configuration file that a user other than the user and root
+owns, or that group or others can write to. The reaper runs at the start of most commands,
+so a command that an agent runs can run the `on_void` hook of a void lease, in the
+environment of that command. Which hooks exist is the operator's choice: banksman ships no
+hook that ends anything.
 
 **Agents are clients, not operators.** Agents acquire, touch, check, and release leases.
 Discovery, which decides what agents may use, and forced release, which takes a resource

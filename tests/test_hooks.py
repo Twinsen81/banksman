@@ -1,9 +1,12 @@
+import json
+import os
 import signal
 import subprocess
+import sys
 import time
 
 import pytest
-from helpers import hook
+from helpers import SRC, hook
 
 from banksman import hooks
 from banksman.config import Kind
@@ -83,21 +86,49 @@ def test_the_output_of_a_hook_is_not_shown(capfd):
     assert "hook output" not in out + err
 
 
-STARTS_A_PROGRAM_AND_WAITS = """
-import subprocess, sys, time
-program = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-open(sys.argv[1], "w").write(str(program.pid))
-time.sleep(60)
-"""
+def shell_hook(script, pid_file):
+    """Return a hook that runs a shell script, which writes a pid to the file in one step."""
+    return ["/bin/sh", "-c", script, "sh", str(pid_file)]
 
 
 def test_a_hook_that_does_not_end_is_killed_with_the_programs_it_started(tmp_path):
     pid_file = tmp_path / "program"
+    command = shell_hook('sleep 60 & echo $! > "$1.new" && mv "$1.new" "$1"; wait', pid_file)
     started = time.monotonic()
-    failure = hooks.run(hook(STARTS_A_PROGRAM_AND_WAITS, str(pid_file)), LEASE, timeout=2)
-    assert failure == "did not end within 2 s"
+    assert hooks.run(command, LEASE, timeout=2) == "did not end within 2 s"
     assert time.monotonic() - started < 30
     _wait_until_ended(int(pid_file.read_text()))
+
+
+RUNS_A_HOOK = """
+import json, sys
+from banksman import hooks
+from banksman.lease import Lease
+hooks.run(sys.argv[2:], Lease.from_json(json.loads(sys.argv[1])), timeout=60)
+"""
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP, signal.SIGKILL])
+def test_a_hook_ends_when_its_command_is_stopped(tmp_path, signum):
+    # A caller can stop banksman while its hook runs, for example at the end of a timeout. The
+    # next reaper would otherwise start a second copy of the hook.
+    pid_file = tmp_path / "hook"
+    command = shell_hook('echo $$ > "$1.new" && mv "$1.new" "$1" && exec sleep 60', pid_file)
+    banksman = subprocess.Popen(
+        [sys.executable, "-c", RUNS_A_HOOK, json.dumps(LEASE.to_json()), *command],
+        env={**os.environ, "PYTHONPATH": SRC},
+    )
+    try:
+        give_up = time.monotonic() + 30
+        while not pid_file.exists():
+            assert time.monotonic() < give_up, "the hook did not start"
+            time.sleep(0.01)
+        banksman.send_signal(signum)
+        banksman.wait(timeout=30)
+        _wait_until_ended(int(pid_file.read_text()))
+    finally:
+        banksman.kill()
+        banksman.wait()
 
 
 def test_a_command_that_is_interrupted_kills_its_hook(monkeypatch):

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from helpers import write_config
 
+from banksman import config
 from banksman.config import (
     MAX_COUNT,
     Config,
@@ -158,6 +159,10 @@ def test_text_that_is_not_a_duration_is_refused(text):
         ("[kinds.emulator]\non_void = ['', 'x']", "kinds.emulator.on_void"),
         ("[kinds.emulator]\non_void = ['stop-avd', 3]", "kinds.emulator.on_void"),
         ('[kinds.emulator]\non_void = ["stop\\u0000avd"]', "kinds.emulator.on_void"),
+        ("[kinds.emulator]\non_void = ['stop-avd']", "kinds.emulator.on_void"),
+        ("[kinds.emulator]\non_void = ['bin/stop-avd']", "kinds.emulator.on_void"),
+        ("[kinds.emulator]\non_void = ['~/bin/stop-avd']", "kinds.emulator.on_void"),
+        ("[kinds.emulator]\non_void = ['$HOME/bin/stop-avd']", "kinds.emulator.on_void"),
     ],
 )
 def test_a_configuration_that_is_not_valid_is_refused(config_path, text, key):
@@ -177,6 +182,14 @@ def test_a_file_that_others_can_write_to_is_refused(config_path):
     write_config(config_path, "").chmod(0o666)
     with pytest.raises(ConfigError, match="can write"):
         load_config()
+
+
+def test_a_file_of_root_is_accepted(config_path):
+    write_config(config_path, "")
+    info = os.stat(config_path)
+    as_root = os.stat_result((info.st_mode, *info[1:4], 0, *info[5:]))
+    assert as_root.st_uid == 0
+    config._check_file(config_path, as_root)
 
 
 def test_a_file_of_another_user_is_refused(config_path, monkeypatch):

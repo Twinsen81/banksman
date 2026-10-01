@@ -375,6 +375,43 @@ def test_only_one_reaper_takes_a_lease_back(state_dir):
     assert [(item.lease.resource, item.outcome) for item in first] == [("phone-1", RELEASED)]
 
 
+def test_the_claim_of_a_reaper_from_an_earlier_boot_is_taken_over(store, system, state_dir):
+    store.acquire("phone-1", "device", OWNER)
+    # The pid of that reaper now names a process of this boot.
+    system.processes = {4242: "start-4242"}
+
+    def claimed_before_a_restart(data):
+        taken_back_by(4242)(data)
+        data["boot_id"] = "boot-0"
+
+    edit_lease(state_dir, "phone-1", claimed_before_a_restart)
+    assert reaped(store) == [("phone-1", IDLE, RELEASED)]
+
+
+@pytest.mark.parametrize("state", [READY, QUARANTINED])
+def test_only_one_reaper_takes_back_a_lease_from_an_earlier_boot(state_dir, state):
+    machine = Machine()
+    Store(state_dir, machine).acquire("phone-1", "device", OWNER)
+
+    def from_an_earlier_boot(data):
+        data["boot_id"] = "an-earlier-boot"
+        if state == QUARANTINED:
+            data.update(state=QUARANTINED, void_reason=IDLE)
+
+    edit_lease(state_dir, "phone-1", from_an_earlier_boot)
+    second = []
+
+    def take_back(lease):
+        second.append(reap_in_child(state_dir))
+        return True
+
+    first = Store(state_dir, machine, take_back=take_back).reap()
+    assert second == [[]]
+    assert [(item.lease.resource, item.lease.void_reason, item.outcome) for item in first] == [
+        ("phone-1", REBOOTED, RELEASED)
+    ]
+
+
 def test_the_reaper_does_not_delete_a_newer_lease(state_dir, system):
     def take_back(lease):
         # Meanwhile another reaper finished this lease, another owner leased the resource,

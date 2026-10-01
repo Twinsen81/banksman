@@ -189,8 +189,16 @@ class Store:
                 elif lease.state != DRAINING or _other_reaper_runs(lease, boot_id, running, me):
                     continue
                 # Only one reaper takes a lease back, and another one takes it over only after
-                # that reaper has ended. So a late take-back never acts on a newer lease.
-                mine.append(self._write(replace(lease, reaper_pid=me[0], reaper_started=me[1])))
+                # that reaper has ended. So a late take-back never acts on a newer lease. The
+                # claim records this boot: with the boot id of an earlier boot, other reapers
+                # would read it as the claim of a reaper from that boot, and take the lease
+                # over at once. A quarantine then also belongs to this boot, so that later
+                # commands do not run a failed take-back again.
+                mine.append(
+                    self._write(
+                        replace(lease, boot_id=boot_id, reaper_pid=me[0], reaper_started=me[1])
+                    )
+                )
         reaped = []
         for lease in mine:
             # Taking a resource back can take seconds, for example to wait for processes to
@@ -209,16 +217,8 @@ class Store:
                     self._delete(lease.resource)
                     reaped.append(Reaped(current, RELEASED))
                 else:
-                    # The quarantine belongs to this boot. With the boot id of an earlier boot,
-                    # the lease would stay void, and every command would run its take-back again.
                     quarantined = self._write(
-                        replace(
-                            current,
-                            state=QUARANTINED,
-                            boot_id=boot_id,
-                            reaper_pid=None,
-                            reaper_started=None,
-                        )
+                        replace(current, state=QUARANTINED, reaper_pid=None, reaper_started=None)
                     )
                     reaped.append(Reaped(quarantined, QUARANTINED))
         return reaped
