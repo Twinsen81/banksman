@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ended owner, idle), counted in awake time. The reaper runs at the start of every command
   that reads or changes leases.
 - `banksman reap`, and a `banksman status` that lists the leases.
+- Resource kinds as configuration, in `~/.config/banksman/config.toml`: counted kinds,
+  kinds that list their instances by name (for example port numbers), the four timeouts
+  for all kinds and for each kind, and an `on_void` hook that the reaper runs to end a
+  void instance. A hook that fails puts the lease in quarantine. A hook program is an
+  absolute path, and a hook never outlives the command that runs it. banksman refuses a
+  configuration file that a user other than the user and root owns, or that group or
+  others can write to. If the take-back of a quarantined lease from an earlier boot fails
+  again, the lease stays quarantined.
 - Design document ([docs/DESIGN.md](docs/DESIGN.md)), recorded decisions
   ([DECISIONS.md](DECISIONS.md)), security policy and threat model
   ([SECURITY.md](SECURITY.md)), and contribution guide.

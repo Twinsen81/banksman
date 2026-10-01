@@ -3,7 +3,7 @@ import subprocess
 import sys
 
 import pytest
-from helpers import age_lease, edit_lease, reap_in_child
+from helpers import age_lease, edit_lease, hook, reap_in_child, write_config
 
 from banksman import SCHEMA_VERSION, __version__
 from banksman.cli import main
@@ -132,6 +132,40 @@ def test_a_killed_owner_frees_its_lease(state_dir):
     finally:
         owner.kill()
         owner.wait()
+
+
+def test_reap_runs_the_on_void_hook_of_the_kind(capsys, state_dir, config_path, tmp_path):
+    out = tmp_path / "out"
+    code = "import os, sys; open(sys.argv[1], 'w').write(os.environ['BANKSMAN_RESOURCE'])"
+    write_config(config_path, f"[kinds.emulator]\non_void = {json.dumps(hook(code, str(out)))}\n")
+    Store(state_dir, Machine()).acquire("emu-1", "emulator", OWNER)
+    age_lease(state_dir, "emu-1", 21 * 60)
+    assert main(["reap", "--json"]) == 0
+    (reaped,) = json.loads(capsys.readouterr().out)["reaped"]
+    assert (reaped["resource"], reaped["outcome"]) == ("emu-1", "released")
+    assert out.read_text() == "emu-1"
+
+
+def test_a_failing_on_void_hook_quarantines_the_lease(capsys, state_dir, config_path):
+    write_config(
+        config_path, f"[kinds.emulator]\non_void = {json.dumps(hook('raise SystemExit(3)'))}\n"
+    )
+    Store(state_dir, Machine()).acquire("emu-1", "emulator", OWNER)
+    age_lease(state_dir, "emu-1", 21 * 60)
+    assert main(["status"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "banksman: cannot take back emu-1: the on_void hook failed with exit status 3\n"
+    )
+    assert captured.out.splitlines()[1].split()[:3] == ["emu-1", "emulator", "quarantined"]
+
+
+def test_a_configuration_error_stops_the_commands_that_reap(capsys, config_path):
+    write_config(config_path, "[kinds.build]\ncuont = 4\n")
+    for command in (["status"], ["reap"]):
+        assert main(command) == 1
+        assert capsys.readouterr().err.startswith(f"banksman: {config_path}: kinds.build.cuont: ")
+    assert main(["version"]) == 0
 
 
 def test_no_command_prints_help(capsys):

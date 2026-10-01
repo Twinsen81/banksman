@@ -107,24 +107,38 @@ class Store:
         directory: Path,
         system: System,
         *,
-        timeouts: Timeouts = Timeouts(),
         take_back: TakeBack = _take_back_nothing,
         lock_wait: float = LOCK_WAIT_SECONDS,
     ) -> None:
         self.directory = Path(directory)
         self.system = system
-        self.timeouts = timeouts
         self._take_back = take_back
         self._lock_wait = lock_wait
         self._locked = False
 
-    def reserve(self, resource: str, kind: str, owner: str, owner_pid: int | None = None) -> Lease:
+    def reserve(
+        self,
+        resource: str,
+        kind: str,
+        owner: str,
+        owner_pid: int | None = None,
+        *,
+        timeouts: Timeouts = Timeouts(),
+    ) -> Lease:
         """Write a `booting` lease, before the resource is started."""
-        return self._grant(resource, kind, owner, owner_pid, BOOTING)
+        return self._grant(resource, kind, owner, owner_pid, BOOTING, timeouts)
 
-    def acquire(self, resource: str, kind: str, owner: str, owner_pid: int | None = None) -> Lease:
+    def acquire(
+        self,
+        resource: str,
+        kind: str,
+        owner: str,
+        owner_pid: int | None = None,
+        *,
+        timeouts: Timeouts = Timeouts(),
+    ) -> Lease:
         """Write a `ready` lease, for a resource that needs no start."""
-        return self._grant(resource, kind, owner, owner_pid, READY)
+        return self._grant(resource, kind, owner, owner_pid, READY, timeouts)
 
     def ready(self, resource: str, owner: str) -> Lease:
         with self._lock():
@@ -175,8 +189,16 @@ class Store:
                 elif lease.state != DRAINING or _other_reaper_runs(lease, boot_id, running, me):
                     continue
                 # Only one reaper takes a lease back, and another one takes it over only after
-                # that reaper has ended. So a late take-back never acts on a newer lease.
-                mine.append(self._write(replace(lease, reaper_pid=me[0], reaper_started=me[1])))
+                # that reaper has ended. So a late take-back never acts on a newer lease. The
+                # claim records this boot: with the boot id of an earlier boot, other reapers
+                # would read it as the claim of a reaper from that boot, and take the lease
+                # over at once. A quarantine then also belongs to this boot, so that later
+                # commands do not run a failed take-back again.
+                mine.append(
+                    self._write(
+                        replace(lease, boot_id=boot_id, reaper_pid=me[0], reaper_started=me[1])
+                    )
+                )
         reaped = []
         for lease in mine:
             # Taking a resource back can take seconds, for example to wait for processes to
@@ -202,7 +224,13 @@ class Store:
         return reaped
 
     def _grant(
-        self, resource: str, kind: str, owner: str, owner_pid: int | None, state: str
+        self,
+        resource: str,
+        kind: str,
+        owner: str,
+        owner_pid: int | None,
+        state: str,
+        timeouts: Timeouts,
     ) -> Lease:
         check_names(resource, kind, owner)
         with self._lock():
@@ -233,10 +261,10 @@ class Store:
                     acquired_at=wall,
                     touched_at=wall,
                     touched=now,
-                    boot_deadline=now + self.timeouts.boot if state == BOOTING else None,
-                    hard_deadline=now + self.timeouts.hard_cap,
-                    idle_timeout=self.timeouts.idle,
-                    owner_grace=self.timeouts.owner_grace,
+                    boot_deadline=now + timeouts.boot_timeout if state == BOOTING else None,
+                    hard_deadline=now + timeouts.hard_cap,
+                    idle_timeout=timeouts.idle_timeout,
+                    owner_grace=timeouts.owner_grace,
                 )
             )
 

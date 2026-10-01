@@ -1,11 +1,11 @@
 # banksman design
 
-**Status:** the project scaffold and the lease core exist. Section 3 is implemented, with
-`banksman reap` and a `status` that lists the leases. The rest is not implemented yet: no
-command can take a lease yet, and the reaper only deletes void leases, because the
-take-back step of sections 4 and 5 does not exist yet. Resolved decisions and how to change
-them are in [DECISIONS.md](../DECISIONS.md); the threat model is in
-[SECURITY.md](../SECURITY.md).
+**Status:** the project scaffold, the lease core, and kinds as configuration exist.
+Sections 3 and 5 are implemented, with `banksman reap` and a `status` that lists the
+leases. The rest is not implemented yet: no command can take a lease yet, and when the
+reaper takes a resource back, it only runs the kind's `on_void` hook, because the fencing
+of section 4 does not exist yet. Resolved decisions and how to change them are in
+[DECISIONS.md](../DECISIONS.md); the threat model is in [SECURITY.md](../SECURITY.md).
 
 ## 1. Goals and non-goals
 
@@ -36,8 +36,8 @@ Non-goals:
 |---|---|
 | Resource | One thing that can be leased: a device serial, an emulator, a build slot, an account. |
 | Kind | A class of resources, declared in configuration: how to find instances, how to reset one, how to take one back. |
-| Named kind | Instances have identities: serials, emulator names, account addresses. |
-| Counted kind | Instances are interchangeable slots: build slots, ports, licence seats. |
+| Named kind | Instances have identities: serials, emulator names, account addresses, or names that the operator lists, such as port numbers. |
+| Counted kind | Instances are interchangeable slots: build slots, licence seats. |
 | Lease | The record that one holder may use one resource until the lease is released or void. |
 | Holder | Who holds a lease: the worktree, the issue, the agent process, and a purpose. |
 | Inventory | The allowlist of resources that agents may use at all. |
@@ -67,8 +67,8 @@ leases instead.
   always has a lease, and cannot be mistaken for an orphan.
 - **Void triggers.** A lease is void when any of these is true. The defaults are starting
   values, to be tuned by measurement. The operator can change each of them in the
-  configuration, for all kinds or for one kind. A lease keeps the values that it was
-  created with.
+  configuration, for all kinds or for one kind (section 5). A lease keeps the values that
+  it was created with.
 
   | Trigger | Default | Catches |
   |---|---|---|
@@ -95,16 +95,18 @@ leases instead.
   every call. A long-running script keeps a touch loop alive for its own lifetime.
 - **Reboots.** Lease state must not outlive a reboot, because the emulators it describes do
   not. A lease records the machine's boot session id, and a lease from an earlier boot is
-  void, also a quarantined one: no process of an earlier boot still runs. The awake-time
-  clock starts again at every boot, so this check also keeps the deadlines of two boots
-  apart.
+  void, also a quarantined one: no process of an earlier boot still runs. Its take-back
+  still runs, because an instance, such as a physical device, can outlive a restart of the
+  machine. If that take-back fails again, the lease stays quarantined, now for the current
+  boot. The awake-time clock starts again at every boot, so the boot id also keeps the
+  deadlines of two boots apart.
 - **Reaping in two steps.** Under the lock, the reaper marks a void lease `draining`, which
   fails every ownership check, and records its own pid and start time in the lease. Outside
-  the lock, it takes the resource back (section 4). Then, under the lock again, it deletes
-  the lease, but only if the file still holds the same lease. Only one reaper takes a lease
-  back: another reaper leaves a `draining` lease alone while the reaper named in it runs,
-  and finishes it only after that reaper has ended. So a late take-back never acts on a
-  newer lease.
+  the lock, it takes the resource back (sections 4 and 5). Then, under the lock again, it
+  deletes the lease, but only if the file still holds the same lease. Only one reaper takes
+  a lease back: another reaper leaves a `draining` lease alone while the reaper named in it
+  runs, and finishes it only after that reaper has ended. So a late take-back never acts on
+  a newer lease.
 - **Damaged lease files.** A lease file with a newer `schema` stops every command, because
   two versions of banksman must not share one state directory. A lease file that cannot be
   read keeps its resource out of use, and `status` shows it. Other resources are not
@@ -132,7 +134,11 @@ minutes, and its lease can become void in the middle.
   configuration. The reaper then sends SIGTERM to every registered process group or pid,
   waits, sends SIGKILL, and confirms death by pid and start time. It never trusts an exit
   code alone. For a resource that can be killed, such as an emulator, the operator can also
-  let the kind's `on_void` hook kill it; the kill is then the fence.
+  declare an `on_void` hook that kills it (section 5). A kill alone is not a fence: the
+  next instance can get the same address, for example the same emulator serial, and a
+  script of the earlier holder that still runs would then act on the new holder's
+  instance. So the reaper frees the resource only after the registered scripts have also
+  ended.
 - **Never the agent or the app.** When stopping is on, the reaper signals whole process
   groups, and the kernel does not stop it from signalling the user's own programs. An agent
   can share one process group with the app that runs it, so one signal to that group would
@@ -149,15 +155,73 @@ minutes, and its lease can become void in the middle.
 The lease mechanics say nothing about what is leased, so a new kind needs configuration,
 not code.
 
-- A kind declares whether it is named or counted, how to `discover` its instances, what to
-  run `on_acquire` to reset one, and what to run `on_void` to take one back.
-- Whether the reaper may stop the scripts of a void instance, or kill the instance, is a
-  setting of the kind. It is off unless the operator turns it on, also in the presets. The
-  reaper has no branch for a specific kind.
-- A kind can set its own timeouts, for example no idle timeout for build slots.
-- Counted kinds need no hooks.
+- **The configuration file** is `~/.config/banksman/config.toml`. The operator writes it,
+  and banksman only reads it. The home directory comes from the user database, not from
+  `$HOME`, and banksman does not use `$XDG_CONFIG_HOME`. The reason is the same as for the
+  state directory: the reaper takes resources back with the hooks in this file, so every
+  caller of one user must read the same file. `BANKSMAN_CONFIG` changes the path for tests;
+  every caller must then use the same value. Without the file, banksman knows no kinds and
+  uses the default timeouts. A key that banksman does not know is an error, so that a
+  misspelled key is never ignored.
+- **Kinds.** Each `[kinds.<name>]` table declares a kind. A kind with `count` is counted:
+  its instances are `<name>-0`, `<name>-1`, and so on. A kind can instead list its
+  instances by name with `instances`, for example port numbers; a run then gets the port
+  itself as its resource. A kind with neither gets its instances from discovery
+  (section 8). An instance name must be unique across all kinds, because each resource has
+  one lease file. Counted kinds need no hooks.
+- **Timeouts.** `[defaults]` sets the timeouts of section 3 for every kind, and a kind can
+  set its own. A duration is a whole number and a unit: `90s`, `20m`, or `3h`.
+  `idle_timeout = "off"` turns the idle timeout off, for example for build slots. An
+  `owner_grace` of `"0s"` frees a resource as soon as its owner process ends, which suits a
+  holder whose end is exact, such as a build. A lease keeps the values that it was created
+  with, so a change applies to new leases only, and the void rules need no configuration.
+
+  ```toml
+  [defaults]
+  boot_timeout = "5m"
+  owner_grace = "5m"
+  idle_timeout = "20m"
+  hard_cap = "3h"
+
+  [kinds.build]
+  count = 4
+  owner_grace = "0s"
+  idle_timeout = "off"
+
+  [kinds.port]
+  instances = ["9101", "9102", "9103"]
+
+  [kinds.emulator]
+  boot_timeout = "8m"
+  on_void = ["/usr/local/bin/stop-avd"]
+  ```
+
+- **`on_void`** is a command that ends a void instance, for example one that kills an
+  emulator. The reaper runs it when it takes back a void lease of the kind. Only a declared
+  hook lets the reaper end an instance: banksman ships no such command, and without one the
+  reaper ends nothing. If the hook exits with status 0, the instance is gone. If it fails,
+  does not end in time, or cannot start, the lease is quarantined. The reaper reads the hook
+  from the current configuration, not from the lease, so when the operator removes a hook,
+  it stops at once, also for leases that are already void.
+- **Signals are a separate setting.** Whether the reaper may signal the scripts of a void
+  lease is also set for each kind (section 4). Ending an instance and signalling processes
+  are two separate choices, because ending an emulator that banksman leased is much less
+  risky than signalling a process. The reaper has no branch for a specific kind.
+- **The hook contract.** A hook is a list of strings: a program and its arguments. The
+  program is an absolute path, because a hook runs in the environment of whichever command
+  reaps, and a program that one caller's `PATH` finds can be missing for another caller.
+  banksman runs it without a shell, in the directory `/`, with no input, and with
+  `BANKSMAN_RESOURCE` and `BANKSMAN_KIND` in its environment, and it discards the output.
+  The hook runs in its own process group. banksman kills that group after 60 seconds, and
+  also when the command that runs the hook ends first, for example because its caller
+  stopped it, so that a hook never outlives its reaper. A reaper that ends in the middle
+  leaves the lease to the next reaper, which runs the hook again, so a hook must be safe to
+  run again: for example, it exits with status 0 when the instance is already gone.
 - Hooks do device-level work only. App-level work stays in the project's scripts.
-- Presets can ship for common kinds: Android emulators, Android devices, and build slots.
+- Still to come: `discover`, which finds the instances of a named kind, comes with
+  discovery (section 8), and `on_acquire`, which resets an instance before a run gets it,
+  comes with requests (section 6). Presets for Android emulators and Android devices come
+  with discovery too.
 
 ## 6. Requests by properties
 
@@ -331,14 +395,15 @@ Done:
 
 - Project scaffold: package, CLI with `version` and `status`, tests, CI.
 - The lease core: lease files, the file lock, states, void triggers, reaping.
+- Kinds as configuration: the configuration file, counted kinds, kinds that list their
+  instances, timeouts for each kind, and the `on_void` hook.
 
 Next:
 
-- Kinds as configuration, with presets for Android emulators, Android devices, and build
-  slots.
 - Fencing in both directions and confirmed termination.
-- Discovery and the allowlist.
-- Requests by properties, and joint acquire.
+- Discovery and the allowlist, with the `discover` hook and presets for Android emulators
+  and Android devices.
+- Requests by properties, joint acquire, and the `on_acquire` hook.
 - Holder identity for any agent.
 - `status`, `watch`, `explain`, and `log`.
 - Build slots through a Gradle init script.

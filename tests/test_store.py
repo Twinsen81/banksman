@@ -21,6 +21,7 @@ from banksman.lease import (
     QUARANTINED,
     READY,
     REBOOTED,
+    Timeouts,
 )
 from banksman.store import (
     RELEASED,
@@ -98,6 +99,17 @@ def test_reserve_writes_a_booting_lease_before_the_start(store, system, state_di
     assert data["state"] == BOOTING
     assert data["awake"]["boot_deadline"] == system.now + 5 * 60
     assert stat.S_IMODE((state_dir / "emu-1.json").stat().st_mode) == 0o600
+
+
+def test_a_lease_keeps_the_timeouts_that_it_was_created_with(store, system, state_dir):
+    timeouts = Timeouts(boot_timeout=8 * 60, owner_grace=0, idle_timeout=None, hard_cap=60 * 60)
+    store.reserve("emu-1", "emulator", OWNER, timeouts=timeouts)
+    data = lease_file(state_dir, "emu-1")
+    assert data["awake"]["boot_deadline"] == system.now + 8 * 60
+    assert data["awake"]["hard_deadline"] == system.now + 60 * 60
+    assert (data["idle_timeout"], data["owner_grace"]) == (None, 0)
+    # The same owner gets its lease again with the values that it had.
+    assert store.reserve("emu-1", "emulator", OWNER).idle_timeout is None
 
 
 def test_ready_ends_the_boot(store, system):
@@ -252,6 +264,28 @@ def test_a_resource_that_cannot_be_taken_back_is_quarantined(state_dir, system):
     assert reaped(store) == [("phone-1", REBOOTED, RELEASED)]
 
 
+def test_a_quarantine_that_a_restart_did_not_clear_stays(state_dir, system):
+    attempts = []
+
+    def take_back(lease):
+        attempts.append(lease.void_reason)
+        return False
+
+    store = Store(state_dir, system, take_back=take_back)
+    store.acquire("phone-1", "device", OWNER)
+    system.advance(20 * 60)
+    assert reaped(store) == [("phone-1", IDLE, QUARANTINED)]
+    system.boot = "boot-2"
+    # A restart retries the take-back once. If it fails again, the quarantine belongs to the
+    # new boot, so the next commands do not run the take-back again.
+    assert reaped(store) == [("phone-1", REBOOTED, QUARANTINED)]
+    assert reaped(store) == []
+    assert attempts == [IDLE, REBOOTED]
+    assert lease_file(state_dir, "phone-1")["boot_id"] == "boot-2"
+    with pytest.raises(Busy, match="quarantined"):
+        store.acquire("phone-1", "device", OTHER)
+
+
 def test_the_owner_check_fails_while_the_lease_drains(state_dir, system):
     checks = []
 
@@ -339,6 +373,43 @@ def test_only_one_reaper_takes_a_lease_back(state_dir):
     first = Store(state_dir, machine, take_back=take_back).reap()
     assert second == [[]]
     assert [(item.lease.resource, item.outcome) for item in first] == [("phone-1", RELEASED)]
+
+
+def test_the_claim_of_a_reaper_from_an_earlier_boot_is_taken_over(store, system, state_dir):
+    store.acquire("phone-1", "device", OWNER)
+    # The pid of that reaper now names a process of this boot.
+    system.processes = {4242: "start-4242"}
+
+    def claimed_before_a_restart(data):
+        taken_back_by(4242)(data)
+        data["boot_id"] = "boot-0"
+
+    edit_lease(state_dir, "phone-1", claimed_before_a_restart)
+    assert reaped(store) == [("phone-1", IDLE, RELEASED)]
+
+
+@pytest.mark.parametrize("state", [READY, QUARANTINED])
+def test_only_one_reaper_takes_back_a_lease_from_an_earlier_boot(state_dir, state):
+    machine = Machine()
+    Store(state_dir, machine).acquire("phone-1", "device", OWNER)
+
+    def from_an_earlier_boot(data):
+        data["boot_id"] = "an-earlier-boot"
+        if state == QUARANTINED:
+            data.update(state=QUARANTINED, void_reason=IDLE)
+
+    edit_lease(state_dir, "phone-1", from_an_earlier_boot)
+    second = []
+
+    def take_back(lease):
+        second.append(reap_in_child(state_dir))
+        return True
+
+    first = Store(state_dir, machine, take_back=take_back).reap()
+    assert second == [[]]
+    assert [(item.lease.resource, item.lease.void_reason, item.outcome) for item in first] == [
+        ("phone-1", REBOOTED, RELEASED)
+    ]
 
 
 def test_the_reaper_does_not_delete_a_newer_lease(state_dir, system):
