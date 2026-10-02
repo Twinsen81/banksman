@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from banksman import SCHEMA_VERSION, __version__, hooks
-from banksman.config import Config, Kind, load_config
-from banksman.discovery import Found, Instance, discover
+from banksman.config import Config, Kind, load_config, parse_duration
+from banksman.discovery import FactValue, Found, Instance, discover
 from banksman.errors import BanksmanError
-from banksman.identity import find_holder
+from banksman.identity import find_agent, find_holder
 from banksman.inventory import (
     Decisions,
     Inventory,
@@ -26,14 +27,29 @@ from banksman.inventory import (
     preselected,
     save_inventory,
 )
-from banksman.lease import QUARANTINED, VOID_REASONS, Lease, User
+from banksman.lease import QUARANTINED, RESOURCE_NAME, VOID_REASONS, Lease, User
+from banksman.request import Candidate, Clause, check_kinds, parse_clause, search
 from banksman.sanitize import clean
-from banksman.store import NotHeld, Reaped, Stopping, Store, TakeBack, default_state_dir
+from banksman.store import (
+    Busy,
+    Choice,
+    NotHeld,
+    Reaped,
+    Stopping,
+    Store,
+    TakeBack,
+    default_state_dir,
+)
 from banksman.system import Machine
 
 VERSION_LINE = f"banksman {__version__} (schema {SCHEMA_VERSION})"
 # A script that gets this exit status has lost its lease, and must stop using the resource.
 EXIT_LOST = 3
+# Every resource that matches is in use, also after the wait. A caller can treat this as a busy
+# machine, not as a failure of its own work.
+EXIT_BUSY = 4
+# How often a waiting acquire looks again. Each look runs discovery, for example adb.
+POLL_SECONDS = 5.0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -73,6 +89,86 @@ def _build_parser() -> argparse.ArgumentParser:
         "reap", help="take back the resources of void leases now", allow_abbrev=False
     )
     reap.add_argument("--json", action="store_true", help="print JSON")
+
+    acquire = commands.add_parser(
+        "acquire",
+        help="lease a permitted resource that matches the request, and print it as KEY=value",
+        allow_abbrev=False,
+    )
+    acquire.add_argument(
+        "--where",
+        action="append",
+        type=_clause,
+        metavar="CLAUSE",
+        help="a property that the resource must have, such as form=tablet or 'api>=33'; repeat"
+        " it for more",
+    )
+    acquire.add_argument(
+        "--for",
+        dest="purpose",
+        metavar="TEXT",
+        help="why the resource is needed; people and other agents read it",
+    )
+    acquire.add_argument(
+        "--expect",
+        type=_duration,
+        metavar="DURATION",
+        help="how long the resource is needed, such as 20m; only a hint for others",
+    )
+    acquire.add_argument(
+        "--wait",
+        type=_duration,
+        default=0,
+        metavar="DURATION",
+        help="how long to wait while every matching resource is in use, such as 15m",
+    )
+    acquire.add_argument(
+        "--lease",
+        metavar="ID",
+        help="the id of a lease to keep: its resource is chosen first if it still matches",
+    )
+    acquire.add_argument("--issue", help="the issue id; by default it comes from the branch name")
+    acquire.add_argument(
+        "--owner-pid",
+        type=_pid,
+        help="the process whose end frees the lease; by default the agent process",
+    )
+    acquire.add_argument("--json", action="store_true", help="print JSON")
+
+    touch = commands.add_parser(
+        "touch",
+        help="touch a lease, and record this agent process as its owner process",
+        allow_abbrev=False,
+    )
+    _lease_arguments(touch)
+    touch.add_argument(
+        "--expect",
+        type=_duration,
+        metavar="DURATION",
+        help="how long the resource is still needed, such as 20m; only a hint for others",
+    )
+    touch.add_argument(
+        "--owner-pid", type=_pid, help="the owner process; by default the agent process"
+    )
+
+    give_back = commands.add_parser(
+        "release",
+        help="give a lease back, or every lease of this agent process",
+        allow_abbrev=False,
+    )
+    which = give_back.add_mutually_exclusive_group(required=True)
+    which.add_argument("--resource", help="the leased resource; needs --lease")
+    which.add_argument(
+        "--all",
+        action="store_true",
+        help="every lease whose owner process is this agent process",
+    )
+    give_back.add_argument("--lease", metavar="ID", help="the id of the lease")
+    give_back.add_argument(
+        "--owner-pid",
+        type=_pid,
+        help="with --all: the owner process; by default the agent process",
+    )
 
     enter = commands.add_parser(
         "enter",
@@ -143,6 +239,20 @@ def _lease_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _clause(text: str) -> Clause:
+    try:
+        return parse_clause(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{text!r}: {exc}") from None
+
+
+def _duration(text: str) -> int:
+    try:
+        return parse_duration(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def _pid(text: str) -> int:
     # 0 and negative numbers name groups of processes in kill(2), never one process.
     if not text.isdigit() or int(text) < 1:
@@ -200,9 +310,9 @@ def _stopping(config: Config) -> Stopping:
     return stopping
 
 
-def _reaped_store() -> tuple[Store, list[Reaped]]:
+def _reaped_store(config: Config | None = None) -> tuple[Store, list[Reaped]]:
     """Open the store and reap first, as every command that reads or changes leases does."""
-    config = load_config()
+    config = load_config() if config is None else config
     store = _open_store(config)
     reaped = store.reap()
     for item in reaped:
@@ -384,6 +494,199 @@ def _cmd_leave(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_acquire(args: argparse.Namespace) -> int:
+    clauses = args.where or []
+    config = load_config()
+    check_kinds(clauses, config)
+    machine = Machine()
+    holder = find_holder(
+        machine.process_table(),
+        config.holder,
+        issue=args.issue,
+        owner_pid=args.owner_pid,
+        purpose=args.purpose,
+    )
+    give_up = machine.clock() + args.wait
+    while True:
+        # The configuration, the inventory, and the machine are read again on every look. The
+        # reaper must use the hooks of the current configuration, so that a hook that the
+        # operator removes stops at once, also for a caller that waits.
+        config = load_config()
+        store, _ = _reaped_store(config)
+        found = search(config, load_inventory(), clauses)
+        if not found.candidates:
+            # Waiting helps only when a matching resource is held now.
+            _print_notes(found.notes)
+            raise BanksmanError(_no_match(clauses))
+        choices = [_choice(candidate, config) for candidate in found.candidates]
+        granted = store.grant(choices, holder, keep=args.lease, expect=args.expect)
+        if granted is not None:
+            break
+        left = give_up - machine.clock()
+        if left <= 0:
+            still = " still" if args.wait else ""
+            raise Busy(f"every matching resource is{still} in use: {_some(found.candidates)}")
+        machine.sleep(min(POLL_SECONDS, left))
+    candidate = next(each for each in found.candidates if each.resource == granted.lease.resource)
+    lease = granted.lease
+    facts = candidate.facts
+    if not granted.kept and config.kinds[lease.kind].on_acquire is not None:
+        lease = _prepare(store, config, lease)
+        # The hook can restart the instance, and a restarted emulator can get another serial.
+        facts = _facts_now(config, candidate)
+    _print_grant(lease, facts, granted.kept, args.json)
+    return 0
+
+
+def _some(candidates: Sequence[Candidate], shown: int = 10) -> str:
+    names = ", ".join(candidate.resource for candidate in candidates[:shown])
+    more = len(candidates) - shown
+    return f"{names}, and {more} more" if more > 0 else names
+
+
+def _choice(candidate: Candidate, config: Config) -> Choice:
+    kind = config.kinds[candidate.kind]
+    # banksman starts nothing: the holder starts an instance that does not run. A lease is
+    # booting only while the on_acquire hook resets its instance, so that a caller that dies in
+    # the middle loses the lease at the boot deadline.
+    return Choice(
+        candidate.resource, candidate.kind, kind.timeouts, reset=kind.on_acquire is not None
+    )
+
+
+def _prepare(store: Store, config: Config, lease: Lease) -> Lease:
+    """Reset the instance of a new lease with the on_acquire hook of its kind."""
+    try:
+        failure = hooks.reset(config.kinds, lease)
+    except BaseException:
+        _give_back(store, lease)
+        raise
+    if failure is not None:
+        # A failed reset does not make the instance unsafe for the next holder, as a failed
+        # take-back does, so the lease is given back, not quarantined.
+        _give_back(store, lease)
+        raise BanksmanError(f"cannot reset {lease.resource}: {failure}; the lease is given back")
+    return store.ready(lease.resource, lease.lease_id)
+
+
+def _facts_now(config: Config, candidate: Candidate) -> Mapping[str, FactValue]:
+    kind = config.kinds[candidate.kind]
+    if not kind.discovered:
+        return candidate.facts
+    instance = next(
+        (each for each in discover(kind, config).instances if each.name == candidate.resource),
+        None,
+    )
+    # An instance that discovery does not find now has no serial to print.
+    return {} if instance is None else instance.facts
+
+
+def _give_back(store: Store, lease: Lease) -> None:
+    with contextlib.suppress(BanksmanError):
+        store.release(lease.resource, lease.lease_id)
+
+
+def _no_match(clauses: Sequence[Clause]) -> str:
+    request = ", ".join(str(clause) for clause in clauses)
+    found = (
+        f"no permitted resource that is present now matches {request}"
+        if request
+        else "no permitted resource is present now"
+    )
+    return (
+        f"{found}. The operator decides what agents may use, in the configuration and with"
+        " banksman admin discover"
+    )
+
+
+def _print_notes(notes: Sequence[str]) -> None:
+    for note in notes:
+        print(clean(f"banksman: note: {note}"), file=sys.stderr)
+
+
+def _print_grant(
+    lease: Lease, facts: Mapping[str, FactValue], kept: bool, as_json: bool
+) -> None:
+    # Facts come from devices and hooks. Only a serial is printed, and only when it has the
+    # characters of a resource name, so that a shell script can use every value as it is.
+    serial = facts.get("serial")
+    if not isinstance(serial, str) or RESOURCE_NAME.fullmatch(serial) is None:
+        serial = None
+    if as_json:
+        _print_json(
+            {
+                "schema": SCHEMA_VERSION,
+                "resource": lease.resource,
+                "kind": lease.kind,
+                "lease_id": lease.lease_id,
+                "state": lease.state,
+                "serial": serial,
+                "kept": kept,
+            }
+        )
+        return
+    print(f"RESOURCE={lease.resource}")
+    print(f"KIND={lease.kind}")
+    print(f"LEASE={lease.lease_id}")
+    print(f"STATE={lease.state}")
+    if serial is not None:
+        print(f"SERIAL={serial}")
+
+
+def _cmd_touch(args: argparse.Namespace) -> int:
+    config = load_config()
+    store, _ = _reaped_store(config)
+    store.touch(
+        args.resource, args.lease, _owner_process(config, args.owner_pid), expect=args.expect
+    )
+    return 0
+
+
+def _cmd_release(args: argparse.Namespace) -> int:
+    if args.all and args.lease is not None:
+        raise BanksmanError("release --all takes no --lease")
+    if not args.all and args.lease is None:
+        raise BanksmanError("release --resource needs --lease, the id of the lease")
+    if not args.all and args.owner_pid is not None:
+        raise BanksmanError("release --owner-pid needs --all")
+    config = load_config()
+    store, _ = _reaped_store(config)
+    if not args.all:
+        print(clean(_released(args.resource, store.release(args.resource, args.lease))))
+        return 0
+    owner = _owner_process(config, args.owner_pid)
+    if owner is None:
+        raise BanksmanError(
+            "release --all needs the agent process, and none was found: pass --owner-pid, or"
+            " release each lease with --resource and --lease"
+        )
+    released = store.release_all(owner)
+    for lease, drained in released:
+        print(clean(_released(lease.resource, drained)))
+    if not released:
+        print(f"Process {owner} holds no lease.")
+    return 0
+
+
+def _owner_process(config: Config, owner_pid: int | None) -> int | None:
+    # The nearest agent process, as for a new lease: after a restart of the agent, a touch
+    # records its new process, so that the lease does not end with the earlier one.
+    if owner_pid is not None:
+        return owner_pid
+    return find_agent(Machine().process_table(), config.holder.agents, os.getpid())[0]
+
+
+def _released(resource: str, drained: Lease | None) -> str:
+    if drained is None:
+        return f"Released {resource}: it is free."
+    waits = []
+    if drained.users:
+        waits.append(f"its scripts have ended: {_processes(drained.users)}")
+    if drained.reaper_pid is not None:
+        waits.append(f"banksman process {drained.reaper_pid} has ended its reset")
+    return f"Released {resource}: it is free when {', and '.join(waits)}."
+
+
 def _cmd_admin_release(args: argparse.Namespace) -> int:
     store, _ = _reaped_store()
     removed, running = store.force_release(args.resource)
@@ -484,6 +787,7 @@ def _cmd_admin_discover(args: argparse.Namespace) -> int:
             [choice.name for choice in accounts if choice.selected],
             refuse_unselected=interactive,
         ),
+        tags=inventory.tags,
     )
     shown = {(choice.kind, choice.name) for choice in instances}
     missing = [
@@ -533,6 +837,7 @@ def _cmd_admin_discover(args: argparse.Namespace) -> int:
                         "allowed": list(updated.accounts.allowed),
                         "refused": list(updated.accounts.refused),
                     },
+                    "tags": {tag: list(patterns) for tag, patterns in sorted(updated.tags.items())},
                 },
             }
         )
@@ -733,6 +1038,9 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "enter": _cmd_enter,
     "check": _cmd_check,
     "leave": _cmd_leave,
+    "acquire": _cmd_acquire,
+    "touch": _cmd_touch,
+    "release": _cmd_release,
     "admin release": _cmd_admin_release,
     "admin discover": _cmd_admin_discover,
 }
@@ -753,6 +1061,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except NotHeld as exc:
         print(f"banksman: the lease is lost: {clean(str(exc))}", file=sys.stderr)
         return EXIT_LOST
+    except Busy as exc:
+        print(f"banksman: {clean(str(exc))}", file=sys.stderr)
+        return EXIT_BUSY
     except (BanksmanError, OSError) as exc:
         print(f"banksman: {clean(str(exc))}", file=sys.stderr)
         return 1

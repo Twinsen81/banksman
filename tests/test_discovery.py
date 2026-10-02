@@ -49,6 +49,16 @@ def test_the_kind_fact_is_always_the_kind():
     assert instance.facts["kind"] == "device"
 
 
+def test_a_hook_cannot_set_the_attributes_that_banksman_sets():
+    facts = {"account": True, "tag": "lab", "form": "phone"}
+    found = parse("device", document({"name": "a", "facts": facts}))
+    assert found.instances[0].facts == {"form": "phone", "kind": "device"}
+    assert found.notes == (
+        "a: banksman sets the fact account itself, so it is left out",
+        "a: banksman sets the fact tag itself, so it is left out",
+    )
+
+
 @pytest.mark.parametrize(
     "data",
     [None, [], {"instances": []}, {"schema": 2, "instances": []}, {"schema": 1, "instances": {}}],

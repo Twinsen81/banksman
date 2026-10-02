@@ -78,6 +78,7 @@ def test_a_device_has_its_facts_and_its_google_accounts():
                 "name": "R5CR1234ABC",
                 "facts": {
                     "serial": "R5CR1234ABC",
+                    "running": True,
                     "manufacturer": "samsung",
                     "model": "SM-S926B",
                     "codename": "e2s",
@@ -131,7 +132,7 @@ def test_accounts_that_cannot_be_read_are_not_known():
 def test_a_device_whose_properties_cannot_be_read_still_has_its_serial():
     adb = FakeAdb({"devices": "List of devices attached\nR5CR1234ABC\tdevice\n"})
     (instance,) = android.devices(Android(sdk=SDK), run=adb)["instances"]
-    assert instance["facts"] == {"serial": "R5CR1234ABC"}
+    assert instance["facts"] == {"serial": "R5CR1234ABC", "running": True}
     assert instance["accounts"] is None
     assert instance["note"].startswith("cannot read the properties")
 
@@ -195,6 +196,7 @@ def test_emulators_are_the_avds_and_a_running_one_has_its_serial_and_accounts(tm
                 "image": "android-wear",
                 "abi": "arm64-v8a",
                 "form": "watch",
+                "running": False,
             },
         },
         {
@@ -207,6 +209,7 @@ def test_emulators_are_the_avds_and_a_running_one_has_its_serial_and_accounts(tm
                 "image": "google_apis",
                 "abi": "arm64-v8a",
                 "form": "phone",
+                "running": True,
                 "serial": "emulator-5554",
             },
             "accounts": [],
@@ -219,6 +222,7 @@ def test_emulators_are_the_avds_and_a_running_one_has_its_serial_and_accounts(tm
                 "image": "google_apis",
                 "abi": "arm64-v8a",
                 "form": "tablet",
+                "running": False,
             },
         },
     ]
@@ -232,16 +236,17 @@ def test_an_avd_with_a_relative_path_is_found(tmp_path):
     (directory / "config.ini").write_text("tag.id=google_apis\n")
     adb = FakeAdb({"devices": "List of devices attached\n"})
     (instance,) = android.emulators(Android(sdk=SDK, avd_home=home), run=adb)["instances"]
-    assert instance["facts"] == {"avd": "qa_phone", "image": "google_apis"}
+    assert instance["facts"] == {"avd": "qa_phone", "image": "google_apis", "running": False}
 
 
-def test_without_adb_the_emulators_are_listed_as_not_running(tmp_path):
+def test_without_adb_it_is_not_known_whether_an_emulator_runs(tmp_path):
     home = tmp_path / "avd"
     write_avd(home, "qa_phone_api35", PHONE)
     adb = FakeAdb({"devices": AndroidError("adb does not exist")})
     document = android.emulators(Android(sdk=SDK, avd_home=home), run=adb)
     (instance,) = document["instances"]
     assert "serial" not in instance["facts"]
+    assert "running" not in instance["facts"]
     assert document["notes"][0].startswith("cannot list the running emulators")
 
 

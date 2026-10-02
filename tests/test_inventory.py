@@ -26,6 +26,8 @@ INVENTORY = Inventory(
         "device": Decisions(allowed=("R5CR1234ABC",)),
     },
     accounts=Decisions(allowed=("qa+1@example.test",), refused=("someone@example.com",)),
+    # Patterns are any text: they are written so that TOML reads them back unchanged.
+    tags={"lab": ("qa_*", "R5CR1234ABC"), "odd-1": ('Pixel_"7\\*', "Téléphone 📱*")},
 )
 
 
@@ -52,6 +54,15 @@ def test_the_file_is_toml_that_a_person_can_read(inventory_path):
     names = '[\n    "qa_phone_api35",\n    "qa_tablet_api33",\n]'
     assert f"[kinds.emulator]\nallowed = {names}" in text
     assert tomllib.loads(text)["accounts"]["refused"] == ["someone@example.com"]
+
+
+def test_tags_name_resources_by_patterns(inventory_path):
+    assert INVENTORY.tags_of("qa_phone_api35") == ("lab",)
+    assert INVENTORY.tags_of("R5CR1234ABC") == ("lab",)
+    assert INVENTORY.tags_of("Pixel_7") == ()
+    text = to_toml(INVENTORY)
+    assert '[tags]\nlab = [\n    "qa_*",\n    "R5CR1234ABC",\n]' in text
+    assert tomllib.loads(to_toml(Inventory()))["tags"] == {}
 
 
 def test_the_directory_is_created_private(tmp_path, monkeypatch):
@@ -83,6 +94,12 @@ def test_the_path_is_next_to_a_configuration_for_tests_and_otherwise_in_the_home
         ("[kinds.emulator]\nallowed = ['a']\nrefused = ['a']", "kinds.emulator"),
         ("accounts = []", "accounts"),
         ("[accounts]\nrefused = ['a b']", "accounts.refused"),
+        ("tags = []", "tags"),
+        ("[tags]\nLab = ['qa_*']", "tags.Lab"),
+        ("[tags]\nlab = 'qa_*'", "tags.lab"),
+        ("[tags]\nlab = []", "tags.lab"),
+        ("[tags]\nlab = ['']", "tags.lab"),
+        ('[tags]\nlab = ["qa\\u001b*"]', "tags.lab"),
     ],
 )
 def test_an_inventory_that_is_not_valid_is_refused(inventory_path, text, key):

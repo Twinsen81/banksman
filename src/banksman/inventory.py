@@ -2,7 +2,8 @@
 
 `banksman admin discover` writes it, and the operator can edit it. It is policy, not a cache:
 it holds only names, and what is on the machine is read again whenever it is needed. A name
-that a person refused stays refused when discover runs again, until a person allows it.
+that a person refused stays refused when discover runs again, until a person allows it. The
+operator also tags resources in it, with name patterns.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import fnmatch
 import json
 import os
 import pwd
+import re
 import stat
 import tempfile
 import tomllib
@@ -30,7 +32,13 @@ _HEADER = """\
 # writes this file, and you can edit it. Agents may use an instance or an account only when it
 # is under "allowed". A name under "refused" stays refused when discover runs again, until you
 # allow it.
+#
+# Under [tags], each tag names the resources that its patterns match, for example
+# lab = ["qa_*"]. A request asks for a tag with --where tag=lab. A tag gives no access.
 """
+_MAX_PATTERNS = 100
+_MAX_PATTERN_LENGTH = 256
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 class InventoryError(BanksmanError):
@@ -47,12 +55,17 @@ class Decisions:
 class Inventory:
     kinds: Mapping[str, Decisions] = field(default_factory=dict)
     accounts: Decisions = Decisions()
+    # Each tag and the name patterns of the resources that have it.
+    tags: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def allows(self, kind: str, name: str) -> bool:
         return name in self.kinds.get(kind, Decisions()).allowed
 
     def allows_account(self, name: str) -> bool:
         return name in self.accounts.allowed
+
+    def tags_of(self, name: str) -> tuple[str, ...]:
+        return tuple(sorted(tag for tag, patterns in self.tags.items() if matches(patterns, name)))
 
 
 def default_inventory_path() -> Path:
@@ -129,6 +142,10 @@ def to_toml(inventory: Inventory) -> str:
     for kind in sorted(inventory.kinds):
         sections.append(_section(f"kinds.{kind}", inventory.kinds[kind]))
     sections.append(_section("accounts", inventory.accounts))
+    sections.append(
+        "[tags]\n"
+        + "".join(f"{tag} = {_list(inventory.tags[tag])}\n" for tag in sorted(inventory.tags))
+    )
     return "\n".join(sections)
 
 
@@ -176,15 +193,17 @@ def _section(title: str, decisions: Decisions) -> str:
     # Names are resource names, which JSON writes as valid TOML strings.
     return (
         f"[{title}]\n"
-        f"allowed = {_names(decisions.allowed)}\n"
-        f"refused = {_names(decisions.refused)}\n"
+        f"allowed = {_list(decisions.allowed)}\n"
+        f"refused = {_list(decisions.refused)}\n"
     )
 
 
-def _names(names: Sequence[str]) -> str:
-    if not names:
+def _list(texts: Sequence[str]) -> str:
+    if not texts:
         return "[]"
-    return "[\n" + "".join(f"    {json.dumps(name)},\n" for name in names) + "]"
+    # A JSON string without control characters is a valid TOML string. Text outside ASCII is
+    # written as it is, because TOML does not accept the surrogate pairs that JSON uses for it.
+    return "[\n" + "".join(f"    {json.dumps(text, ensure_ascii=False)},\n" for text in texts) + "]"
 
 
 class _Invalid(Exception):
@@ -193,7 +212,7 @@ class _Invalid(Exception):
 
 
 def _inventory(data: dict[str, object]) -> Inventory:
-    _check_keys(data, None, ("kinds", "accounts"))
+    _check_keys(data, None, ("kinds", "accounts", "tags"))
     kinds = data.get("kinds", {})
     if not isinstance(kinds, dict):
         raise _Invalid("kinds", "must be a table")
@@ -203,9 +222,41 @@ def _inventory(data: dict[str, object]) -> Inventory:
     inventory = Inventory(
         kinds={name: _decisions(value, f"kinds.{name}") for name, value in kinds.items()},
         accounts=_decisions(data.get("accounts", {}), "accounts"),
+        tags=_tags(data.get("tags", {})),
     )
     _check_unique(inventory)
     return inventory
+
+
+def _tags(value: object) -> dict[str, tuple[str, ...]]:
+    if not isinstance(value, dict):
+        raise _Invalid("tags", "must be a table")
+    tags = {}
+    for tag, patterns in value.items():
+        where = f"tags.{tag}"
+        if KIND_NAME.fullmatch(tag) is None:
+            raise _Invalid(
+                where,
+                "a tag starts with a lowercase letter, has only lowercase letters, digits, '_',"
+                " and '-', and has at most 32 characters",
+            )
+        if (
+            not isinstance(patterns, list)
+            or not 1 <= len(patterns) <= _MAX_PATTERNS
+            or not all(
+                isinstance(pattern, str)
+                and 0 < len(pattern) <= _MAX_PATTERN_LENGTH
+                and _CONTROL.search(pattern) is None
+                for pattern in patterns
+            )
+        ):
+            raise _Invalid(
+                where,
+                f'must be a list of 1 to {_MAX_PATTERNS} name patterns, such as ["qa_*"], where'
+                " * matches any text and ? matches one character",
+            )
+        tags[tag] = tuple(dict.fromkeys(patterns))
+    return tags
 
 
 def _check_unique(inventory: Inventory) -> None:

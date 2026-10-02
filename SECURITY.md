@@ -65,7 +65,15 @@ so a branch name that anybody can choose gives a valid issue id or none.
 **Discovered values are untrusted.** Device names, models, and notes come from devices and
 from discover hooks. banksman refuses an instance name that is not a valid resource name,
 keeps only short facts without control characters, removes terminal control sequences from
-notes, and never shows an account name that it does not accept.
+notes, and never shows an account name that it does not accept. banksman sets the attributes
+`kind`, `account`, and `tag` itself, so a hook cannot make an instance look like one of
+another kind or like one with an allowed account. A request grants only what the
+configuration declares or the inventory allows, also when it names a resource.
+
+**A grant is safe to read in a shell.** The `KEY=value` lines of `acquire` carry only the
+resource name, the kind, the lease id, the state, and a serial, and each value has only the
+characters of a resource name. A serial with other characters is not printed, and no other
+fact is printed.
 
 **No credentials.** For accounts on devices, banksman stores identifiers such as email
 addresses, never passwords or tokens. The account is already signed in on the device; a

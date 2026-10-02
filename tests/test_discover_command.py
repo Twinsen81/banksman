@@ -96,6 +96,14 @@ def test_yes_writes_the_preselection_and_refuses_nothing(capsys, config_path, in
     )
 
 
+def test_discover_keeps_the_tags_of_the_operator(capsys, config_path):
+    save_inventory(Inventory(tags={"lab": ("qa_*",)}))
+    configure(config_path, preselect=["qa_*"])
+    shown = run_json(capsys, "--yes")
+    assert shown["inventory"]["tags"] == {"lab": ["qa_*"]}
+    assert load_inventory().tags == {"lab": ("qa_*",)}
+
+
 def test_a_rescan_cannot_widen_access_to_a_refused_name(capsys, config_path):
     save_inventory(
         Inventory(

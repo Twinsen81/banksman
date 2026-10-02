@@ -60,6 +60,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   devices with their facts (such as `manufacturer`, `model`, `codename`, and the
   `display_name` of an AVD) and Google accounts; they only read, and they find the SDK in a
   fixed place or in `[android]`, never through `$ANDROID_HOME`.
+- Requests by properties. `banksman acquire --where <clause>` grants a permitted resource
+  that is present now and matches every clause, with the operators `=`, `!=`, `~`, `>=`, and
+  `<=`, and prints `RESOURCE`, `KIND`, `LEASE`, `STATE`, and `SERIAL` as `KEY=value` lines,
+  or JSON with `--json`. Facts come from discovery, and the presets now also give `running`.
+  banksman sets `kind`, `account` (whether an allowed account is signed in), and `tag`
+  itself, and the operator assigns tags under `[tags]` in the inventory. An unknown
+  attribute or kind is an error. banksman chooses the caller's lease that it keeps with
+  `--lease`, then the kind with the lowest `rank` (1 for the `android-device` preset, 0 for
+  other kinds), then an instance that runs before one that does not run. banksman starts
+  nothing: every grant is `ready`, and the holder starts an instance that does not run.
+  `--wait` waits while every matching resource is held, and exit status 4 means that they
+  are all in use.
+- The `on_acquire` hook of a kind resets an instance before a run gets it. When it fails,
+  the lease is given back. The lease names the process that runs the hook, and no other
+  command takes the resource back or hands it on until that process has ended. After the
+  reset, `acquire` reads the facts of the instance again, so that it prints the current
+  serial.
+- `banksman touch` and `banksman release` take the lease id. `touch` records the agent
+  process as the owner process, and `release --all` gives back the leases of the caller's
+  agent process. A held resource is never granted again without its lease id, also not to
+  the same worktree, because several agents can work in one worktree.
 - Design document ([docs/DESIGN.md](docs/DESIGN.md)), recorded decisions
   ([DECISIONS.md](DECISIONS.md)), security policy and threat model
   ([SECURITY.md](SECURITY.md)), and contribution guide.

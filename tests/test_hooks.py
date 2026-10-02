@@ -57,6 +57,15 @@ def test_an_on_void_hook_that_fails_says_why():
     assert failure == "the on_void hook failed with exit status 3"
 
 
+def test_an_on_acquire_hook_resets_the_instance_and_says_why_it_failed():
+    assert hooks.reset({"emulator": Kind("emulator")}, LEASE) is None
+    assert hooks.reset({}, LEASE) is None
+    resetting = {"emulator": Kind("emulator", on_acquire=tuple(hook("pass")))}
+    assert hooks.reset(resetting, LEASE) is None
+    failing = {"emulator": Kind("emulator", on_acquire=tuple(hook("raise SystemExit(2)")))}
+    assert hooks.reset(failing, LEASE) == "the on_acquire hook failed with exit status 2"
+
+
 def test_a_hook_that_a_signal_ended_has_failed():
     code = "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"
     assert hooks.run(hook(code), LEASE, timeout=30) == "was ended by signal 9"
