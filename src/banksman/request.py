@@ -1,8 +1,9 @@
 """Requests by properties: which resources match the `--where` clauses, in the order of choice.
 
 A resource has facts from discovery, which an agent cannot set, and tags from the operator. A
-request is an AND of clauses. Only what the configuration declares or the inventory allows,
-and what is present now, can match: a request never widens access.
+request has one or more parts, and each part is an AND of clauses. Only what the configuration
+declares or the inventory allows, and what is present now, can match: a request never widens
+access.
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ RUNNING = "running"
 # Attributes that are known also when no instance has them now, so that a request for one waits
 # for a match instead of failing.
 KNOWN = frozenset({KIND, ACCOUNT, TAG, *android.FACTS})
+# The name of a part of a request. It becomes the prefix of the KEY=value lines of the grant.
+PART_NAME = re.compile(r"[a-z][a-z0-9_]{0,15}")
 _NUMBER = re.compile(r"-?[0-9]{1,10}")
 _CLAUSE = re.compile(r"([^<>!=~]*)(>=|<=|!=|=|~)(.*)", re.DOTALL)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -42,14 +45,27 @@ class Clause:
 
 
 @dataclass(frozen=True)
+class Part:
+    """One resource that a request needs: its clauses, and how many accounts on it."""
+
+    clauses: tuple[Clause, ...] = ()
+    # Named when the request has several parts.
+    name: str | None = None
+    accounts: int = 0
+
+
+@dataclass(frozen=True)
 class Candidate:
-    """A permitted resource that is present now and matches a request."""
+    """A permitted resource that is present now and matches a part of a request."""
 
     resource: str
     kind: str
     rank: int
     facts: Mapping[str, FactValue] = field(default_factory=dict)
     tags: tuple[str, ...] = ()
+    # The allowed accounts that are signed in on the instance now, or None when its accounts
+    # are not known.
+    accounts: tuple[str, ...] | None = None
 
     @property
     def cold(self) -> bool:
@@ -59,8 +75,9 @@ class Candidate:
 
 @dataclass(frozen=True)
 class Search:
-    # The matching resources, free or held, in the order in which banksman chooses them.
-    candidates: tuple[Candidate, ...]
+    # For each part, the matching resources, free or held, in the order in which banksman
+    # chooses them.
+    candidates: tuple[tuple[Candidate, ...], ...]
     # What discovery reported, and allowed instances that are not present now.
     notes: tuple[str, ...] = ()
 
@@ -97,28 +114,29 @@ def check_kinds(clauses: Sequence[Clause], config: Config) -> None:
 def search(
     config: Config,
     inventory: Inventory,
-    clauses: Sequence[Clause],
+    parts: Sequence[Part],
     *,
     discover: Discover = discover_now,
 ) -> Search:
-    """Find the permitted resources that are present now and match every clause.
+    """Find, for each part, the permitted resources that are present now and match every clause
+    of the part.
 
-    Discovery runs only for the kinds that the `kind` clauses allow. An attribute that is
-    neither known nor a fact that discovery found now is an error, never an empty match that
-    waits forever.
+    Discovery runs once for each kind that the `kind` clauses of a part allow. An attribute that
+    is neither known nor a fact that discovery found now for the kinds of its part is an error,
+    never an empty match that waits forever. A part that needs accounts matches only resources
+    with that many allowed accounts signed in now.
     """
-    check_kinds(clauses, config)
-    kind_clauses = [clause for clause in clauses if clause.attribute == KIND]
-    kinds = [
-        kind
-        for kind in config.kinds.values()
-        if all(matches(clause, {KIND: kind.name}) for clause in kind_clauses)
-    ]
+    check_kinds([clause for part in parts for clause in part.clauses], config)
+    kinds_of = [_kinds(config, part) for part in parts]
+    wanted = {kind.name for kinds in kinds_of for kind in kinds}
     declared = {name: kind.name for kind in config.kinds.values() for name in kind.instances()}
-    found_facts: set[str] = set()
+    found_facts: dict[str, set[str]] = {}
     notes: list[str] = []
     resources: list[Candidate] = []
-    for kind in kinds:
+    for kind in config.kinds.values():
+        if kind.name not in wanted:
+            continue
+        found_facts[kind.name] = set()
         if not kind.discovered:
             # The configuration that declares the instances is the permission.
             resources.extend(
@@ -129,19 +147,23 @@ def search(
         found = discover(kind, config)
         notes.extend(f"kind {kind.name}: {note}" for note in found.notes)
         for instance in found.instances:
-            found_facts.update(instance.facts)
+            found_facts[kind.name].update(instance.facts)
             # A name has one lease file, so a name that another kind declares is not this kind's.
             if declared.get(instance.name, kind.name) != kind.name:
                 continue
             if not inventory.allows(kind.name, instance.name):
                 continue
             facts = dict(instance.facts)
+            accounts = None
             # Whether an allowed account is signed in now. When the accounts are not known, the
             # fact is left out, so that no clause on it matches.
             if instance.accounts is not None:
-                facts[ACCOUNT] = any(inventory.allows_account(name) for name in instance.accounts)
+                accounts = tuple(
+                    sorted(name for name in instance.accounts if inventory.allows_account(name))
+                )
+                facts[ACCOUNT] = bool(accounts)
             tags = inventory.tags_of(instance.name)
-            resources.append(Candidate(instance.name, kind.name, kind.rank, facts, tags))
+            resources.append(Candidate(instance.name, kind.name, kind.rank, facts, tags, accounts))
         present = {instance.name for instance in found.instances}
         allowed = inventory.kinds[kind.name].allowed if kind.name in inventory.kinds else ()
         notes.extend(
@@ -149,17 +171,35 @@ def search(
             for name in allowed
             if name not in present
         )
-    _check_attributes(clauses, found_facts)
-    matching = [
-        candidate
-        for candidate in resources
-        if all(matches(clause, candidate.facts, candidate.tags) for clause in clauses)
+    candidates = []
+    for part, kinds in zip(parts, kinds_of):
+        names = {kind.name for kind in kinds}
+        _check_attributes(part.clauses, set().union(*(found_facts[name] for name in names)))
+        matching = [
+            candidate
+            for candidate in resources
+            if candidate.kind in names
+            and all(matches(clause, candidate.facts, candidate.tags) for clause in part.clauses)
+            and (
+                part.accounts == 0
+                or (candidate.accounts is not None and len(candidate.accounts) >= part.accounts)
+            )
+        ]
+        # Lower ranks first, so a request that does not name a kind gets, for example, an
+        # emulator before a physical device. Then an instance that runs before one that its
+        # holder must start, which saves the time and the memory of a start.
+        matching.sort(key=lambda candidate: (candidate.rank, candidate.cold, candidate.resource))
+        candidates.append(tuple(matching))
+    return Search(tuple(candidates), tuple(notes))
+
+
+def _kinds(config: Config, part: Part) -> list[Kind]:
+    kind_clauses = [clause for clause in part.clauses if clause.attribute == KIND]
+    return [
+        kind
+        for kind in config.kinds.values()
+        if all(matches(clause, {KIND: kind.name}) for clause in kind_clauses)
     ]
-    # Lower ranks first, so a request that does not name a kind gets, for example, an emulator
-    # before a physical device. Then an instance that runs before one that its holder must
-    # start, which saves the time and the memory of a start.
-    matching.sort(key=lambda candidate: (candidate.rank, candidate.cold, candidate.resource))
-    return Search(tuple(matching), tuple(notes))
 
 
 def matches(

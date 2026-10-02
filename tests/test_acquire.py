@@ -88,12 +88,18 @@ def test_acquire_prints_json(capsys, config_path):
     shown = json.loads(capsys.readouterr().out)
     assert shown == {
         "schema": shown["schema"],
-        "resource": "build-0",
-        "kind": "build",
         "lease_id": leases()["build-0"].lease_id,
-        "state": "ready",
-        "serial": None,
-        "kept": False,
+        "parts": [
+            {
+                "part": None,
+                "resource": "build-0",
+                "kind": "build",
+                "state": "ready",
+                "serial": None,
+                "accounts": [],
+                "kept": False,
+            }
+        ],
     }
 
 
@@ -149,7 +155,7 @@ def test_a_kept_lease_records_the_new_owner_process_and_the_new_expected_time(
         ["acquire", "--where", "kind=build", "--lease", first["LEASE"], "--json"]
         + ["--owner-pid", str(os.getpid()), "--expect", "5m"]
     ) == 0
-    assert json.loads(capsys.readouterr().out)["kept"] is True
+    assert json.loads(capsys.readouterr().out)["parts"][0]["kept"] is True
     lease = leases()["build-0"]
     assert lease.owner_pid == os.getpid()
     # One clock reading gives both, so that they differ by exactly the expected time.
@@ -356,3 +362,209 @@ def test_release_all_without_an_agent_process_is_an_error(capsys, config_path):
     configure(config_path)
     assert main(["release", "--all"]) == 1
     assert "needs the agent process" in capsys.readouterr().err
+
+
+# Joint requests: several resources at once, and accounts with their device.
+
+PAIRED = [
+    {
+        "name": "R5CR0001",
+        "facts": {"form": "phone", "running": True, "serial": "R5CR0001"},
+        "accounts": ["qa@example.test", "me@example.com"],
+    },
+    {
+        "name": "R5CR0002",
+        "facts": {"form": "phone", "running": True, "serial": "R5CR0002"},
+        "accounts": ["qa@example.test"],
+    },
+    # Its accounts are not known, so it is not offered for work that needs an account.
+    {"name": "R5CR0003", "facts": {"form": "tablet", "running": True, "serial": "R5CR0003"}},
+]
+
+
+def configure_paired(config_path):
+    found = json.dumps({"schema": 1, "instances": PAIRED})
+    write_config(
+        config_path,
+        "[holder]\nagents = []\n"
+        f"[kinds.device]\ndiscover = {json.dumps(hook(PRINT_ARGUMENT, found))}\n",
+    )
+    save_inventory(
+        Inventory(
+            kinds={"device": Decisions(allowed=("R5CR0001", "R5CR0002", "R5CR0003"))},
+            accounts=Decisions(allowed=("qa@example.test",), refused=("me@example.com",)),
+        )
+    )
+
+
+def test_an_account_is_leased_with_its_device(capsys, config_path):
+    configure_paired(config_path)
+    status, values, _ = acquire(capsys, "--where", "form=phone", "--accounts", "1")
+    assert status == 0
+    assert values == {
+        "RESOURCE": "R5CR0001",
+        "KIND": "device",
+        "LEASE": leases()["R5CR0001"].lease_id,
+        "STATE": "ready",
+        "SERIAL": "R5CR0001",
+        "ACCOUNTS": "qa@example.test",
+    }
+    assert leases()["R5CR0001"].accounts == ("qa@example.test",)
+    # The other phone is signed in to the same account, so a second run waits for it.
+    status, _, err = acquire(capsys, "--where", "form=phone", "--accounts", "1")
+    assert status == cli.EXIT_BUSY
+    assert err == (
+        "banksman: every matching resource, or the accounts on it, is in use: R5CR0001,"
+        " R5CR0002\n"
+    )
+    # A run that does not ask for an account can still get that phone.
+    _, other, _ = acquire(capsys, "--where", "form=phone")
+    assert other["RESOURCE"] == "R5CR0002"
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    capsys.readouterr()
+    status, again, _ = acquire(capsys, "--where", "kind=device", "--accounts", "1")
+    assert (status, again["RESOURCE"], again["ACCOUNTS"]) == (0, "R5CR0001", "qa@example.test")
+
+
+def test_status_shows_the_accounts_of_a_lease(capsys, config_path):
+    configure_paired(config_path)
+    acquire(capsys, "--where", "form=phone", "--accounts", "1")
+    assert main(["status"]) == 0
+    assert capsys.readouterr().out.splitlines()[1].endswith("qa@example.test")
+    assert main(["status", "--json"]) == 0
+    (lease,) = json.loads(capsys.readouterr().out)["leases"]
+    assert lease["accounts"] == ["qa@example.test"]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "problem"),
+    [
+        (
+            ["--where", "form=phone", "--accounts", "2"],
+            "matches form=phone with 2 allowed accounts signed in",
+        ),
+        (["--where", "form=tablet", "--accounts", "1"], "matches form=tablet with 1 allowed"),
+    ],
+)
+def test_a_request_for_accounts_that_no_device_has_fails_at_once(
+    capsys, config_path, arguments, problem
+):
+    configure_paired(config_path)
+    status, _, err = acquire(capsys, *arguments, "--wait", "1h")
+    assert status == 1
+    assert problem in err
+
+
+def test_a_joint_acquire_prints_each_part_under_its_name(capsys, config_path):
+    configure(config_path)
+    status, values, _ = acquire(
+        capsys,
+        *["--as", "phone", "--where", "form=phone"],
+        *["--as", "tablet", "--where", "form=tablet"],
+        *["--as", "build", "--where", "kind=build"],
+    )
+    assert status == 0
+    lease_id = values["LEASE"]
+    assert values == {
+        "LEASE": lease_id,
+        "PHONE_RESOURCE": "qa_phone",
+        "PHONE_KIND": "emulator",
+        "PHONE_STATE": "ready",
+        "PHONE_SERIAL": "emulator-5554",
+        "TABLET_RESOURCE": "qa_tablet",
+        "TABLET_KIND": "emulator",
+        "TABLET_STATE": "ready",
+        "BUILD_RESOURCE": "build-0",
+        "BUILD_KIND": "build",
+        "BUILD_STATE": "ready",
+    }
+    assert {lease.lease_id for lease in leases().values()} == {lease_id}
+
+
+def test_a_joint_acquire_prints_json_with_the_names_of_the_parts(capsys, config_path):
+    configure(config_path)
+    arguments = ["--as", "phone", "--where", "form=phone", "--as", "build", "--json"]
+    assert main(["acquire", *arguments]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert [(part["part"], part["resource"]) for part in shown["parts"]] == [
+        ("phone", "qa_phone"),
+        ("build", "build-0"),
+    ]
+    assert shown["lease_id"] == leases()["qa_phone"].lease_id
+
+
+def test_parts_that_cannot_all_be_met_together_fail_at_once(capsys, config_path, monkeypatch):
+    configure(config_path)
+    monkeypatch.setattr(Machine, "sleep", lambda self, seconds: pytest.fail("it waited"))
+    arguments = ["--as", "a", "--where", "form=tablet", "--as", "b", "--where", "form=tablet"]
+    status, _, err = acquire(capsys, *arguments, "--wait", "1h")
+    assert status == 1
+    assert "cannot meet all parts of the request at the same time" in err
+    status, _, err = acquire(capsys, "--as", "a", "--as", "b", "--where", "form=car")
+    assert status == 1
+    assert "part b: no permitted resource that is present now matches form=car" in err
+    assert leases() == {}
+
+
+def test_a_joint_acquire_takes_nothing_while_a_part_is_in_use(capsys, config_path):
+    configure(config_path)
+    acquire(capsys, "--where", "form=tablet")
+    arguments = ["--as", "phone", "--where", "form=phone", "--as", "tablet"]
+    status, _, err = acquire(capsys, *arguments, "--where", "form=tablet")
+    assert status == cli.EXIT_BUSY
+    assert err == (
+        "banksman: the parts of the request cannot all be granted, because resources or accounts"
+        " that they need are in use: phone: qa_phone; tablet: qa_tablet\n"
+    )
+    assert list(leases()) == ["qa_tablet"]
+
+
+def test_a_failing_reset_gives_back_every_new_lease_of_the_request(capsys, config_path):
+    configure(config_path, extra=f"on_acquire = {json.dumps(hook(FAIL))}\n")
+    arguments = ["--as", "build", "--where", "kind=build", "--as", "phone"]
+    status, values, err = acquire(capsys, *arguments, "--where", "form=phone")
+    assert (status, values) == (1, {})
+    assert err == (
+        "banksman: cannot reset qa_phone: the on_acquire hook failed with exit status 5;"
+        " the new leases are given back\n"
+    )
+    assert leases() == {}
+
+
+def test_touch_and_release_act_on_every_resource_of_a_lease(capsys, config_path, state_dir):
+    configure(config_path)
+    arguments = ["--as", "build", "--where", "kind=build", "--as", "tablet"]
+    _, values, _ = acquire(capsys, *arguments, "--where", "form=tablet")
+    lease_id = values["LEASE"]
+    for resource in ("build-0", "qa_tablet"):
+        age_lease(state_dir, resource, 15 * 60)
+    assert main(["touch", "--lease", lease_id]) == 0
+    for resource in ("build-0", "qa_tablet"):
+        age_lease(state_dir, resource, 15 * 60)
+    assert main(["reap"]) == 0
+    assert sorted(leases()) == ["build-0", "qa_tablet"]
+    capsys.readouterr()
+    assert main(["release", "--lease", lease_id]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "Released build-0: it is free.",
+        "Released qa_tablet: it is free.",
+    ]
+    assert main(["touch", "--lease", lease_id]) == 3
+
+
+@pytest.mark.parametrize(
+    ("arguments", "problem"),
+    [
+        (["--where", "form=phone", "--as", "tablet"], "after an --as"),
+        (["--as", "phone", "--as", "phone"], "the part phone is named twice"),
+        (["--as", "Phone"], "a part name starts with a lowercase letter"),
+        (["--accounts", "0"], "a number from 1 to 10"),
+        (["--accounts", "1", "--accounts", "2"], "--accounts is given twice for one part"),
+        ([arg for index in range(9) for arg in ("--as", f"p{index}")], "at most 8 parts"),
+    ],
+)
+def test_parts_that_are_not_valid_are_a_usage_error(capsys, arguments, problem):
+    with pytest.raises(SystemExit) as exc:
+        main(["acquire", *arguments])
+    assert exc.value.code == 2
+    assert problem in capsys.readouterr().err

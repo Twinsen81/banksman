@@ -68,12 +68,14 @@ keeps only short facts without control characters, removes terminal control sequ
 notes, and never shows an account name that it does not accept. banksman sets the attributes
 `kind`, `account`, and `tag` itself, so a hook cannot make an instance look like one of
 another kind or like one with an allowed account. A request grants only what the
-configuration declares or the inventory allows, also when it names a resource.
+configuration declares or the inventory allows, also when it names a resource, and an
+account only when the inventory allows it.
 
 **A grant is safe to read in a shell.** The `KEY=value` lines of `acquire` carry only the
-resource name, the kind, the lease id, the state, and a serial, and each value has only the
-characters of a resource name. A serial with other characters is not printed, and no other
-fact is printed.
+resource name, the kind, the lease id, the state, a serial, and the granted accounts, and each
+value has only the characters of a resource name; several accounts are separated by commas.
+The name of a part, which is the prefix of its keys, has only lowercase letters, digits, and
+`_`. A serial with other characters is not printed, and no other fact is printed.
 
 **No credentials.** For accounts on devices, banksman stores identifiers such as email
 addresses, never passwords or tokens. The account is already signed in on the device; a

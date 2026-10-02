@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,7 @@ from banksman.store import (
     Busy,
     Choice,
     LockTimeout,
+    Need,
     NotHeld,
     Store,
     StoreError,
@@ -58,6 +60,12 @@ def reaped(store):
 
 def resources(store):
     return [lease.resource for lease in store.snapshot().leases]
+
+
+def grant_one(store, choices, holder, **options):
+    """Grant a request with one part, and return what that part got."""
+    granted = store.grant([Need(tuple(choices))], holder, **options)
+    return None if granted is None else granted[0]
 
 
 def test_the_state_directory_does_not_depend_on_tmpdir(monkeypatch):
@@ -216,22 +224,23 @@ def test_grant_takes_the_first_free_choice(store):
         Choice("emu-2", "emulator"),
         Choice("phone-1", "device"),
     ]
-    granted = store.grant(choices, Holder(OWNER))
+    granted = grant_one(store, choices, Holder(OWNER))
     assert (granted.lease.resource, granted.lease.owner, granted.kept) == ("emu-2", OWNER, False)
-    assert store.grant(choices, Holder(OWNER)).lease.resource == "phone-1"
-    assert store.grant(choices, Holder(OWNER)) is None
+    assert grant_one(store, choices, Holder(OWNER)).lease.resource == "phone-1"
+    assert grant_one(store, choices, Holder(OWNER)) is None
 
 
 def test_grant_gives_each_choice_its_timeouts(store, system):
     timeouts = Timeouts(boot_timeout=8 * 60, hard_cap=60 * 60)
-    lease = store.grant([Choice("emu-1", "emulator", timeouts)], Holder(OWNER), expect=60).lease
+    choices = [Choice("emu-1", "emulator", timeouts)]
+    lease = grant_one(store, choices, Holder(OWNER), expect=60).lease
     assert (lease.state, lease.boot_deadline, lease.reaper_pid) == (READY, None, None)
     assert (lease.hard_deadline, lease.expected) == (system.now + 60 * 60, system.now + 60)
 
 
 def test_a_lease_whose_instance_is_reset_names_the_process_that_resets_it(store, system):
     choice = Choice("emu-1", "emulator", Timeouts(boot_timeout=8 * 60), reset=True)
-    lease = store.grant([choice], Holder(OWNER)).lease
+    lease = grant_one(store, [choice], Holder(OWNER)).lease
     assert (lease.state, lease.boot_deadline) == (BOOTING, system.now + 8 * 60)
     assert (lease.reaper_pid, lease.reaper_started) == (os.getpid(), "start-self")
     ready = store.ready("emu-1", lease.lease_id)
@@ -246,7 +255,7 @@ def test_a_lease_whose_instance_is_reset_names_the_process_that_resets_it(store,
 def reset_by_another_process(store, system, state_dir):
     """Grant emu-1 with a reset that process 4242 runs, as another acquire would."""
     system.spawn(4242)
-    lease = store.grant([Choice("emu-1", "emulator", reset=True)], Holder(OWNER)).lease
+    lease = grant_one(store, [Choice("emu-1", "emulator", reset=True)], Holder(OWNER)).lease
     edit_lease(
         state_dir, "emu-1", lambda data: data.update(reaper_pid=4242, reaper_started="start-4242")
     )
@@ -290,7 +299,7 @@ def test_release_all_during_a_reset_by_another_process_waits_for_the_reset(
     system.spawn(100)
     system.spawn(4242)
     choice = Choice("emu-1", "emulator", reset=True)
-    store.grant([choice], Holder(OWNER, owner_pid=100))
+    grant_one(store, [choice], Holder(OWNER, owner_pid=100))
     edit_lease(
         state_dir, "emu-1", lambda data: data.update(reaper_pid=4242, reaper_started="start-4242")
     )
@@ -299,7 +308,7 @@ def test_release_all_during_a_reset_by_another_process_waits_for_the_reset(
 
 
 def test_the_process_that_resets_an_instance_gives_its_lease_back_at_once(store, state_dir):
-    lease = store.grant([Choice("emu-1", "emulator", reset=True)], Holder(OWNER)).lease
+    lease = grant_one(store, [Choice("emu-1", "emulator", reset=True)], Holder(OWNER)).lease
     assert store.release("emu-1", lease.lease_id) is None
     assert not (state_dir / "emu-1.json").exists()
 
@@ -319,12 +328,12 @@ def test_force_release_waits_for_a_reset_that_runs(store, system, state_dir):
 def test_grant_keeps_the_lease_whose_id_the_caller_passes(store, system):
     system.processes = {100: "start-100", 200: "start-200"}
     choices = [Choice("emu-1", "emulator"), Choice("emu-2", "emulator")]
-    store.grant(choices, Holder(OTHER))
-    held = store.grant(choices, Holder(OWNER, owner_pid=100)).lease
+    grant_one(store, choices, Holder(OTHER))
+    held = grant_one(store, choices, Holder(OWNER, owner_pid=100)).lease
     assert held.resource == "emu-2"
     system.advance(60)
     # A restarted agent keeps its lease, and the lease records its new process.
-    kept = store.grant(choices, Holder(OWNER, owner_pid=200), keep=held.lease_id, expect=60)
+    kept = grant_one(store, choices, Holder(OWNER, owner_pid=200), keep=held.lease_id, expect=60)
     assert kept.kept
     assert (kept.lease.lease_id, kept.lease.touched) == (held.lease_id, system.now)
     assert (kept.lease.owner_pid, kept.lease.owner_started) == (200, "start-200")
@@ -332,13 +341,13 @@ def test_grant_keeps_the_lease_whose_id_the_caller_passes(store, system):
 
 
 def test_grant_does_not_keep_a_lease_that_is_lost_or_that_does_not_match(store, system):
-    held = store.grant([Choice("emu-1", "emulator")], Holder(OWNER)).lease
+    held = grant_one(store, [Choice("emu-1", "emulator")], Holder(OWNER)).lease
     # The request no longer matches the resource of the lease: the caller gets another one.
-    other = store.grant([Choice("emu-2", "emulator")], Holder(OWNER), keep=held.lease_id)
+    other = grant_one(store, [Choice("emu-2", "emulator")], Holder(OWNER), keep=held.lease_id)
     assert (other.lease.resource, other.kept) == ("emu-2", False)
     system.advance(20 * 60)
     choices = [Choice("emu-1", "emulator"), Choice("emu-3", "emulator")]
-    again = store.grant(choices, Holder(OWNER), keep=held.lease_id)
+    again = grant_one(store, choices, Holder(OWNER), keep=held.lease_id)
     assert (again.lease.resource, again.kept) == ("emu-3", False)
 
 
@@ -777,6 +786,179 @@ def test_only_one_of_many_processes_gets_the_resource(store, state_dir, tmp_path
 
 
 
+# Joint grants: several parts at once, all or nothing, and the accounts on a resource.
+
+QA = "qa@example.test"
+QB = "qb@example.test"
+
+
+def phone(name, *accounts):
+    return Choice(name, "device", accounts=accounts)
+
+
+def phone_and_tablet():
+    return [Need((Choice("phone-1", "device"),)), Need((Choice("tab-1", "device"),))]
+
+
+def test_a_joint_grant_gives_every_part_or_nothing(store):
+    store.acquire("tab-1", "device", Holder(OTHER))
+    assert store.grant(phone_and_tablet(), Holder(OWNER)) is None
+    # The free part is not held while the other part is in use.
+    assert resources(store) == ["tab-1"]
+
+
+def test_the_leases_of_a_joint_grant_share_one_id(store):
+    phone_1, tablet = store.grant(phone_and_tablet(), Holder(OWNER))
+    assert (phone_1.lease.resource, tablet.lease.resource) == ("phone-1", "tab-1")
+    assert phone_1.lease.lease_id == tablet.lease.lease_id
+    other = grant_one(store, [Choice("emu-1", "emulator")], Holder(OWNER))
+    assert other.lease.lease_id != phone_1.lease.lease_id
+
+
+def test_parts_that_match_the_same_resources_get_different_ones(store):
+    choices = (Choice("phone-1", "device"), Choice("phone-2", "device"))
+    first, second = store.grant([Need(choices), Need(choices[:1])], Holder(OWNER))
+    assert (first.lease.resource, second.lease.resource) == ("phone-2", "phone-1")
+
+
+def test_a_part_gets_accounts_on_its_resource_and_its_lease_lists_them(store, state_dir):
+    (granted,) = store.grant([Need((phone("phone-1", QA, QB),), accounts=1)], Holder(OWNER))
+    assert (granted.lease.resource, granted.accounts) == ("phone-1", (QA,))
+    assert lease_file(state_dir, "phone-1")["accounts"] == [QA]
+
+
+def test_an_account_is_in_use_while_any_lease_lists_it(store, system):
+    # The same account is signed in on two phones, so two runs must not use it at the same time.
+    need = Need((phone("phone-2", QA),), accounts=1)
+    lease = store.grant([Need((phone("phone-1", QA),), accounts=1)], Holder(OTHER))[0].lease
+    assert store.grant([need], Holder(OWNER)) is None
+    # The scripts of a lease that drains can still use the account.
+    system.spawn(4242)
+    store.enter("phone-1", lease.lease_id, 4242)
+    assert store.release("phone-1", lease.lease_id).state == DRAINING
+    assert store.grant([need], Holder(OWNER)) is None
+    system.end(4242)
+    assert reaped(store) == [("phone-1", RELEASE, RELEASED)]
+    (granted,) = store.grant([need], Holder(OWNER))
+    assert (granted.lease.resource, granted.accounts) == ("phone-2", (QA,))
+
+
+def test_a_part_waits_until_enough_accounts_on_its_resource_are_free(store):
+    store.grant([Need((phone("phone-1", QA),), accounts=1)], Holder(OTHER))
+    need = Need((phone("phone-2", QA, QB),), accounts=2)
+    assert store.grant([need], Holder(OWNER)) is None
+    (granted,) = store.grant([replace(need, accounts=1)], Holder(OWNER))
+    assert granted.accounts == (QB,)
+
+
+def test_a_kept_lease_can_get_more_accounts_on_its_resource(store):
+    choices = (phone("phone-1", QA, QB),)
+    (first,) = store.grant([Need(choices)], Holder(OWNER))
+    assert first.lease.accounts == ()
+    keep = first.lease.lease_id
+    (kept,) = store.grant([Need(choices, accounts=1)], Holder(OWNER), keep=keep)
+    assert (kept.kept, kept.accounts, kept.lease.accounts) == (True, (QA,), (QA,))
+    (kept,) = store.grant([Need(choices, accounts=2)], Holder(OWNER), keep=keep)
+    assert (kept.accounts, kept.lease.accounts) == ((QA, QB), (QA, QB))
+    # Asking for fewer accounts gives none of them back.
+    (kept,) = store.grant([Need(choices, accounts=1)], Holder(OWNER), keep=keep)
+    assert (kept.accounts, kept.lease.accounts) == ((QA,), (QA, QB))
+
+
+def test_new_leases_of_a_request_that_keeps_a_lease_join_its_holding(store):
+    first = grant_one(store, [Choice("phone-1", "device")], Holder(OWNER))
+    keep = first.lease.lease_id
+    phone_1, tablet = store.grant(phone_and_tablet(), Holder(OWNER), keep=keep)
+    assert (phone_1.kept, tablet.kept) == (True, False)
+    assert tablet.lease.lease_id == keep
+
+
+def test_an_id_that_names_no_held_lease_starts_no_holding(store):
+    (granted,) = store.grant(phone_and_tablet()[:1], Holder(OWNER), keep="$(reboot)")
+    assert granted.lease.lease_id != "$(reboot)"
+
+
+def test_check_touches_every_lease_of_the_holding(store, system):
+    phone_1, _ = store.grant(phone_and_tablet(), Holder(OWNER))
+    grant_one(store, [Choice("emu-1", "emulator")], Holder(OWNER))
+    system.advance(15 * 60)
+    store.check("phone-1", phone_1.lease.lease_id)
+    system.advance(10 * 60)
+    # The tablet was touched with the phone. The lease of another holding was not.
+    assert reaped(store) == [("emu-1", IDLE, RELEASED)]
+    assert resources(store) == ["phone-1", "tab-1"]
+
+
+def test_a_touch_of_the_holding_does_not_revive_a_void_lease(store, state_dir):
+    phone_1, _ = store.grant(phone_and_tablet(), Holder(OWNER))
+    age_lease(state_dir, "tab-1", 21 * 60)
+    store.touch("phone-1", phone_1.lease.lease_id)
+    assert reaped(store) == [("tab-1", IDLE, RELEASED)]
+
+
+def test_touch_and_release_by_the_id_of_a_holding(store, system):
+    phone_1, _ = store.grant(phone_and_tablet(), Holder(OWNER))
+    lease_id = phone_1.lease.lease_id
+    system.advance(60)
+    touched = store.touch_holding(lease_id, expect=5 * 60)
+    assert [(lease.resource, lease.touched, lease.expected) for lease in touched] == [
+        ("phone-1", system.now, system.now + 5 * 60),
+        ("tab-1", system.now, system.now + 5 * 60),
+    ]
+    released = store.release_holding(lease_id)
+    assert [(lease.resource, drained) for lease, drained in released] == [
+        ("phone-1", None),
+        ("tab-1", None),
+    ]
+    assert resources(store) == []
+    with pytest.raises(NotHeld, match="no lease with the id"):
+        store.release_holding(lease_id)
+    with pytest.raises(NotHeld, match="no lease with the id"):
+        store.touch_holding(lease_id)
+
+
+JOINT_GRANT = """
+import sys, time
+from pathlib import Path
+from banksman.lease import Holder
+from banksman.store import Choice, Need, Store
+from banksman.system import Machine
+state_dir, go, owner = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+accounts = ("qa@example.test", "qb@example.test")
+phones = tuple(Choice(f"phone-{index}", "device", accounts=accounts) for index in range(4))
+while not go.exists():
+    time.sleep(0.001)
+granted = Store(state_dir, Machine()).grant([Need(phones, 1), Need(phones, 1)], Holder(owner))
+if granted is None:
+    print("busy")
+else:
+    print(" ".join(f"{part.lease.resource}:{part.accounts[0]}" for part in granted))
+"""
+
+
+def test_runs_that_ask_at_the_same_time_never_share_a_resource_or_an_account(
+    store, state_dir, tmp_path
+):
+    # Four phones, all signed in to the same two accounts. Each run needs two phones with an
+    # account each, so only one run can get them.
+    store.snapshot()
+    go = tmp_path / "go"
+    env = {**os.environ, "PYTHONPATH": SRC}
+    children = [
+        subprocess.Popen(
+            [sys.executable, "-c", JOINT_GRANT, str(state_dir), str(go), f"/work/tree-{index}"],
+            stdout=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        for index in range(8)
+    ]
+    go.touch()
+    results = sorted(child.communicate(timeout=60)[0].strip() for child in children)
+    assert results[:7] == ["busy"] * 7
+    assert results[7].split() == ["phone-0:qa@example.test", "phone-1:qb@example.test"]
+
+
 # Fencing: the scripts that use a resource, and what the reaper does with them.
 
 # The processes of an agent app (parent, process group): the app, the agent, a command that
@@ -1189,7 +1371,7 @@ def test_a_resource_name_that_is_not_valid_is_refused_by_every_call(store):
         lambda: store.check("../phone-1", "lease-1"),
         lambda: store.touch("../phone-1", "lease-1"),
         lambda: store.release("../phone-1", "lease-1"),
-        lambda: store.grant([Choice("../phone-1", "device")], Holder(OWNER)),
+        lambda: grant_one(store, [Choice("../phone-1", "device")], Holder(OWNER)),
     ]
     for call in calls:
         with pytest.raises(BanksmanError, match="resource name"):

@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from banksman import SCHEMA_VERSION, fencing
+from banksman.assign import Option, Part, assign
 from banksman.errors import BanksmanError
 from banksman.lease import (
     BOOTING,
@@ -94,11 +95,24 @@ class Choice:
     # booting, and it names the caller, so that no other banksman process acts on the instance
     # while the reset runs.
     reset: bool = False
+    # The allowed accounts that are signed in on the instance now, in the order of choice.
+    accounts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Need:
+    """One part of a request: the resources that it may get, and how many accounts on its
+    resource it needs."""
+
+    choices: tuple[Choice, ...]
+    accounts: int = 0
 
 
 @dataclass(frozen=True)
 class Granted:
     lease: Lease
+    # The accounts that the part got. A kept lease can list more.
+    accounts: tuple[str, ...] = ()
     # The caller already held this lease, and passed its id to keep it.
     kept: bool = False
 
@@ -213,49 +227,67 @@ class Store:
 
     def grant(
         self,
-        choices: Sequence[Choice],
+        needs: Sequence[Need],
         holder: Holder,
         *,
         keep: str | None = None,
         expect: float | None = None,
-    ) -> Granted | None:
-        """Grant the first choice that is free, or None when every choice is held.
+    ) -> list[Granted] | None:
+        """Grant a resource for every need, all or nothing, or return None while that cannot be
+        done because resources or accounts are in use.
 
-        With `keep`, the id of a lease that the caller holds, the resource of that lease comes
-        first, if it is one of the choices: the lease is touched, and it records the holder's
-        owner process. Otherwise a held resource is never granted, also not to the same owner,
-        because several agents can work in one worktree.
+        Every new lease gets the same id, so the caller holds them as one holding. With `keep`,
+        the id of a lease that the caller holds, the resources of that holding come first: such
+        a lease is touched, records the holder's owner process, and can get more accounts on
+        its resource. While the holding has a held lease, new leases join it. Otherwise a held
+        resource is never granted, also not to the same owner, because several agents can work
+        in one worktree.
         """
-        for choice in choices:
-            check_names(choice.resource, choice.kind, holder)
+        for need in needs:
+            for choice in need.choices:
+                check_names(choice.resource, choice.kind, holder)
         with self._lock():
-            if keep is not None:
-                for choice in choices:
-                    current = self._read(choice.resource)
-                    if (
-                        isinstance(current, Lease)
-                        and current.lease_id == keep
-                        and current.resource == choice.resource
-                        and current.state in HELD
-                        and self._void_reason(current) is None
-                    ):
-                        lease = self._touched(current, holder.owner_pid)
-                        if expect is not None:
-                            lease = replace(lease, expected=lease.touched + expect)
-                        return Granted(self._write(lease), kept=True)
-            for choice in choices:
-                if self._read(choice.resource) is None:
-                    state = BOOTING if choice.reset else READY
-                    lease = self._new_lease(
-                        choice.resource, choice.kind, holder, state, choice.timeouts, expect
+            entries = self._scan()
+            held = {entry.resource for entry in entries}
+            # An account is in use while a lease in any state lists it. The accounts of a lease
+            # file that cannot be read are not known; the file keeps only its own resource out
+            # of use.
+            taken = {
+                account
+                for entry in entries
+                if isinstance(entry, Lease)
+                for account in entry.accounts
+            }
+            kept = {} if keep is None else self._holding(entries, keep)
+            parts = [_part(need, held, taken, kept) for need in needs]
+            picks = assign(parts)
+            if picks is None:
+                return None
+            # An id that names no held lease starts no holding: it can be any text.
+            lease_id = keep if kept else uuid.uuid4().hex
+            granted = []
+            for need, pick in zip(needs, picks):
+                current = kept.get(pick.resource)
+                if current is not None:
+                    lease = replace(
+                        self._touched(current, holder.owner_pid),
+                        accounts=tuple(dict.fromkeys((*current.accounts, *pick.accounts))),
                     )
-                    if choice.reset:
-                        me = os.getpid()
-                        lease = replace(
-                            lease, reaper_pid=me, reaper_started=self._start_time(me)
-                        )
-                    return Granted(self._write(lease))
-        return None
+                    if expect is not None:
+                        lease = replace(lease, expected=lease.touched + expect)
+                    granted.append(Granted(self._write(lease), pick.accounts, kept=True))
+                    continue
+                choice = next(each for each in need.choices if each.resource == pick.resource)
+                state = BOOTING if choice.reset else READY
+                lease = self._new_lease(
+                    choice.resource, choice.kind, holder, state, choice.timeouts, expect
+                )
+                lease = replace(lease, lease_id=lease_id, accounts=pick.accounts)
+                if choice.reset:
+                    me = os.getpid()
+                    lease = replace(lease, reaper_pid=me, reaper_started=self._start_time(me))
+                granted.append(Granted(self._write(lease), pick.accounts))
+            return granted
 
     def ready(self, resource: str, lease_id: str) -> Lease:
         """End the boot or the reset of an instance: the holder may use it now."""
@@ -280,13 +312,21 @@ class Store:
         *,
         expect: float | None = None,
     ) -> Lease:
-        """Touch a lease, and record `owner_pid` as its owner process, for example after the
-        agent restarted."""
+        """Touch a lease and the other leases of its holding, and record `owner_pid` as their
+        owner process, for example after the agent restarted."""
         with self._lock():
-            lease = self._touched(self._held(resource, lease_id), owner_pid)
-            if expect is not None:
-                lease = replace(lease, expected=lease.touched + expect)
-            return self._write(lease)
+            lease = self._held(resource, lease_id)
+            return self._touch_holding(lease, owner_pid, expect)[0]
+
+    def touch_holding(
+        self, lease_id: str, owner_pid: int | None = None, *, expect: float | None = None
+    ) -> list[Lease]:
+        """Touch every held lease with this id, as `touch` does."""
+        with self._lock():
+            leases = list(self._holding(self._scan(), lease_id).values())
+            if not leases:
+                raise NotHeld(f"no lease with the id {lease_id} is held")
+            return self._touch_holding(leases[0], owner_pid, expect)
 
     def enter(self, resource: str, lease_id: str, pid: int, pgid: int | None = None) -> Lease:
         """Check the lease, touch it, and register a script as a user of the resource."""
@@ -302,12 +342,13 @@ class Store:
                 if (other.pid, other.started, other.pgid) != (user.pid, user.started, user.pgid)
                 and fencing.runs(other, table)
             ]
-            return self._write(replace(self._touched(lease, None), users=(*users, user)))
+            return self._touch_holding(replace(lease, users=(*users, user)), None)[0]
 
     def check(self, resource: str, lease_id: str) -> Lease:
-        """Touch the lease while the caller may still use the resource, or raise NotHeld."""
+        """Touch the lease and its holding while the caller may still use the resource, or
+        raise NotHeld."""
         with self._lock():
-            return self._write(self._touched(self._held(resource, lease_id), None))
+            return self._touch_holding(self._held(resource, lease_id), None)[0]
 
     def leave(self, resource: str, lease_id: str, pid: int) -> None:
         """Remove the record of a script that no longer uses the resource."""
@@ -336,6 +377,17 @@ class Store:
             if lease.state not in HELD:
                 raise NotHeld(f"the lease on {resource} is {lease.state}")
             return self._give_back(lease)
+
+    def release_holding(self, lease_id: str) -> list[tuple[Lease, Lease | None]]:
+        """Give back every held lease with this id.
+
+        Return each lease, and the lease while it drains or None when its resource is free.
+        """
+        with self._lock():
+            leases = list(self._holding(self._scan(), lease_id).values())
+            if not leases:
+                raise NotHeld(f"no lease with the id {lease_id} is held")
+            return [(lease, self._give_back(lease)) for lease in leases]
 
     def release_all(self, owner_pid: int) -> list[tuple[Lease, Lease | None]]:
         """Give back every held lease whose owner process is `owner_pid`.
@@ -591,6 +643,41 @@ class Store:
             raise NotHeld(f"the lease on {lease.resource} is void: {VOID_REASONS[reason]}")
         return lease
 
+    def _holding(self, entries: Sequence[Lease | Unreadable], lease_id: str) -> dict[str, Lease]:
+        """Return the valid held leases with this id, by resource."""
+        leases = [
+            entry
+            for entry in entries
+            if isinstance(entry, Lease) and entry.lease_id == lease_id and entry.state in HELD
+        ]
+        if not leases:
+            return {}
+        pids = sorted({lease.owner_pid for lease in leases if lease.owner_pid is not None})
+        running = self.system.running(pids) if pids else {}
+        boot_id = self.system.boot_id()
+        now = self.system.clock()
+        return {
+            lease.resource: lease
+            for lease in leases
+            if void_reason(lease, boot_id=boot_id, now=now, running=running) is None
+        }
+
+    def _touch_holding(
+        self, lease: Lease, owner_pid: int | None, expect: float | None = None
+    ) -> list[Lease]:
+        # The leases that one acquire granted share their id, and the holder uses them together.
+        # A script that checks one of them keeps the others too, so that a tablet does not time
+        # out while a long test runs on the phone of the same holding.
+        others = self._holding(self._scan(), lease.lease_id)
+        others.pop(lease.resource, None)
+        touched = []
+        for each in (lease, *others.values()):
+            each = self._touched(each, owner_pid)
+            if expect is not None:
+                each = replace(each, expected=each.touched + expect)
+            touched.append(self._write(each))
+        return touched
+
     def _touched(self, lease: Lease, owner_pid: int | None) -> Lease:
         touched = replace(lease, touched=self.system.clock(), touched_at=self.system.wall_clock())
         if owner_pid is None:
@@ -781,6 +868,41 @@ class Store:
                 continue
             with contextlib.suppress(FileNotFoundError):
                 _replace_file(self.directory, name, _read_file(self.quarantine_dir / name))
+
+
+def _part(need: Need, held: set[str], taken: set[str], kept: dict[str, Lease]) -> Part:
+    """Return the options of a need that the caller can get now: its own kept leases first,
+    then the resources that have no lease."""
+    options = []
+    for choice in need.choices:
+        current = kept.get(choice.resource)
+        if current is None:
+            continue
+        # The accounts of the kept lease first; it can also get free accounts on its resource.
+        own = [account for account in choice.accounts if account in current.accounts]
+        free = [account for account in choice.accounts if account not in taken]
+        options.append(Option(choice.resource, (*own, *free)))
+    options.extend(
+        Option(
+            choice.resource,
+            tuple(account for account in choice.accounts if account not in taken),
+        )
+        for choice in need.choices
+        if choice.resource not in held
+    )
+    return Part(tuple(options), need.accounts)
+
+
+def satisfiable(needs: Sequence[Need]) -> bool:
+    """Whether the needs could be met together if no resource and no account were in use."""
+    parts = [
+        Part(
+            tuple(Option(choice.resource, choice.accounts) for choice in need.choices),
+            need.accounts,
+        )
+        for need in needs
+    ]
+    return assign(parts) is not None
 
 
 def _drained(lease: Lease, reason: str, now: float) -> Lease:

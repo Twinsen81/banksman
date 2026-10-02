@@ -6,8 +6,8 @@ one forever.
 
 > **Status: pre-alpha, not usable yet.** This repository has the design, the lease core
 > (lease files, void triggers, and the reaper), resource kinds as configuration, fencing,
-> discovery with the allowlist, holder identity, and requests by properties. Joint acquire,
-> the console, and build slots are not written yet. The design is in
+> discovery with the allowlist, holder identity, requests by properties, and joint acquire
+> with accounts. The console and build slots are not written yet. The design is in
 > [docs/DESIGN.md](docs/DESIGN.md).
 
 A *banksman* is the person on a building site who directs crane lifts and tells each
@@ -29,6 +29,9 @@ One agent installs its build while another is in the middle of a UI test. A lock
   a device.
 - **Requests by properties.** A run asks for what it needs, for example
   `banksman acquire --where form=tablet --where 'api>=33'`, not for a device by name.
+- **Several resources at once.** A run that needs a phone and a tablet, or a device with a
+  signed-in test account, gets them in one call, all or nothing. Two runs never use the same
+  account at the same time, also not on two different devices.
 - **Automatic holder identity.** banksman records the worktree, the issue, and the agent
   process that holds each lease. It works the same for any coding agent, and for a person
   at a terminal.

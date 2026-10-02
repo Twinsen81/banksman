@@ -81,6 +81,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   process as the owner process, and `release --all` gives back the leases of the caller's
   agent process. A held resource is never granted again without its lease id, also not to
   the same worktree, because several agents can work in one worktree.
+- Joint acquire. `banksman acquire --as <part> ...` grants several resources in one call, all
+  or nothing, and prints the keys of each part with the part name as a prefix, for example
+  `PHONE_RESOURCE`. A request whose parts could not all be met even with every resource
+  free fails at once. The leases of one `acquire` share one lease id: `check`, `enter`, and
+  `touch` touch all of them, and `touch --lease` and `release --lease` without `--resource`
+  act on all of them. The JSON of `acquire` has the lease id and a list `parts`.
+- Accounts leased with their device. `acquire --accounts N` grants a resource on which N
+  allowed accounts are signed in now, together with those accounts, and prints them as
+  `ACCOUNTS`. No request gets an account while a lease in any state lists it, so two runs
+  never use one account on two devices at the same time. `status` shows the accounts of each
+  lease. Lease files carry the accounts, so their schema is now 4.
 - Design document ([docs/DESIGN.md](docs/DESIGN.md)), recorded decisions
   ([DECISIONS.md](DECISIONS.md)), security policy and threat model
   ([SECURITY.md](SECURITY.md)), and contribution guide.

@@ -1,13 +1,13 @@
 # banksman design
 
 **Status:** the project scaffold, the lease core, kinds as configuration, fencing, discovery,
-holder identity, and requests by properties exist. Sections 3, 4, 5, 6, 8, and 9 are
-implemented, with `banksman acquire`, `touch`, `release`, `reap`, a `status` that
+holder identity, requests by properties, and joint acquire with accounts exist. Sections 3 to
+9 are implemented, with `banksman acquire`, `touch`, `release`, `reap`, a `status` that
 lists the leases and their holders, `banksman whoami`, the commands that scripts run
 (`enter`, `check`, and `leave`), `banksman admin discover`, and
-`banksman admin release --force`. Joint acquire, the console, and build slots are not
-implemented yet. Resolved decisions and how to change them are in
-[DECISIONS.md](../DECISIONS.md); the threat model is in [SECURITY.md](../SECURITY.md).
+`banksman admin release --force`. The console and build slots are not implemented yet.
+Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
+model is in [SECURITY.md](../SECURITY.md).
 
 ## 1. Goals and non-goals
 
@@ -141,7 +141,7 @@ minutes, and its lease can become void in the middle.
   it to `enter`, `check`, and `leave`, and `touch` and `release` need it too. A
   script whose token does not name the current lease of the resource has lost it. So a
   script of an earlier lease, for example one of the same worktree, never acts on a newer
-  lease.
+  lease. The leases that one `acquire` grants share one id, and form one holding (section 7).
 - **The user's side.** A script registers itself with `enter` when it starts: its pid and,
   if it has one, the process group that it created for its work. `enter` also checks and
   touches the lease. A long-running script runs its work in its own process group, and runs
@@ -325,7 +325,7 @@ banksman acquire --where form=tablet --where 'api>=33' \
 
 When several resources match, banksman chooses in a fixed order:
 
-1. The resource of the caller's lease, if the caller passes the lease id with `--lease` and
+1. A resource of the caller's holding, if the caller passes the lease id with `--lease` and
    the resource still matches. The lease is touched, and it records the caller's agent
    process as its owner process.
 2. A kind with a lower `rank` (section 5). So a request that does not name a kind gets an
@@ -339,27 +339,31 @@ several agents can work in one worktree at the same time, so only the lease id t
 holdings apart (section 9).
 
 - **The grant.** `acquire` prints `KEY=value` lines: `RESOURCE`, `KIND`, `LEASE` (the lease
-  id that the scripts pass back), `STATE`, and `SERIAL` when discovery knows it. Each value
-  has only the characters of a resource name, so that a shell script can use it as it is: a
-  serial with other characters is not printed. With `--json`, it prints the same as JSON.
+  id that the scripts pass back), `STATE`, `SERIAL` when discovery knows it, and `ACCOUNTS`
+  when the request asks for accounts (section 7). Each value has only the characters of a
+  resource name, so that a shell script can use it as it is: a serial with other characters
+  is not printed. With `--json`, it prints the lease id and a list `parts` with the same
+  values for each part of the request.
 - **banksman starts nothing.** Every grant is `ready`. The holder checks whether the
   instance runs, and starts it if it does not, for example with the `emulator` command. A
   fact from discovery can be wrong, for example for an emulator that is still starting, so
   `running` only orders the matches, and the holder decides.
-- **The agent can choose.** `acquire` grants one resource and names it. It does not return a
-  list, because two callers that choose from the same list choose the same resource. An
-  agent that needs a specific resource asks for it, for example with `--where avd=qa_phone`.
+- **The agent can choose.** `acquire` grants one resource for each part of the request and
+  names it. It does not return a list, because two callers that choose from the same list
+  choose the same resource. An agent that needs a specific resource asks for it, for example
+  with `--where avd=qa_phone`.
 - **`on_acquire`.** When the kind declares an `on_acquire` hook (section 5), the lease is
-  `booting` while the hook runs, and then `ready`. If the hook fails, the lease is given back
-  and `acquire` fails. A failed reset does not make the instance unsafe for the next holder,
-  as a failed take-back does, so the instance is not quarantined. A lease that the caller
+  `booting` while the hook runs, and then `ready`. If a hook fails, every new lease of the
+  request is given back, and `acquire` fails. A failed reset does not make the instance
+  unsafe for the next holder, as a failed take-back does, so the instance is not quarantined. A lease that the caller
   keeps with `--lease` is not reset again. The hook can restart the instance, so `acquire`
   reads its facts again after the reset, and prints the serial that discovery finds then.
 - **No other process acts on the instance during a reset.** The lease names the `acquire`
   that runs the hook, and a hook never outlives that process (section 5). When the lease
   becomes void or is released during the reset, it drains, and the resource is taken back
   or freed only after that process has ended. `admin release --force` refuses meanwhile.
-- **Waiting.** While every matching resource is held, `acquire` fails with exit status 4.
+- **Waiting.** While every matching resource is held, `acquire` fails with exit status 4. For
+  a request with several parts, this is while the parts cannot all be granted (section 7).
   With `--wait`, it looks again every 5 seconds until the wait ends, and each look reads the
   configuration, the inventory, and the machine again. So the reaper of a caller that waits
   also uses the hooks of the current configuration (section 5). When no permitted resource that is present now matches, held or free,
@@ -367,20 +371,68 @@ holdings apart (section 9).
   There is no queue yet: when many callers wait, a caller can get a resource before another
   caller that started to wait earlier.
 
-## 7. Several resources at once, and pairs
+## 7. Several resources at once, and accounts
 
 - **Joint acquire.** A run that needs several resources at the same time, for example a
-  phone and a tablet, gets them in one call, under the same lock, all or nothing. Two runs
-  that each hold one resource and wait for the other would deadlock.
-- **Pairs.** Some resources are useful only together with a scarcer thing that lives on
-  them, such as a device with a signed-in account. The account is leased in its own right,
-  and a request for "a device with an account" is one joint acquire. If the account were
-  only an attribute of the device, two runs could take two devices that are signed in to the
-  same account, and then interfere with each other through that account.
-- banksman grants exactly one pair member and names it. It does not return the list of
-  candidates, because two clients that choose from the same list choose the same one.
-- The account lease only stops two runs from using the same account at the same time.
-  banksman keeps no app state for an account.
+  phone and a tablet, gets them in one call, all or nothing. Two runs that each hold one
+  resource and wait for the other would deadlock. Each `--as <name>` starts a part of the
+  request, and the `--where` and `--accounts` options after it belong to that part:
+
+  ```
+  banksman acquire --as phone --where form=phone --accounts 1 \
+                   --as tablet --where form=tablet --for "verify the sign-in" --wait 15m
+  LEASE=4f1c2b0e9d7a4c55a0f3e6b1c2d3e4f5
+  PHONE_RESOURCE=R5CR1234ABC
+  PHONE_KIND=device
+  PHONE_STATE=ready
+  PHONE_SERIAL=R5CR1234ABC
+  PHONE_ACCOUNTS=qa@example.test
+  TABLET_RESOURCE=qa_tablet
+  TABLET_KIND=emulator
+  TABLET_STATE=ready
+  ```
+
+  A part name has lowercase letters, digits, and `_`, and becomes the prefix of the keys of
+  its part. A request without `--as` has one part, and its keys have no prefix. A request has
+  at most 8 parts.
+- **The choice.** banksman chooses for all parts under the lock of the lease store. Each part
+  takes its matches in the order of choice (section 6), and an earlier part chooses first.
+  But a part takes a later match when a later part can get nothing else, so that a request
+  that can be met is met. A resource and an account go to one part only. When the parts
+  could not all be met even if every resource were free, for example two tablet parts on a
+  machine with one tablet, `acquire` fails at once. When they could, but resources that they
+  need are in use, it fails with exit status 4, or waits with `--wait`.
+- **A time limit.** The search for a choice stops after 1 second, because other commands wait
+  at most 10 seconds for the lock. A request that needs more time fails, and the agent can
+  ask for fewer parts or more specific clauses. Requests of a usual size need milliseconds.
+- **One holding.** The leases that one `acquire` grants share one lease id. `check`, `enter`,
+  and `touch` touch every held lease with that id, so that a tablet does not time out while a
+  long test runs on the phone of the same holding. `release --lease <id>` gives back every
+  resource of the holding, and `release --resource <name> --lease <id>` gives back one. A
+  request with `--lease <id>` first keeps the leases with that id that still match its parts.
+  While that holding has a held lease, the new leases of the request join it.
+- **Accounts.** Some resources are useful only together with a scarcer thing that lives on
+  them, such as a device with a signed-in account. `--accounts N` asks for a resource on
+  which at least N allowed accounts are signed in now, and leases N of them with it, in the
+  order of their names. The grant names them in `ACCOUNTS`, separated by commas. banksman
+  grants exactly the accounts that it names. It does not return the list of candidates,
+  because two clients that choose from the same list choose the same account. A test that
+  needs several accounts, for example to share something between two users, asks for that
+  many.
+- **An account is in use while a lease lists it.** The lease of the device lists the
+  accounts that came with it, and no request gets an account while a lease in any state
+  lists it. So two runs never use one account on two devices at the same time. The account
+  stays in use while its lease drains or is quarantined, because the scripts of the holder
+  can still use it then. If the account were only an attribute of the device, two runs could
+  take two devices that are signed in to the same account, and then interfere with each
+  other through that account. A kept lease can get more accounts on its device, and gives
+  none back until it is released.
+- Leasing an account only stops two runs from using the same account at the same time.
+  banksman keeps no app state for an account. A run that does not ask for an account can
+  still get a device whose account another run uses on another device. A run that must not
+  touch an allowed account asks for `--where account=false`.
+- A lease file that cannot be read keeps its own resource out of use, but its accounts are
+  not known, so banksman can grant them with another device.
 
 ## 8. Discovery and the allowlist
 
@@ -502,8 +554,8 @@ worktree at the same time, each with its own agent process. The lease id identif
 holding, and `acquire --lease`, `touch`, and `release` take it. Liveness stays with each
 agent, through its own agent process.
 
-- `touch` records the caller's agent process as the owner process, so a lease survives a
-  restart of the agent.
+- `touch` records the caller's agent process as the owner process of every lease of the
+  holding, so a lease survives a restart of the agent.
 - `release --all` gives back only the leases whose owner process is the caller's agent
   process, so it acts for one agent. After a restart of the agent, it finds a lease only
   after a touch has recorded the new agent process; until then, the lease ends by its
@@ -570,14 +622,15 @@ kind in the same pool.
 exists.
 
 ```
-banksman acquire --where <attr><op><value> ... [--for <text>] [--expect <duration>]
-                 [--wait <duration>] [--lease <id>] [--issue <id>] [--owner-pid <pid>] [--json]
+banksman acquire [--as <part>] [--where <attr><op><value> ...] [--accounts <n>] ...
+                 [--for <text>] [--expect <duration>] [--wait <duration>] [--lease <id>]
+                 [--issue <id>] [--owner-pid <pid>] [--json]
 banksman acquire --kind build --user-pid <pid> [--wait <duration>]
 banksman enter   --resource <name> --lease <id> --pid <pid> [--pgid <pgid>]  # check, touch, register
 banksman check   --resource <name> --lease <id>                    # touch; exit 0: yours, 3: lost
 banksman leave   --resource <name> --lease <id> --pid <pid>
-banksman touch   --resource <name> --lease <id> [--expect <duration>] [--owner-pid <pid>]
-banksman release --resource <name> --lease <id>
+banksman touch   --lease <id> [--resource <name>] [--expect <duration>] [--owner-pid <pid>]
+banksman release --lease <id> [--resource <name>]                  # the holding, or one resource
 banksman release --all [--owner-pid <pid>]                         # the leases of this agent
 banksman status  [--json] [--verbose]
 banksman whoami  [--json]
@@ -592,7 +645,8 @@ banksman admin release --force --resource <name>
 ```
 
 Commands that grant a resource print `KEY=value` lines, for example `RESOURCE=`, `SERIAL=`,
-and `LEASE=`, the lease id that the scripts pass back, so that a shell script can read them.
+`ACCOUNTS=`, and `LEASE=`, the lease id that the scripts pass back, so that a shell script
+can read them.
 With `--json` they print JSON instead. Exit status 1 is an error, 2 a usage error, 3 a lease
 that is lost, and 4 a request whose matching resources are all in use.
 
@@ -640,11 +694,14 @@ Done:
 - Holder identity for any agent, and `whoami`.
 - Requests by properties: `acquire` with facts, tags, and an order of choice; `touch` and
   `release`; and the `on_acquire` hook.
+- Joint acquire: several resources in one call, one holding for each call, and accounts
+  leased with their device.
 
 Next:
 
-- Joint acquire and pairs.
 - `status`, `watch`, `explain`, and `log`, and a queue for the callers that wait.
+- Keeping a lease while an agent waits for a person, and getting the same resource back
+  after a lease ends.
 - Build slots through a Gradle init script.
 
 ## 16. Open questions

@@ -9,10 +9,11 @@ import os
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from banksman import SCHEMA_VERSION, __version__, hooks
+from banksman.assign import MAX_ACCOUNTS, MAX_PARTS
 from banksman.config import Config, Kind, load_config, parse_duration
 from banksman.discovery import FactValue, Found, Instance, discover
 from banksman.errors import BanksmanError
@@ -28,17 +29,28 @@ from banksman.inventory import (
     save_inventory,
 )
 from banksman.lease import QUARANTINED, RESOURCE_NAME, VOID_REASONS, Lease, User
-from banksman.request import Candidate, Clause, check_kinds, parse_clause, search
+from banksman.request import (
+    PART_NAME,
+    Candidate,
+    Clause,
+    Part,
+    check_kinds,
+    parse_clause,
+    search,
+)
 from banksman.sanitize import clean
 from banksman.store import (
     Busy,
     Choice,
+    Granted,
+    Need,
     NotHeld,
     Reaped,
     Stopping,
     Store,
     TakeBack,
     default_state_dir,
+    satisfiable,
 )
 from banksman.system import Machine
 
@@ -92,16 +104,32 @@ def _build_parser() -> argparse.ArgumentParser:
 
     acquire = commands.add_parser(
         "acquire",
-        help="lease a permitted resource that matches the request, and print it as KEY=value",
+        help="lease permitted resources that match the request, and print them as KEY=value",
         allow_abbrev=False,
+    )
+    acquire.set_defaults(parts=None)
+    acquire.add_argument(
+        "--as",
+        action=_PartAction,
+        type=_part_name,
+        metavar="NAME",
+        help="start a part of the request: one more resource that the run needs at the same"
+        " time, such as --as phone; the --where and --accounts after it belong to this part",
     )
     acquire.add_argument(
         "--where",
-        action="append",
+        action=_WhereAction,
         type=_clause,
         metavar="CLAUSE",
         help="a property that the resource must have, such as form=tablet or 'api>=33'; repeat"
         " it for more",
+    )
+    acquire.add_argument(
+        "--accounts",
+        action=_AccountsAction,
+        type=_account_count,
+        metavar="N",
+        help="also lease N allowed accounts that are signed in on the resource, such as 1",
     )
     acquire.add_argument(
         "--for",
@@ -137,10 +165,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     touch = commands.add_parser(
         "touch",
-        help="touch a lease, and record this agent process as its owner process",
+        help="touch the leases of a holding, and record this agent process as their owner process",
         allow_abbrev=False,
     )
-    _lease_arguments(touch)
+    touch.add_argument(
+        "--lease", required=True, metavar="ID", help="the id of the lease, from acquire"
+    )
+    touch.add_argument("--resource", help="a resource of the lease, to check that it is held")
     touch.add_argument(
         "--expect",
         type=_duration,
@@ -153,17 +184,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     give_back = commands.add_parser(
         "release",
-        help="give a lease back, or every lease of this agent process",
+        help="give back the resources of a lease, or every lease of this agent process",
         allow_abbrev=False,
     )
-    which = give_back.add_mutually_exclusive_group(required=True)
-    which.add_argument("--resource", help="the leased resource; needs --lease")
-    which.add_argument(
+    give_back.add_argument(
+        "--lease", metavar="ID", help="the id of the lease: gives back all its resources"
+    )
+    give_back.add_argument("--resource", help="with --lease: give back only this resource")
+    give_back.add_argument(
         "--all",
         action="store_true",
         help="every lease whose owner process is this agent process",
     )
-    give_back.add_argument("--lease", metavar="ID", help="the id of the lease")
     give_back.add_argument(
         "--owner-pid",
         type=_pid,
@@ -230,6 +262,67 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="print JSON; without --yes, write nothing"
     )
     return parser
+
+
+@dataclass
+class _PartArguments:
+    name: str | None
+    clauses: list[Clause] = field(default_factory=list)
+    accounts: int | None = None
+
+
+def _parts_of(namespace: argparse.Namespace) -> list[_PartArguments]:
+    # A list of its own for each parse: a list as the default would be shared.
+    if namespace.parts is None:
+        namespace.parts = []
+    return namespace.parts
+
+
+def _current_part(namespace: argparse.Namespace) -> _PartArguments:
+    parts = _parts_of(namespace)
+    if not parts:
+        parts.append(_PartArguments(None))
+    return parts[-1]
+
+
+class _PartAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):  # type: ignore[override]
+        parts = _parts_of(namespace)
+        if parts and parts[0].name is None:
+            parser.error("put every --where and --accounts after an --as when the parts have names")
+        if any(part.name == values for part in parts):
+            parser.error(f"the part {values} is named twice")
+        if len(parts) >= MAX_PARTS:
+            parser.error(f"a request has at most {MAX_PARTS} parts")
+        parts.append(_PartArguments(values))
+
+
+class _WhereAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):  # type: ignore[override]
+        _current_part(namespace).clauses.append(values)
+
+
+class _AccountsAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):  # type: ignore[override]
+        part = _current_part(namespace)
+        if part.accounts is not None:
+            parser.error("--accounts is given twice for one part")
+        part.accounts = values
+
+
+def _part_name(text: str) -> str:
+    if PART_NAME.fullmatch(text) is None:
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: a part name starts with a lowercase letter, has only lowercase letters,"
+            " digits, and '_', and has at most 16 characters"
+        )
+    return text
+
+
+def _account_count(text: str) -> int:
+    if not text.isdigit() or not 1 <= int(text) <= MAX_ACCOUNTS:
+        raise argparse.ArgumentTypeError(f"{text!r}: give a number from 1 to {MAX_ACCOUNTS}")
+    return int(text)
 
 
 def _lease_arguments(parser: argparse.ArgumentParser) -> None:
@@ -364,6 +457,7 @@ def _lease_json(lease: Lease, *, verbose: bool = False) -> dict[str, object]:
         "touched_at": _utc(lease.touched_at),
         "void_reason": lease.void_reason,
         "users": _users_json(lease.users),
+        "accounts": list(lease.accounts),
     }
     # The purpose is the only free text in a lease, and other agents wrote it. JSON is what
     # agents read, so it carries the purpose only when the caller asks for it.
@@ -416,15 +510,22 @@ def _cmd_status(args: argparse.Namespace) -> int:
         )
         return 0
     rows = [
-        [lease.resource, lease.kind, lease.state, _holder_label(lease), _local(lease.acquired_at)]
+        [
+            lease.resource,
+            lease.kind,
+            lease.state,
+            _holder_label(lease),
+            _local(lease.acquired_at),
+            ",".join(lease.accounts),
+        ]
         for lease in snapshot.leases
     ]
     rows += [
-        [entry.resource, "?", QUARANTINED, f"unreadable lease file: {entry.error}", "?"]
+        [entry.resource, "?", QUARANTINED, f"unreadable lease file: {entry.error}", "?", ""]
         for entry in snapshot.unreadable
     ]
     if rows:
-        _print_table(["RESOURCE", "KIND", "STATE", "HOLDER", "SINCE"], rows)
+        _print_table(["RESOURCE", "KIND", "STATE", "HOLDER", "SINCE", "ACCOUNTS"], rows)
     else:
         print("No leases.")
     return 0
@@ -495,9 +596,12 @@ def _cmd_leave(args: argparse.Namespace) -> int:
 
 
 def _cmd_acquire(args: argparse.Namespace) -> int:
-    clauses = args.where or []
+    parts = [
+        Part(tuple(each.clauses), each.name, each.accounts or 0)
+        for each in args.parts or [_PartArguments(None)]
+    ]
     config = load_config()
-    check_kinds(clauses, config)
+    check_kinds([clause for part in parts for clause in part.clauses], config)
     machine = Machine()
     holder = find_holder(
         machine.process_table(),
@@ -513,28 +617,30 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         # operator removes stops at once, also for a caller that waits.
         config = load_config()
         store, _ = _reaped_store(config)
-        found = search(config, load_inventory(), clauses)
-        if not found.candidates:
-            # Waiting helps only when a matching resource is held now.
+        found = search(config, load_inventory(), parts)
+        needs = [
+            Need(tuple(_choice(candidate, config) for candidate in candidates), part.accounts)
+            for part, candidates in zip(parts, found.candidates)
+        ]
+        # Waiting helps only when the request could be met if the resources in use were free.
+        if not satisfiable(needs):
             _print_notes(found.notes)
-            raise BanksmanError(_no_match(clauses))
-        choices = [_choice(candidate, config) for candidate in found.candidates]
-        granted = store.grant(choices, holder, keep=args.lease, expect=args.expect)
+            raise BanksmanError(_no_match(parts, found.candidates))
+        granted = store.grant(needs, holder, keep=args.lease, expect=args.expect)
         if granted is not None:
             break
         left = give_up - machine.clock()
         if left <= 0:
-            still = " still" if args.wait else ""
-            raise Busy(f"every matching resource is{still} in use: {_some(found.candidates)}")
+            raise Busy(_busy(parts, found.candidates, still=bool(args.wait)))
         machine.sleep(min(POLL_SECONDS, left))
-    candidate = next(each for each in found.candidates if each.resource == granted.lease.resource)
-    lease = granted.lease
-    facts = candidate.facts
-    if not granted.kept and config.kinds[lease.kind].on_acquire is not None:
-        lease = _prepare(store, config, lease)
+    leases = _prepare(store, config, granted)
+    facts = []
+    for grant, candidates in zip(granted, found.candidates):
+        candidate = next(each for each in candidates if each.resource == grant.lease.resource)
+        reset = not grant.kept and config.kinds[candidate.kind].on_acquire is not None
         # The hook can restart the instance, and a restarted emulator can get another serial.
-        facts = _facts_now(config, candidate)
-    _print_grant(lease, facts, granted.kept, args.json)
+        facts.append(_facts_now(config, candidate) if reset else candidate.facts)
+    _print_grant(parts, granted, leases, facts, args.json)
     return 0
 
 
@@ -550,23 +656,40 @@ def _choice(candidate: Candidate, config: Config) -> Choice:
     # booting only while the on_acquire hook resets its instance, so that a caller that dies in
     # the middle loses the lease at the boot deadline.
     return Choice(
-        candidate.resource, candidate.kind, kind.timeouts, reset=kind.on_acquire is not None
+        candidate.resource,
+        candidate.kind,
+        kind.timeouts,
+        reset=kind.on_acquire is not None,
+        accounts=candidate.accounts or (),
     )
 
 
-def _prepare(store: Store, config: Config, lease: Lease) -> Lease:
-    """Reset the instance of a new lease with the on_acquire hook of its kind."""
+def _prepare(store: Store, config: Config, granted: Sequence[Granted]) -> list[Lease]:
+    """Reset the instances of the new leases with the on_acquire hooks of their kinds.
+
+    A request gets all its parts or none: if a reset fails, every new lease of the request is
+    given back.
+    """
+    leases = [grant.lease for grant in granted]
     try:
-        failure = hooks.reset(config.kinds, lease)
+        for index, grant in enumerate(granted):
+            if grant.kept or config.kinds[grant.lease.kind].on_acquire is None:
+                continue
+            failure = hooks.reset(config.kinds, grant.lease)
+            if failure is not None:
+                # A failed reset does not make the instance unsafe for the next holder, as a
+                # failed take-back does, so the lease is given back, not quarantined.
+                given_back = "the lease is" if len(granted) == 1 else "the new leases are"
+                raise BanksmanError(
+                    f"cannot reset {grant.lease.resource}: {failure}; {given_back} given back"
+                )
+            leases[index] = store.ready(grant.lease.resource, grant.lease.lease_id)
     except BaseException:
-        _give_back(store, lease)
+        for grant in granted:
+            if not grant.kept:
+                _give_back(store, grant.lease)
         raise
-    if failure is not None:
-        # A failed reset does not make the instance unsafe for the next holder, as a failed
-        # take-back does, so the lease is given back, not quarantined.
-        _give_back(store, lease)
-        raise BanksmanError(f"cannot reset {lease.resource}: {failure}; the lease is given back")
-    return store.ready(lease.resource, lease.lease_id)
+    return leases
 
 
 def _facts_now(config: Config, candidate: Candidate) -> Mapping[str, FactValue]:
@@ -586,16 +709,38 @@ def _give_back(store: Store, lease: Lease) -> None:
         store.release(lease.resource, lease.lease_id)
 
 
-def _no_match(clauses: Sequence[Clause]) -> str:
-    request = ", ".join(str(clause) for clause in clauses)
-    found = (
-        f"no permitted resource that is present now matches {request}"
-        if request
-        else "no permitted resource is present now"
-    )
+def _no_match(parts: Sequence[Part], candidates: Sequence[Sequence[Candidate]]) -> str:
+    empty = next((part for part, matching in zip(parts, candidates) if not matching), None)
+    if empty is None:
+        found = (
+            "the permitted resources that are present now cannot meet all parts of the request"
+            " at the same time"
+        )
+    else:
+        request = ", ".join(str(clause) for clause in empty.clauses)
+        accounts = f" with {empty.accounts} allowed accounts signed in" if empty.accounts else ""
+        found = (
+            f"no permitted resource that is present now matches {request}{accounts}"
+            if request
+            else f"no permitted resource{accounts} is present now"
+        )
+        if empty.name is not None:
+            found = f"part {empty.name}: {found}"
     return (
         f"{found}. The operator decides what agents may use, in the configuration and with"
         " banksman admin discover"
+    )
+
+
+def _busy(parts: Sequence[Part], candidates: Sequence[Sequence[Candidate]], *, still: bool) -> str:
+    now = " still" if still else ""
+    if len(parts) == 1:
+        accounts = ", or the accounts on it," if parts[0].accounts else ""
+        return f"every matching resource{accounts} is{now} in use: {_some(candidates[0])}"
+    matches = "; ".join(f"{part.name}: {_some(each)}" for part, each in zip(parts, candidates))
+    return (
+        f"the parts of the request cannot all be granted, because resources or accounts that"
+        f" they need are{now} in use: {matches}"
     )
 
 
@@ -605,54 +750,92 @@ def _print_notes(notes: Sequence[str]) -> None:
 
 
 def _print_grant(
-    lease: Lease, facts: Mapping[str, FactValue], kept: bool, as_json: bool
+    parts: Sequence[Part],
+    granted: Sequence[Granted],
+    leases: Sequence[Lease],
+    facts: Sequence[Mapping[str, FactValue]],
+    as_json: bool,
 ) -> None:
     # Facts come from devices and hooks. Only a serial is printed, and only when it has the
     # characters of a resource name, so that a shell script can use every value as it is.
-    serial = facts.get("serial")
-    if not isinstance(serial, str) or RESOURCE_NAME.fullmatch(serial) is None:
-        serial = None
+    # Account names are resource names too.
+    serials = []
+    for each in facts:
+        serial = each.get("serial")
+        valid = isinstance(serial, str) and RESOURCE_NAME.fullmatch(serial) is not None
+        serials.append(serial if valid else None)
+    lease_id = leases[0].lease_id
     if as_json:
         _print_json(
             {
                 "schema": SCHEMA_VERSION,
-                "resource": lease.resource,
-                "kind": lease.kind,
-                "lease_id": lease.lease_id,
-                "state": lease.state,
-                "serial": serial,
-                "kept": kept,
+                "lease_id": lease_id,
+                "parts": [
+                    {
+                        "part": part.name,
+                        "resource": lease.resource,
+                        "kind": lease.kind,
+                        "state": lease.state,
+                        "serial": serial,
+                        "accounts": list(grant.accounts),
+                        "kept": grant.kept,
+                    }
+                    for part, grant, lease, serial in zip(parts, granted, leases, serials)
+                ],
             }
         )
         return
-    print(f"RESOURCE={lease.resource}")
-    print(f"KIND={lease.kind}")
-    print(f"LEASE={lease.lease_id}")
-    print(f"STATE={lease.state}")
-    if serial is not None:
-        print(f"SERIAL={serial}")
+    if parts[0].name is None:
+        lines = [
+            ("RESOURCE", leases[0].resource),
+            ("KIND", leases[0].kind),
+            ("LEASE", lease_id),
+            ("STATE", leases[0].state),
+        ]
+        lines += [("SERIAL", serials[0])] if serials[0] is not None else []
+        lines += [("ACCOUNTS", ",".join(granted[0].accounts))] if parts[0].accounts else []
+    else:
+        lines = [("LEASE", lease_id)]
+        for part, grant, lease, serial in zip(parts, granted, leases, serials):
+            prefix = f"{part.name.upper()}_"  # type: ignore[union-attr]
+            lines += [
+                (f"{prefix}RESOURCE", lease.resource),
+                (f"{prefix}KIND", lease.kind),
+                (f"{prefix}STATE", lease.state),
+            ]
+            lines += [(f"{prefix}SERIAL", serial)] if serial is not None else []
+            lines += [(f"{prefix}ACCOUNTS", ",".join(grant.accounts))] if part.accounts else []
+    for key, value in lines:
+        print(f"{key}={value}")
 
 
 def _cmd_touch(args: argparse.Namespace) -> int:
     config = load_config()
     store, _ = _reaped_store(config)
-    store.touch(
-        args.resource, args.lease, _owner_process(config, args.owner_pid), expect=args.expect
-    )
+    owner = _owner_process(config, args.owner_pid)
+    # A touch keeps every lease of the holding, so the resource only checks that it is held.
+    if args.resource is None:
+        store.touch_holding(args.lease, owner, expect=args.expect)
+    else:
+        store.touch(args.resource, args.lease, owner, expect=args.expect)
     return 0
 
 
 def _cmd_release(args: argparse.Namespace) -> int:
-    if args.all and args.lease is not None:
-        raise BanksmanError("release --all takes no --lease")
+    if args.all and (args.lease is not None or args.resource is not None):
+        raise BanksmanError("release --all takes no --lease and no --resource")
     if not args.all and args.lease is None:
-        raise BanksmanError("release --resource needs --lease, the id of the lease")
+        raise BanksmanError("release needs --lease, the id of the lease, or --all")
     if not args.all and args.owner_pid is not None:
         raise BanksmanError("release --owner-pid needs --all")
     config = load_config()
     store, _ = _reaped_store(config)
-    if not args.all:
+    if args.resource is not None:
         print(clean(_released(args.resource, store.release(args.resource, args.lease))))
+        return 0
+    if not args.all:
+        for lease, drained in store.release_holding(args.lease):
+            print(clean(_released(lease.resource, drained)))
         return 0
     owner = _owner_process(config, args.owner_pid)
     if owner is None:

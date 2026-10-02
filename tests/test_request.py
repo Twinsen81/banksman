@@ -4,7 +4,7 @@ from banksman.config import ANDROID_DEVICE, ANDROID_EMULATOR, Config, Kind
 from banksman.discovery import parse
 from banksman.errors import BanksmanError
 from banksman.inventory import Decisions, Inventory
-from banksman.request import Clause, matches, parse_clause, search
+from banksman.request import Clause, Part, matches, parse_clause, search
 
 EMULATORS = [
     {"name": "qa_tablet", "facts": {"form": "tablet", "api": 33, "running": False}},
@@ -65,10 +65,11 @@ def found(*clauses, config=CONFIG, inventory=INVENTORY, discovery=None):
     result = search(
         config,
         inventory,
-        [parse_clause(clause) for clause in clauses],
+        [Part(tuple(parse_clause(clause) for clause in clauses))],
         discover=discovery or FakeDiscovery(),
     )
-    return [candidate.resource for candidate in result.candidates]
+    (candidates,) = result.candidates
+    return [candidate.resource for candidate in candidates]
 
 
 @pytest.mark.parametrize(
@@ -160,13 +161,14 @@ def test_only_allowed_instances_that_are_present_now_match():
 
 
 def test_an_allowed_instance_that_is_not_present_is_reported_not_offered():
-    result = search(CONFIG, INVENTORY, [parse_clause("kind=emulator")], discover=FakeDiscovery())
-    assert "qa_gone" not in [candidate.resource for candidate in result.candidates]
+    part = Part((parse_clause("kind=emulator"),))
+    result = search(CONFIG, INVENTORY, [part], discover=FakeDiscovery())
+    assert "qa_gone" not in [candidate.resource for candidate in result.candidates[0]]
     assert "qa_gone (kind emulator) is allowed but not present now" in result.notes
 
 
 def test_the_notes_of_discovery_name_their_kind():
-    result = search(CONFIG, INVENTORY, [], discover=FakeDiscovery())
+    result = search(CONFIG, INVENTORY, [Part()], discover=FakeDiscovery())
     assert "kind device: 0A1B2C3D is unauthorized, so it is not offered" in result.notes
 
 
@@ -236,9 +238,53 @@ def test_the_order_of_choice_is_rank_then_running_then_name():
 def test_a_name_that_another_kind_declares_is_not_an_instance_of_a_discovered_kind():
     instances = {"emulator": [{"name": "9101", "facts": {}}]}
     inventory = Inventory(kinds={"emulator": Decisions(allowed=("9101",))})
-    result = search(CONFIG, inventory, [], discover=FakeDiscovery(instances))
-    assert [(candidate.resource, candidate.kind) for candidate in result.candidates] == [
+    result = search(CONFIG, inventory, [Part()], discover=FakeDiscovery(instances))
+    assert [(candidate.resource, candidate.kind) for candidate in result.candidates[0]] == [
         ("9101", "port"),
         ("build-0", "build"),
         ("build-1", "build"),
     ]
+
+
+def test_each_part_of_a_request_has_its_own_matches():
+    parts = [Part((parse_clause("form=tablet"),), "tablet"), Part((parse_clause("kind=build"),))]
+    result = search(CONFIG, INVENTORY, parts, discover=FakeDiscovery())
+    assert [[candidate.resource for candidate in each] for each in result.candidates] == [
+        ["qa_tablet"],
+        ["build-0", "build-1"],
+    ]
+
+
+def test_discovery_runs_once_for_each_kind_of_a_request():
+    discovery = FakeDiscovery()
+    parts = [Part((parse_clause("form=phone"),)), Part((parse_clause("form=tablet"),))]
+    search(CONFIG, INVENTORY, parts, discover=discovery)
+    assert sorted(discovery.kinds) == ["device", "emulator"]
+
+
+def test_a_candidate_has_the_allowed_accounts_that_are_signed_in_on_it_now():
+    result = search(CONFIG, INVENTORY, [Part()], discover=FakeDiscovery())
+    accounts = {candidate.resource: candidate.accounts for candidate in result.candidates[0]}
+    assert accounts["qa_phone_a"] == ("qa@example.test",)
+    assert accounts["qa_phone_b"] == ()
+    # Not known: the instance did not list its accounts, or its kind has none.
+    assert (accounts["R5CR5678DEF"], accounts["build-0"]) == (None, None)
+
+
+def test_a_part_that_needs_accounts_matches_only_resources_with_that_many_allowed_accounts():
+    def matching(accounts):
+        result = search(CONFIG, INVENTORY, [Part(accounts=accounts)], discover=FakeDiscovery())
+        return [candidate.resource for candidate in result.candidates[0]]
+
+    assert matching(1) == ["qa_phone_a"]
+    assert matching(2) == []
+
+
+def test_each_part_is_checked_against_the_facts_of_its_own_kinds():
+    discovery = FakeDiscovery({"emulator": [{"name": "qa_phone_a", "facts": {"colour": "red"}}]})
+    parts = [
+        Part((parse_clause("kind=emulator"),)),
+        Part((parse_clause("kind=build"), parse_clause("colour=red"))),
+    ]
+    with pytest.raises(BanksmanError, match="unknown attribute colour"):
+        search(CONFIG, INVENTORY, parts, discover=discovery)
