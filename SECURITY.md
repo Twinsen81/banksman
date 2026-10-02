@@ -22,17 +22,18 @@ banksman runs on one machine, as the user who calls it. It has no daemon, no lis
 port, and no network access. The design is in [docs/DESIGN.md](docs/DESIGN.md).
 
 **The lease state belongs to one user.** When the operator turns stopping on, the reaper
-sends signals to the process groups that a lease file lists; by default it sends none. If
-another local user could write lease files, that user could make the reaper kill the
-owner's processes. So the state directory, `/tmp/banksman-<uid>`,
-is created with mode `0700`, and banksman refuses to use a directory, or a lease file, that
-another user owns or that group or others can write to. The kernel also checks every
-signal, so the reaper can never signal another user's processes. The kernel does not
-protect the user's own programs, so the reaper signals only a process group that a script
-created for its own work, and never a group that contains the agent or a program above it.
-Another local user can
-create the state directory first; banksman then refuses to run. That is a denial of
-service, not a takeover.
+sends signals to the processes and process groups that a lease file lists; by default it
+sends none. If another local user could write lease files, that user could make the reaper
+kill the owner's processes. So the state directory, `/tmp/banksman-<uid>`, and the directory
+that keeps quarantines, `~/.local/state/banksman/quarantine`, are created with mode `0700`,
+and banksman refuses to use a directory, or a lease file, that another user owns or that
+group or others can write to. The kernel also checks every signal, so the reaper can never
+signal another user's processes. The kernel does not protect the user's own programs, so
+the reaper signals only processes that the lease's owner process started, and only a
+process group that a script created for its own work. It never signals a group that
+contains the agent, a program above it, or the reaper itself. Without a known owner process,
+it signals nothing. Another local user can create the state directory first; banksman then
+refuses to run. That is a denial of service, not a takeover.
 
 **Configuration runs as code.** A kind's hooks are commands that banksman runs as the
 user. So banksman refuses a configuration file that a user other than the user and root
@@ -61,7 +62,9 @@ addresses, never passwords or tokens. The account is already signed in on the de
 run needs the address, not a secret.
 
 **Fencing covers the scripts, not every command.** A script that registers as a user of a
-lease is stopped when the lease is lost. A raw device command that an agent types, for
-example `adb -s <serial> ...`, is not registered and is not stopped. See the open questions
-in the design.
+lease stops itself when the lease is lost, or the reaper stops it when the operator turns
+stopping on. A raw device command that an agent types, for example `adb -s <serial> ...`,
+is not registered and is not stopped. The lease id that scripts pass back is not a secret:
+it keeps a script of an earlier lease from acting on a newer one, and it is no protection
+against a process that reads the lease files. See the open questions in the design.
 

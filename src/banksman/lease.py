@@ -24,12 +24,14 @@ BOOT_TIMEOUT = "boot_timeout"
 HARD_CAP = "hard_cap"
 OWNER_GONE = "owner_gone"
 IDLE = "idle"
+RELEASE = "release"
 VOID_REASONS = {
     REBOOTED: "the machine restarted after the lease was written",
     BOOT_TIMEOUT: "the resource was not ready by its boot deadline",
     HARD_CAP: "the lease reached its hard cap",
     OWNER_GONE: "the owner process ended, and nothing touched the lease for the grace period",
     IDLE: "nothing touched the lease for the idle timeout",
+    RELEASE: "the holder released the lease while its scripts still ran",
 }
 
 RESOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}")
@@ -56,6 +58,42 @@ class Timeouts:
     owner_grace: float = 5 * 60
     idle_timeout: float | None = 20 * 60
     hard_cap: float = 3 * 60 * 60
+    # How long a void lease waits for its scripts to end before it is quarantined.
+    drain_timeout: float = 5 * 60
+
+
+@dataclass(frozen=True)
+class User:
+    """A script that uses the resource of a lease: its process, and its work group, if any."""
+
+    pid: int
+    started: str
+    pgid: int | None = None
+    # While the group's leader runs with this start time, the group is the one that the script
+    # registered.
+    leader_started: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "pid": self.pid,
+            "started": self.started,
+            "pgid": self.pgid,
+            "leader_started": self.leader_started,
+        }
+
+    @classmethod
+    def from_json(cls, data: object) -> User:
+        if not isinstance(data, dict):
+            raise LeaseFormatError("a user is not a JSON object")
+        user = cls(
+            pid=_get(data, "pid", _is_pid),
+            started=_get(data, "started", _is_text),
+            pgid=_get(data, "pgid", _optional(_is_pid)),
+            leader_started=_get(data, "leader_started", _optional(_is_text)),
+        )
+        if (user.pgid is None) != (user.leader_started is None):
+            raise LeaseFormatError("pgid and leader_started must both be set or both be null")
+        return user
 
 
 @dataclass(frozen=True)
@@ -78,7 +116,16 @@ class Lease:
     hard_deadline: float
     idle_timeout: float | None
     owner_grace: float
+    drain_timeout: float
+    # A draining lease is quarantined when its scripts still run at this time.
+    drain_deadline: float | None = None
+    users: tuple[User, ...] = ()
     void_reason: str | None = None
+    # The reaper has ended the instance of a draining lease, and stopped its scripts if
+    # stopping is on. It now waits for the scripts to end.
+    ended: bool = False
+    # How many reapers have started to take the lease back.
+    attempts: int = 0
     # The reaper that takes a draining lease back.
     reaper_pid: int | None = None
     reaper_started: str | None = None
@@ -100,10 +147,15 @@ class Lease:
                 "touched": self.touched,
                 "boot_deadline": self.boot_deadline,
                 "hard_deadline": self.hard_deadline,
+                "drain_deadline": self.drain_deadline,
             },
             "idle_timeout": self.idle_timeout,
             "owner_grace": self.owner_grace,
+            "drain_timeout": self.drain_timeout,
+            "users": [user.to_json() for user in self.users],
             "void_reason": self.void_reason,
+            "ended": self.ended,
+            "attempts": self.attempts,
             "reaper_pid": self.reaper_pid,
             "reaper_started": self.reaper_started,
         }
@@ -117,6 +169,9 @@ class Lease:
         awake = data.get("awake")
         if not isinstance(awake, dict):
             raise LeaseFormatError("awake is missing or not valid")
+        users = data.get("users")
+        if not isinstance(users, list):
+            raise LeaseFormatError("users is missing or not valid")
         lease = cls(
             lease_id=_get(data, "lease_id", _is_text),
             resource=_get(data, "resource", _is_resource),
@@ -131,9 +186,14 @@ class Lease:
             touched=_get(awake, "touched", _is_number),
             boot_deadline=_get(awake, "boot_deadline", _optional(_is_number)),
             hard_deadline=_get(awake, "hard_deadline", _is_number),
+            drain_deadline=_get(awake, "drain_deadline", _optional(_is_number)),
             idle_timeout=_get(data, "idle_timeout", _optional(_is_number)),
             owner_grace=_get(data, "owner_grace", _is_number),
+            drain_timeout=_get(data, "drain_timeout", _is_number),
+            users=tuple(User.from_json(user) for user in users),
             void_reason=_get(data, "void_reason", _optional(_is_void_reason)),
+            ended=_get(data, "ended", lambda value: isinstance(value, bool)),
+            attempts=_get(data, "attempts", _is_count),
             reaper_pid=_get(data, "reaper_pid", _optional(_is_pid)),
             reaper_started=_get(data, "reaper_started", _optional(_is_text)),
         )
@@ -145,14 +205,21 @@ class Lease:
             )
         if lease.state == BOOTING and lease.boot_deadline is None:
             raise LeaseFormatError("a booting lease needs a boot deadline")
+        if lease.state == DRAINING and lease.drain_deadline is None:
+            raise LeaseFormatError("a draining lease needs a drain deadline")
         if lease.state not in HELD and lease.void_reason is None:
             raise LeaseFormatError(f"a {lease.state} lease needs a void reason")
         return lease
 
 
-def check_names(resource: str, kind: str, owner: str) -> None:
+def check_resource(resource: str) -> None:
+    # A resource name becomes a file name, so it must not be able to leave the directory.
     if not _is_resource(resource):
         raise BanksmanError(f"not a valid resource name: {resource!r}")
+
+
+def check_names(resource: str, kind: str, owner: str) -> None:
+    check_resource(resource)
     if not _is_kind(kind):
         raise BanksmanError(f"not a valid kind name: {kind!r}")
     if not _is_owner(owner):
@@ -210,6 +277,10 @@ def _is_number(value: object) -> bool:
 
 def _is_wall_time(value: object) -> bool:
     return _is_number(value) and 0 <= value <= _MAX_WALL_TIME  # type: ignore[operator]
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _is_pid(value: object) -> bool:

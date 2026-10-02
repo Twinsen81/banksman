@@ -26,9 +26,10 @@ that already run on the machine.
 ## Project layout
 
 - `src/banksman/`: the package. `cli.py` is the entry point, `store.py` keeps the lease
-  files, `config.py` reads the configuration file, `hooks.py` is the only module that runs
-  hook programs (through `supervisor.py`), and `system.py` is the only module that reads
-  the process list and the boot id.
+  files, `config.py` reads the configuration file, `fencing.py` has the rules for the
+  scripts that use a resource and for the signals that the reaper may send, `hooks.py` is
+  the only module that runs hook programs (through `supervisor.py`), and `system.py` is the
+  only module that reads the process list and the boot id, and that sends signals.
 - `tests/`: the pytest suite.
 - `docs/DESIGN.md`: architecture and behavior. Read it before proposing structural changes.
 - `DECISIONS.md`: resolved design decisions and how to change them.

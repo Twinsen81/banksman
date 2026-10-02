@@ -15,6 +15,7 @@ from banksman.lease import (
     REBOOTED,
     Lease,
     LeaseFormatError,
+    User,
     check_names,
     void_reason,
 )
@@ -36,6 +37,7 @@ LEASE = Lease(
     hard_deadline=START + 3 * 60 * 60,
     idle_timeout=20 * 60,
     owner_grace=5 * 60,
+    drain_timeout=5 * 60,
 )
 OWNED = replace(LEASE, owner_pid=42, owner_started="start-42")
 
@@ -91,9 +93,21 @@ def test_a_lease_without_an_idle_timeout_lives_until_its_hard_cap():
 
 
 def test_json_round_trip():
-    draining = replace(LEASE, state=DRAINING, void_reason=IDLE, reaper_pid=7, reaper_started="s")
+    draining = replace(
+        LEASE,
+        state=DRAINING,
+        void_reason=IDLE,
+        drain_deadline=START + 300,
+        ended=True,
+        reaper_pid=7,
+        reaper_started="s",
+    )
     booting = replace(LEASE, state=BOOTING, boot_deadline=START + 300)
-    for lease in (LEASE, OWNED, booting, draining):
+    users = replace(
+        LEASE,
+        users=(User(pid=9, started="start-9"), User(10, "start-10", pgid=11, leader_started="s")),
+    )
+    for lease in (LEASE, OWNED, booting, draining, users):
         assert Lease.from_json(lease.to_json()) == lease
 
 
@@ -103,6 +117,10 @@ def test_the_lease_file_carries_the_schema():
 
 def _without_awake(data):
     del data["awake"]
+
+
+def _user(**changes):
+    return {"pid": 9, "started": "s", "pgid": None, "leader_started": None, **changes}
 
 
 @pytest.mark.parametrize(
@@ -125,6 +143,15 @@ def _without_awake(data):
         lambda data: data.update(reaper_pid=7),
         lambda data: data.update(state=BOOTING),
         lambda data: data.update(state=DRAINING),
+        lambda data: data.update(state=DRAINING, void_reason=IDLE),
+        lambda data: data.update(ended=None),
+        lambda data: data.update(drain_timeout="5m"),
+        lambda data: data.update(users=None),
+        lambda data: data.update(users=[42]),
+        lambda data: data.update(users=[_user(pid=0)]),
+        lambda data: data.update(users=[_user(started="")]),
+        lambda data: data.update(users=[_user(pgid=9)]),
+        lambda data: data.update(users=[_user(leader_started="s")]),
         _without_awake,
     ],
 )

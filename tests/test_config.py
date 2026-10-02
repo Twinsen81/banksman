@@ -82,6 +82,26 @@ def test_a_kind_can_list_its_instances_by_name(config_path, store):
     assert (lease.resource, lease.kind) == ("9102", "port")
 
 
+def test_stopping_is_off_unless_a_kind_turns_it_on(config_path):
+    write_config(config_path, "[kinds.emulator]\nstop = true\n[kinds.device]\n")
+    kinds = load_config().kinds
+    assert (kinds["emulator"].stop, kinds["device"].stop) == (True, False)
+
+
+def test_the_drain_timeout_is_a_timeout_like_the_others(config_path, store):
+    write_config(
+        config_path,
+        '[defaults]\ndrain_timeout = "2m"\n'
+        '[kinds.device]\n'
+        '[kinds.emulator]\ndrain_timeout = "90s"\n',
+    )
+    kinds = load_config().kinds
+    assert kinds["device"].timeouts.drain_timeout == 120
+    assert kinds["emulator"].timeouts.drain_timeout == 90
+    lease = store.acquire("emu-1", "emulator", OWNER, timeouts=kinds["emulator"].timeouts)
+    assert lease.drain_timeout == 90
+
+
 def test_on_void_is_a_program_and_its_arguments(config_path):
     write_config(config_path, '[kinds.emulator]\non_void = ["/opt/bin/stop-avd", "--now"]\n')
     assert load_config().kinds["emulator"].on_void == ("/opt/bin/stop-avd", "--now")
@@ -163,6 +183,11 @@ def test_text_that_is_not_a_duration_is_refused(text):
         ("[kinds.emulator]\non_void = ['bin/stop-avd']", "kinds.emulator.on_void"),
         ("[kinds.emulator]\non_void = ['~/bin/stop-avd']", "kinds.emulator.on_void"),
         ("[kinds.emulator]\non_void = ['$HOME/bin/stop-avd']", "kinds.emulator.on_void"),
+        ("[kinds.emulator]\nstop = 'yes'", "kinds.emulator.stop"),
+        ("[kinds.emulator]\nstop = 1", "kinds.emulator.stop"),
+        ("[defaults]\nstop = true", "defaults.stop"),
+        ("[defaults]\ndrain_timeout = '0s'", "defaults.drain_timeout"),
+        ("[kinds.emulator]\ndrain_timeout = 'off'", "kinds.emulator.drain_timeout"),
     ],
 )
 def test_a_configuration_that_is_not_valid_is_refused(config_path, text, key):

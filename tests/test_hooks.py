@@ -32,6 +32,7 @@ LEASE = Lease(
     hard_deadline=1000.0 + 3 * 60 * 60,
     idle_timeout=20 * 60,
     owner_grace=5 * 60,
+    drain_timeout=5 * 60,
 )
 
 
