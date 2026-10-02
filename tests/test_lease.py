@@ -24,6 +24,7 @@ from banksman.lease import (
 START = 1000.0
 LEASE = Lease(
     lease_id="lease-1",
+    holding="holding-1",
     resource="phone-1",
     kind="emulator",
     state=READY,

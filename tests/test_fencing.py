@@ -29,6 +29,7 @@ TREE = {
 
 LEASE = Lease(
     lease_id="lease-1",
+    holding="holding-1",
     resource="phone-1",
     kind="device",
     state=READY,

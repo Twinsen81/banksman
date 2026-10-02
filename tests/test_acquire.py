@@ -88,10 +88,10 @@ def test_acquire_prints_json(capsys, config_path):
     shown = json.loads(capsys.readouterr().out)
     assert shown == {
         "schema": shown["schema"],
-        "lease_id": leases()["build-0"].lease_id,
         "parts": [
             {
                 "part": None,
+                "lease_id": leases()["build-0"].lease_id,
                 "resource": "build-0",
                 "kind": "build",
                 "state": "ready",
@@ -464,21 +464,25 @@ def test_a_joint_acquire_prints_each_part_under_its_name(capsys, config_path):
         *["--as", "build", "--where", "kind=build"],
     )
     assert status == 0
-    lease_id = values["LEASE"]
+    held = leases()
     assert values == {
-        "LEASE": lease_id,
         "PHONE_RESOURCE": "qa_phone",
         "PHONE_KIND": "emulator",
+        "PHONE_LEASE": held["qa_phone"].lease_id,
         "PHONE_STATE": "ready",
         "PHONE_SERIAL": "emulator-5554",
         "TABLET_RESOURCE": "qa_tablet",
         "TABLET_KIND": "emulator",
+        "TABLET_LEASE": held["qa_tablet"].lease_id,
         "TABLET_STATE": "ready",
         "BUILD_RESOURCE": "build-0",
         "BUILD_KIND": "build",
+        "BUILD_LEASE": held["build-0"].lease_id,
         "BUILD_STATE": "ready",
     }
-    assert {lease.lease_id for lease in leases().values()} == {lease_id}
+    # Each lease has its own token for its scripts, and the three form one holding.
+    assert len({lease.lease_id for lease in held.values()}) == 3
+    assert len({lease.holding for lease in held.values()}) == 1
 
 
 def test_a_joint_acquire_prints_json_with_the_names_of_the_parts(capsys, config_path):
@@ -486,11 +490,10 @@ def test_a_joint_acquire_prints_json_with_the_names_of_the_parts(capsys, config_
     arguments = ["--as", "phone", "--where", "form=phone", "--as", "build", "--json"]
     assert main(["acquire", *arguments]) == 0
     shown = json.loads(capsys.readouterr().out)
-    assert [(part["part"], part["resource"]) for part in shown["parts"]] == [
-        ("phone", "qa_phone"),
-        ("build", "build-0"),
+    assert [(part["part"], part["resource"], part["lease_id"]) for part in shown["parts"]] == [
+        ("phone", "qa_phone", leases()["qa_phone"].lease_id),
+        ("build", "build-0", leases()["build-0"].lease_id),
     ]
-    assert shown["lease_id"] == leases()["qa_phone"].lease_id
 
 
 def test_parts_that_cannot_all_be_met_together_fail_at_once(capsys, config_path, monkeypatch):
@@ -535,7 +538,8 @@ def test_touch_and_release_act_on_every_resource_of_a_lease(capsys, config_path,
     configure(config_path)
     arguments = ["--as", "build", "--where", "kind=build", "--as", "tablet"]
     _, values, _ = acquire(capsys, *arguments, "--where", "form=tablet")
-    lease_id = values["LEASE"]
+    # The id of any lease of the holding names the holding.
+    lease_id = values["TABLET_LEASE"]
     for resource in ("build-0", "qa_tablet"):
         age_lease(state_dir, resource, 15 * 60)
     assert main(["touch", "--lease", lease_id]) == 0
@@ -550,6 +554,29 @@ def test_touch_and_release_act_on_every_resource_of_a_lease(capsys, config_path,
         "Released qa_tablet: it is free.",
     ]
     assert main(["touch", "--lease", lease_id]) == 3
+
+
+# The hook makes the lease of another part of the request idle, as a short idle timeout would
+# during a long reset.
+AGE = (
+    "import json, sys; data = json.load(open(sys.argv[1])); data['awake']['touched'] -= 1800;"
+    " open(sys.argv[1], 'w').write(json.dumps(data))"
+)
+
+
+def test_a_lease_lost_while_the_request_is_reset_gives_back_every_new_lease(
+    capsys, config_path, state_dir
+):
+    reset = hook(AGE, str(state_dir / "build-0.json"))
+    configure(config_path, extra=f"on_acquire = {json.dumps(reset)}\n")
+    arguments = ["--as", "build", "--where", "kind=build", "--as", "phone"]
+    status, values, err = acquire(capsys, *arguments, "--where", "form=phone")
+    assert (status, values) == (1, {})
+    assert err == (
+        "banksman: the lease on build-0 is void: nothing touched the lease for the idle timeout"
+        " while the request was reset; the new leases are given back\n"
+    )
+    assert leases() == {}
 
 
 @pytest.mark.parametrize(

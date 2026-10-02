@@ -28,7 +28,7 @@ from banksman.inventory import (
     preselected,
     save_inventory,
 )
-from banksman.lease import QUARANTINED, RESOURCE_NAME, VOID_REASONS, Lease, User
+from banksman.lease import QUARANTINED, READY, RESOURCE_NAME, VOID_REASONS, Lease, User
 from banksman.request import (
     PART_NAME,
     Candidate,
@@ -626,7 +626,13 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         if not satisfiable(needs):
             _print_notes(found.notes)
             raise BanksmanError(_no_match(parts, found.candidates))
-        granted = store.grant(needs, holder, keep=args.lease, expect=args.expect)
+        granted = store.grant(
+            needs,
+            holder,
+            keep=args.lease,
+            expect=args.expect,
+            reset_time=hooks.HOOK_TIMEOUT_SECONDS,
+        )
         if granted is not None:
             break
         left = give_up - machine.clock()
@@ -665,25 +671,39 @@ def _choice(candidate: Candidate, config: Config) -> Choice:
 
 
 def _prepare(store: Store, config: Config, granted: Sequence[Granted]) -> list[Lease]:
-    """Reset the instances of the new leases with the on_acquire hooks of their kinds.
+    """Reset the instances of the new leases with the on_acquire hooks of their kinds, and then
+    mark every new lease ready.
 
-    A request gets all its parts or none: if a reset fails, every new lease of the request is
-    given back.
+    A request gets all its parts or none: if a reset fails, or a new lease is lost meanwhile,
+    every new lease of the request is given back.
     """
     leases = [grant.lease for grant in granted]
+    new = [index for index, grant in enumerate(granted) if not grant.kept]
+    if all(leases[index].state == READY for index in new):
+        return leases
+    given_back = "the lease is" if len(granted) == 1 else "the new leases are"
     try:
-        for index, grant in enumerate(granted):
-            if grant.kept or config.kinds[grant.lease.kind].on_acquire is None:
+        for index in new:
+            lease = leases[index]
+            if config.kinds[lease.kind].on_acquire is None:
                 continue
-            failure = hooks.reset(config.kinds, grant.lease)
+            failure = hooks.reset(config.kinds, lease)
             if failure is not None:
                 # A failed reset does not make the instance unsafe for the next holder, as a
                 # failed take-back does, so the lease is given back, not quarantined.
-                given_back = "the lease is" if len(granted) == 1 else "the new leases are"
                 raise BanksmanError(
-                    f"cannot reset {grant.lease.resource}: {failure}; {given_back} given back"
+                    f"cannot reset {lease.resource}: {failure}; {given_back} given back"
                 )
-            leases[index] = store.ready(grant.lease.resource, grant.lease.lease_id)
+            # The resets run one after another. A check keeps the other leases of the holding
+            # from becoming idle meanwhile.
+            store.check(lease.resource, lease.lease_id)
+        for index in new:
+            leases[index] = store.ready(leases[index].resource, leases[index].lease_id)
+    except NotHeld as exc:
+        for grant in granted:
+            if not grant.kept:
+                _give_back(store, grant.lease)
+        raise BanksmanError(f"{exc} while the request was reset; {given_back} given back") from None
     except BaseException:
         for grant in granted:
             if not grant.kept:
@@ -764,15 +784,14 @@ def _print_grant(
         serial = each.get("serial")
         valid = isinstance(serial, str) and RESOURCE_NAME.fullmatch(serial) is not None
         serials.append(serial if valid else None)
-    lease_id = leases[0].lease_id
     if as_json:
         _print_json(
             {
                 "schema": SCHEMA_VERSION,
-                "lease_id": lease_id,
                 "parts": [
                     {
                         "part": part.name,
+                        "lease_id": lease.lease_id,
                         "resource": lease.resource,
                         "kind": lease.kind,
                         "state": lease.state,
@@ -789,18 +808,19 @@ def _print_grant(
         lines = [
             ("RESOURCE", leases[0].resource),
             ("KIND", leases[0].kind),
-            ("LEASE", lease_id),
+            ("LEASE", leases[0].lease_id),
             ("STATE", leases[0].state),
         ]
         lines += [("SERIAL", serials[0])] if serials[0] is not None else []
         lines += [("ACCOUNTS", ",".join(granted[0].accounts))] if parts[0].accounts else []
     else:
-        lines = [("LEASE", lease_id)]
+        lines = []
         for part, grant, lease, serial in zip(parts, granted, leases, serials):
             prefix = f"{part.name.upper()}_"  # type: ignore[union-attr]
             lines += [
                 (f"{prefix}RESOURCE", lease.resource),
                 (f"{prefix}KIND", lease.kind),
+                (f"{prefix}LEASE", lease.lease_id),
                 (f"{prefix}STATE", lease.state),
             ]
             lines += [(f"{prefix}SERIAL", serial)] if serial is not None else []

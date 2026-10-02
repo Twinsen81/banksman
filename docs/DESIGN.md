@@ -141,7 +141,8 @@ minutes, and its lease can become void in the middle.
   it to `enter`, `check`, and `leave`, and `touch` and `release` need it too. A
   script whose token does not name the current lease of the resource has lost it. So a
   script of an earlier lease, for example one of the same worktree, never acts on a newer
-  lease. The leases that one `acquire` grants share one id, and form one holding (section 7).
+  lease. Each lease has its own id, also when one `acquire` grants several leases; those
+  leases form one holding (section 7).
 - **The user's side.** A script registers itself with `enter` when it starts: its pid and,
   if it has one, the process group that it created for its work. `enter` also checks and
   touches the lease. A long-running script runs its work in its own process group, and runs
@@ -342,8 +343,8 @@ holdings apart (section 9).
   id that the scripts pass back), `STATE`, `SERIAL` when discovery knows it, and `ACCOUNTS`
   when the request asks for accounts (section 7). Each value has only the characters of a
   resource name, so that a shell script can use it as it is: a serial with other characters
-  is not printed. With `--json`, it prints the lease id and a list `parts` with the same
-  values for each part of the request.
+  is not printed. With `--json`, it prints a list `parts` with the same values for each part
+  of the request.
 - **banksman starts nothing.** Every grant is `ready`. The holder checks whether the
   instance runs, and starts it if it does not, for example with the `emulator` command. A
   fact from discovery can be wrong, for example for an emulator that is still starting, so
@@ -355,7 +356,12 @@ holdings apart (section 9).
 - **`on_acquire`.** When the kind declares an `on_acquire` hook (section 5), the lease is
   `booting` while the hook runs, and then `ready`. If a hook fails, every new lease of the
   request is given back, and `acquire` fails. A failed reset does not make the instance
-  unsafe for the next holder, as a failed take-back does, so the instance is not quarantined. A lease that the caller
+  unsafe for the next holder, as a failed take-back does, so the instance is not quarantined.
+  While a request has resets, every new lease of the request is `booting` and names the
+  `acquire`, so that no other process frees a lease of one part while another part is reset.
+  The resets run one after another, so each boot deadline also counts 60 seconds, the longest
+  time of a hook, for each reset of the request. At the end, every new lease must still be
+  held; otherwise all of them are given back. A lease that the caller
   keeps with `--lease` is not reset again. The hook can restart the instance, so `acquire`
   reads its facts again after the reset, and prints the serial that discovery finds then.
 - **No other process acts on the instance during a reset.** The lease names the `acquire`
@@ -381,14 +387,15 @@ holdings apart (section 9).
   ```
   banksman acquire --as phone --where form=phone --accounts 1 \
                    --as tablet --where form=tablet --for "verify the sign-in" --wait 15m
-  LEASE=4f1c2b0e9d7a4c55a0f3e6b1c2d3e4f5
   PHONE_RESOURCE=R5CR1234ABC
   PHONE_KIND=device
+  PHONE_LEASE=4f1c2b0e9d7a4c55a0f3e6b1c2d3e4f5
   PHONE_STATE=ready
   PHONE_SERIAL=R5CR1234ABC
   PHONE_ACCOUNTS=qa@example.test
   TABLET_RESOURCE=qa_tablet
   TABLET_KIND=emulator
+  TABLET_LEASE=9e8d7c6b5a4f4e3d2c1b0a9f8e7d6c5b
   TABLET_STATE=ready
   ```
 
@@ -405,12 +412,16 @@ holdings apart (section 9).
 - **A time limit.** The search for a choice stops after 1 second, because other commands wait
   at most 10 seconds for the lock. A request that needs more time fails, and the agent can
   ask for fewer parts or more specific clauses. Requests of a usual size need milliseconds.
-- **One holding.** The leases that one `acquire` grants share one lease id. `check`, `enter`,
-  and `touch` touch every held lease with that id, so that a tablet does not time out while a
-  long test runs on the phone of the same holding. `release --lease <id>` gives back every
-  resource of the holding, and `release --resource <name> --lease <id>` gives back one. A
-  request with `--lease <id>` first keeps the leases with that id that still match its parts.
-  While that holding has a held lease, the new leases of the request join it.
+- **One holding.** Each lease has its own id, which its scripts pass back (section 4). The
+  leases that one `acquire` grants form one holding. `check`, `enter`, and `touch` touch every
+  held lease of the holding, so that a tablet does not time out while a long test runs on the
+  phone of the same holding. The id of any lease of a holding names the holding:
+  `touch --lease <id>` touches all its leases, `release --lease <id>` gives back all its
+  resources, and `release --resource <name> --lease <id>` gives back one. A request with
+  `--lease <id>` first keeps the leases of that holding that still match its parts. While
+  the holding has a held lease, the new leases of the request join it, each with a new id,
+  so that a script or a cleanup of an earlier lease of the same resource never acts on the
+  new lease.
 - **Accounts.** Some resources are useful only together with a scarcer thing that lives on
   them, such as a device with a signed-in account. `--accounts N` asks for a resource on
   which at least N allowed accounts are signed in now, and leases N of them with it, in the

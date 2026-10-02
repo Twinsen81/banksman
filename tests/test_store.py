@@ -807,12 +807,14 @@ def test_a_joint_grant_gives_every_part_or_nothing(store):
     assert resources(store) == ["tab-1"]
 
 
-def test_the_leases_of_a_joint_grant_share_one_id(store):
+def test_the_leases_of_a_joint_grant_form_one_holding(store):
     phone_1, tablet = store.grant(phone_and_tablet(), Holder(OWNER))
     assert (phone_1.lease.resource, tablet.lease.resource) == ("phone-1", "tab-1")
-    assert phone_1.lease.lease_id == tablet.lease.lease_id
+    # Each lease has its own token, so a script of one lease never acts on another.
+    assert phone_1.lease.lease_id != tablet.lease.lease_id
+    assert phone_1.lease.holding == tablet.lease.holding
     other = grant_one(store, [Choice("emu-1", "emulator")], Holder(OWNER))
-    assert other.lease.lease_id != phone_1.lease.lease_id
+    assert other.lease.holding != phone_1.lease.holding
 
 
 def test_parts_that_match_the_same_resources_get_different_ones(store):
@@ -870,7 +872,22 @@ def test_new_leases_of_a_request_that_keeps_a_lease_join_its_holding(store):
     keep = first.lease.lease_id
     phone_1, tablet = store.grant(phone_and_tablet(), Holder(OWNER), keep=keep)
     assert (phone_1.kept, tablet.kept) == (True, False)
-    assert tablet.lease.lease_id == keep
+    assert (phone_1.lease.lease_id, tablet.lease.holding) == (keep, first.lease.holding)
+
+
+def test_a_resource_that_joins_its_holding_again_gets_a_new_token(store):
+    phone_1, tablet = store.grant(phone_and_tablet(), Holder(OWNER))
+    old = tablet.lease.lease_id
+    assert store.release("tab-1", old) is None
+    need = phone_and_tablet()[1]
+    (again,) = store.grant([need], Holder(OWNER), keep=phone_1.lease.lease_id)
+    assert (again.lease.holding, again.kept) == (phone_1.lease.holding, False)
+    assert again.lease.lease_id != old
+    # A script or a cleanup of the earlier tablet lease does not act on the new one.
+    for call in (store.check, store.touch, store.release):
+        with pytest.raises(NotHeld, match="another lease"):
+            call("tab-1", old)
+    assert resources(store) == ["phone-1", "tab-1"]
 
 
 def test_an_id_that_names_no_held_lease_starts_no_holding(store):
@@ -911,10 +928,58 @@ def test_touch_and_release_by_the_id_of_a_holding(store, system):
         ("tab-1", None),
     ]
     assert resources(store) == []
-    with pytest.raises(NotHeld, match="no lease with the id"):
+    with pytest.raises(NotHeld, match="has no held lease"):
         store.release_holding(lease_id)
-    with pytest.raises(NotHeld, match="no lease with the id"):
+    with pytest.raises(NotHeld, match="has no held lease"):
         store.touch_holding(lease_id)
+
+
+def test_the_id_of_any_lease_of_a_holding_names_the_holding(store):
+    _, tablet = store.grant(phone_and_tablet(), Holder(OWNER))
+    released = store.release_holding(tablet.lease.lease_id)
+    assert sorted(lease.resource for lease, _ in released) == ["phone-1", "tab-1"]
+
+
+def test_while_a_request_is_reset_every_new_lease_is_booting_and_names_its_acquire(
+    store, system
+):
+    needs = [
+        Need((Choice("emu-1", "emulator", Timeouts(boot_timeout=4 * 60), reset=True),)),
+        Need((Choice("build-0", "build"),)),
+        Need((Choice("emu-2", "emulator", reset=True),)),
+    ]
+    granted = store.grant(needs, Holder(OWNER), reset_time=60)
+    # The resets run one after another, so each deadline counts the time of both resets.
+    assert [
+        (grant.lease.state, grant.lease.boot_deadline - system.now, grant.lease.reaper_pid)
+        for grant in granted
+    ] == [
+        (BOOTING, 4 * 60 + 2 * 60, os.getpid()),
+        (BOOTING, 5 * 60 + 2 * 60, os.getpid()),
+        (BOOTING, 5 * 60 + 2 * 60, os.getpid()),
+    ]
+    # Without a reset, the leases are ready at once.
+    (alone,) = store.grant([Need((Choice("build-1", "build"),))], Holder(OWNER), reset_time=60)
+    assert (alone.lease.state, alone.lease.reaper_pid) == (READY, None)
+
+
+def test_a_lease_of_a_request_that_is_reset_is_not_handed_on_while_its_acquire_runs(
+    state_dir,
+):
+    store = Store(state_dir, Machine())
+    needs = [
+        Need((Choice("emu-1", "emulator", reset=True),)),
+        Need((Choice("build-0", "build"),)),
+    ]
+    _, build = store.grant(needs, Holder(OWNER))
+    age_lease(state_dir, "build-0", 21 * 60)
+    # Another command reaps while this acquire still resets emu-1: the idle lease drains, but
+    # it is not freed while the acquire that it names runs.
+    assert [item["outcome"] for item in reap_in_child(state_dir)] == []
+    assert lease_file(state_dir, "build-0")["state"] == DRAINING
+    assert grant_one(store, [Choice("build-0", "build")], Holder(OTHER)) is None
+    with pytest.raises(NotHeld, match="draining"):
+        store.ready("build-0", build.lease.lease_id)
 
 
 JOINT_GRANT = """

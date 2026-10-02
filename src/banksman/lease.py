@@ -124,7 +124,11 @@ class User:
 
 @dataclass(frozen=True)
 class Lease:
+    # Each lease has its own id: scripts pass it back as a token, so a script of an earlier
+    # lease never acts on a newer lease of the same resource.
     lease_id: str
+    # The leases that one acquire grants form one holding, and the holder uses them together.
+    holding: str
     resource: str
     kind: str
     state: str
@@ -172,6 +176,7 @@ class Lease:
         return {
             "schema": SCHEMA_VERSION,
             "lease_id": self.lease_id,
+            "holding": self.holding,
             "resource": self.resource,
             "kind": self.kind,
             "state": self.state,
@@ -219,6 +224,7 @@ class Lease:
         accounts = _get(data, "accounts", _is_accounts)
         lease = cls(
             lease_id=_get(data, "lease_id", _is_text),
+            holding=_get(data, "holding", _is_text),
             resource=_get(data, "resource", _is_resource),
             kind=_get(data, "kind", _is_kind),
             state=_get(data, "state", lambda value: isinstance(value, str) and value in STATES),
