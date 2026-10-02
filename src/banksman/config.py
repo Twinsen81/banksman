@@ -19,6 +19,7 @@ from banksman.lease import KIND_NAME, PROGRAM_NAME, RESOURCE_NAME, Timeouts
 
 CONFIG_ENV = "BANKSMAN_CONFIG"
 MAX_COUNT = 1000
+MAX_RANK = 1000
 ANDROID_EMULATOR = "android-emulator"
 ANDROID_DEVICE = "android-device"
 PRESETS = (ANDROID_EMULATOR, ANDROID_DEVICE)
@@ -30,7 +31,15 @@ DEFAULT_ISSUE_PATTERN = r"\b[A-Za-z][A-Za-z0-9]*-[0-9]+\b"
 
 _TIMEOUT_KEYS = ("boot_timeout", "owner_grace", "idle_timeout", "hard_cap", "drain_timeout")
 _SOURCE_KEYS = ("count", "instances", "discover", "preset")
-_KIND_KEYS = (*_SOURCE_KEYS, "preselect", "on_void", "stop", *_TIMEOUT_KEYS)
+_KIND_KEYS = (
+    *_SOURCE_KEYS,
+    "preselect",
+    "rank",
+    "on_acquire",
+    "on_void",
+    "stop",
+    *_TIMEOUT_KEYS,
+)
 _MAX_PATTERNS = 100
 _MAX_PATTERN_LENGTH = 256
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -52,6 +61,11 @@ class Kind:
     # The instances that the operator lists by name with the `instances` key, for example
     # port numbers.
     listed: tuple[str, ...] = ()
+    # When a request matches instances of several kinds, the kinds with a lower rank are chosen
+    # first.
+    rank: int = 0
+    # The command that resets an instance before a run gets it.
+    on_acquire: tuple[str, ...] | None = None
     # The command that ends a void instance. The reaper ends an instance only if the operator
     # declares one.
     on_void: tuple[str, ...] | None = None
@@ -290,11 +304,16 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
             f"{where}.preselect",
             "applies only to a kind whose instances come from discover or a preset",
         )
+    # Physical devices are scarcer than emulators, so a request that does not name a kind gets
+    # an instance of another kind first.
+    rank = table.get("rank", 1 if preset == ANDROID_DEVICE else 0)
     return Kind(
         name=name,
         timeouts=_timeouts(table, where, defaults),
         count=_count(table.get("count"), f"{where}.count"),
         listed=_instances(table.get("instances"), f"{where}.instances"),
+        rank=_rank(rank, f"{where}.rank"),
+        on_acquire=_command(table.get("on_acquire"), f"{where}.on_acquire"),
         on_void=_command(table.get("on_void"), f"{where}.on_void"),
         stop=_boolean(table.get("stop", False), f"{where}.stop"),
         discover=discover,
@@ -355,6 +374,12 @@ def _count(value: object, where: str) -> int | None:
         return None
     if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= MAX_COUNT:
         raise _Invalid(where, f"must be a whole number from 1 to {MAX_COUNT}")
+    return value
+
+
+def _rank(value: object, where: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= MAX_RANK:
+        raise _Invalid(where, f"must be a whole number from 0 to {MAX_RANK}")
     return value
 
 

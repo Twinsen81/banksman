@@ -1,0 +1,216 @@
+"""Requests by properties: which resources match the `--where` clauses, in the order of choice.
+
+A resource has facts from discovery, which an agent cannot set, and tags from the operator. A
+request is an AND of clauses. Only what the configuration declares or the inventory allows,
+and what is present now, can match: a request never widens access.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import re
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+
+from banksman import android
+from banksman.config import Config, Kind
+from banksman.discovery import ACCOUNT, FACT_NAME, KIND, TAG, FactValue, Found
+from banksman.discovery import discover as discover_now
+from banksman.errors import BanksmanError
+from banksman.inventory import Inventory
+
+RUNNING = "running"
+# Attributes that are known also when no instance has them now, so that a request for one waits
+# for a match instead of failing.
+KNOWN = frozenset({KIND, ACCOUNT, TAG, *android.FACTS})
+_NUMBER = re.compile(r"-?[0-9]{1,10}")
+_CLAUSE = re.compile(r"([^<>!=~]*)(>=|<=|!=|=|~)(.*)", re.DOTALL)
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_MAX_VALUE_LENGTH = 256
+
+Discover = Callable[[Kind, Config], Found]
+
+
+@dataclass(frozen=True)
+class Clause:
+    attribute: str
+    operator: str
+    value: str
+
+    def __str__(self) -> str:
+        return f"{self.attribute}{self.operator}{self.value}"
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """A permitted resource that is present now and matches a request."""
+
+    resource: str
+    kind: str
+    rank: int
+    facts: Mapping[str, FactValue] = field(default_factory=dict)
+    tags: tuple[str, ...] = ()
+
+    @property
+    def cold(self) -> bool:
+        """Whether the instance does not run now, so that its holder must start it."""
+        return self.facts.get(RUNNING) is False
+
+
+@dataclass(frozen=True)
+class Search:
+    # The matching resources, free or held, in the order in which banksman chooses them.
+    candidates: tuple[Candidate, ...]
+    # What discovery reported, and allowed instances that are not present now.
+    notes: tuple[str, ...] = ()
+
+
+def parse_clause(text: str) -> Clause:
+    """Return the clause of a `--where` argument such as `form=tablet` or `api>=33`."""
+    match = _CLAUSE.fullmatch(text)
+    if match is None or FACT_NAME.fullmatch(match.group(1)) is None:
+        raise ValueError(
+            "a clause is an attribute, an operator (=, !=, ~, >=, or <=), and a value, such as"
+            " form=tablet or api>=33. Quote it in a shell, because > and < redirect"
+        )
+    attribute, operator, value = match.groups()
+    if not 0 < len(value) <= _MAX_VALUE_LENGTH or _CONTROL.search(value):
+        raise ValueError(
+            f"the value of {attribute} must have 1 to {_MAX_VALUE_LENGTH} characters and no"
+            " control characters"
+        )
+    if operator in (">=", "<=") and (attribute == TAG or _NUMBER.fullmatch(value) is None):
+        raise ValueError(f"{operator} compares whole numbers only, such as api{operator}33")
+    return Clause(attribute, operator, value)
+
+
+def check_kinds(clauses: Sequence[Clause], config: Config) -> None:
+    """Refuse a request for a kind that the configuration does not declare."""
+    for clause in clauses:
+        if clause.attribute == KIND and clause.operator == "=" and not _kind(config, clause.value):
+            declared = ", ".join(sorted(config.kinds)) or "none"
+            raise BanksmanError(
+                f"the configuration declares no kind {clause.value}; the kinds are: {declared}"
+            )
+
+
+def search(
+    config: Config,
+    inventory: Inventory,
+    clauses: Sequence[Clause],
+    *,
+    discover: Discover = discover_now,
+) -> Search:
+    """Find the permitted resources that are present now and match every clause.
+
+    Discovery runs only for the kinds that the `kind` clauses allow. An attribute that is
+    neither known nor a fact that discovery found now is an error, never an empty match that
+    waits forever.
+    """
+    check_kinds(clauses, config)
+    kind_clauses = [clause for clause in clauses if clause.attribute == KIND]
+    kinds = [
+        kind
+        for kind in config.kinds.values()
+        if all(matches(clause, {KIND: kind.name}) for clause in kind_clauses)
+    ]
+    declared = {name: kind.name for kind in config.kinds.values() for name in kind.instances()}
+    found_facts: set[str] = set()
+    notes: list[str] = []
+    resources: list[Candidate] = []
+    for kind in kinds:
+        if not kind.discovered:
+            # The configuration that declares the instances is the permission.
+            resources.extend(
+                Candidate(name, kind.name, kind.rank, {KIND: kind.name}, inventory.tags_of(name))
+                for name in kind.instances()
+            )
+            continue
+        found = discover(kind, config)
+        notes.extend(f"kind {kind.name}: {note}" for note in found.notes)
+        for instance in found.instances:
+            found_facts.update(instance.facts)
+            # A name has one lease file, so a name that another kind declares is not this kind's.
+            if declared.get(instance.name, kind.name) != kind.name:
+                continue
+            if not inventory.allows(kind.name, instance.name):
+                continue
+            facts = dict(instance.facts)
+            # Whether an allowed account is signed in now. When the accounts are not known, the
+            # fact is left out, so that no clause on it matches.
+            if instance.accounts is not None:
+                facts[ACCOUNT] = any(inventory.allows_account(name) for name in instance.accounts)
+            tags = inventory.tags_of(instance.name)
+            resources.append(Candidate(instance.name, kind.name, kind.rank, facts, tags))
+        present = {instance.name for instance in found.instances}
+        allowed = inventory.kinds[kind.name].allowed if kind.name in inventory.kinds else ()
+        notes.extend(
+            f"{name} (kind {kind.name}) is allowed but not present now"
+            for name in allowed
+            if name not in present
+        )
+    _check_attributes(clauses, found_facts)
+    matching = [
+        candidate
+        for candidate in resources
+        if all(matches(clause, candidate.facts, candidate.tags) for clause in clauses)
+    ]
+    # Lower ranks first, so a request that does not name a kind gets, for example, an emulator
+    # before a physical device. Then an instance that runs before one that its holder must
+    # start, which saves the time and the memory of a start.
+    matching.sort(key=lambda candidate: (candidate.rank, candidate.cold, candidate.resource))
+    return Search(tuple(matching), tuple(notes))
+
+
+def matches(
+    clause: Clause, facts: Mapping[str, FactValue], tags: Sequence[str] = ()
+) -> bool:
+    """Whether a resource with these facts and tags satisfies the clause.
+
+    A fact that the resource does not have matches no clause, with any operator, so that an
+    unknown value never passes for a known one.
+    """
+    if clause.attribute == TAG:
+        found = any(_same(tag, clause.operator, clause.value) for tag in tags)
+        return not found if clause.operator == "!=" else found
+    fact = facts.get(clause.attribute)
+    if fact is None:
+        return False
+    if clause.operator in (">=", "<="):
+        # A whole number only: true and false are not numbers.
+        if isinstance(fact, bool) or not isinstance(fact, int):
+            return False
+        number = int(clause.value)
+        return fact >= number if clause.operator == ">=" else fact <= number
+    if clause.operator == "!=":
+        return not _same(fact, "=", clause.value)
+    return _same(fact, clause.operator, clause.value)
+
+
+def _same(fact: FactValue, operator: str, value: str) -> bool:
+    # Text is compared without regard to case, because devices give, for example, both
+    # "samsung" and "Google" as the manufacturer.
+    if isinstance(fact, bool):
+        text = "true" if fact else "false"
+    elif isinstance(fact, int):
+        if operator != "~":
+            return _NUMBER.fullmatch(value) is not None and int(value) == fact
+        text = str(fact)
+    else:
+        text = fact
+    if operator == "~":
+        return fnmatch.fnmatchcase(text.casefold(), value.casefold())
+    return text.casefold() == value.casefold()
+
+
+def _kind(config: Config, name: str) -> bool:
+    return any(kind.casefold() == name.casefold() for kind in config.kinds)
+
+
+def _check_attributes(clauses: Sequence[Clause], found: set[str]) -> None:
+    for clause in clauses:
+        if clause.attribute not in KNOWN and clause.attribute not in found:
+            names = ", ".join(sorted(KNOWN | found))
+            raise BanksmanError(
+                f"unknown attribute {clause.attribute}; the attributes are: {names}"
+            )

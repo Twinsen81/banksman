@@ -1,12 +1,13 @@
 # banksman design
 
 **Status:** the project scaffold, the lease core, kinds as configuration, fencing, discovery,
-and holder identity exist. Sections 3, 4, 5, 8, and 9 are implemented, with `banksman reap`, a
-`status` that lists the leases and their holders, `banksman whoami`, the commands that scripts
-run (`enter`, `check`, and `leave`), `banksman admin discover`, and
-`banksman admin release --force`. The rest is not implemented yet: no command can take a
-lease yet. Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md);
-the threat model is in [SECURITY.md](../SECURITY.md).
+holder identity, and requests by properties exist. Sections 3, 4, 5, 6, 8, and 9 are
+implemented, with `banksman acquire`, `touch`, `release`, `reap`, a `status` that
+lists the leases and their holders, `banksman whoami`, the commands that scripts run
+(`enter`, `check`, and `leave`), `banksman admin discover`, and
+`banksman admin release --force`. Joint acquire, the console, and build slots are not
+implemented yet. Resolved decisions and how to change them are in
+[DECISIONS.md](../DECISIONS.md); the threat model is in [SECURITY.md](../SECURITY.md).
 
 ## 1. Goals and non-goals
 
@@ -40,8 +41,10 @@ Non-goals:
 | Named kind | Instances have identities: serials, emulator names, account addresses, or names that the operator lists, such as port numbers. |
 | Counted kind | Instances are interchangeable slots: build slots, licence seats. |
 | Lease | The record that one holder may use one resource until the lease is released or void. |
-| Holder | Who holds a lease: the worktree, the issue, the agent process, and a purpose. |
-| Inventory | The allowlist of resources that agents may use at all. |
+| Holder | Who holds a lease: the worktree, the issue, the agent process, and a purpose. The lease id identifies one holding. |
+| Inventory | The allowlist of resources that agents may use at all, and the operator's tags. |
+| Fact | A property of a resource that discovery finds, such as `form` or `api`. An agent cannot set it. |
+| Tag | A label that the operator gives resources in the inventory, with name patterns. |
 
 ## 3. Leases, not locks
 
@@ -72,9 +75,11 @@ leases instead.
 - **States.** `booting`, then `ready`, then `draining`, then released. A resource that
   cannot be taken back safely becomes `quarantined`, and stays out of use until a person
   runs `banksman admin release --force`.
-- **Reserve before start.** A lease is written in the `booting` state, with its own
-  deadline, before the resource is started. A resource that is still starting therefore
-  always has a lease, and cannot be mistaken for an orphan.
+- **Lease before start.** banksman starts nothing. A run takes the lease before it starts the
+  instance, so an instance that is still starting always has a lease, and cannot be
+  mistaken for an orphan. A lease is `booting` only while the kind's `on_acquire` hook
+  resets the instance (section 5), with its own deadline, so that a caller that ends in the
+  middle frees the resource soon.
 - **Void triggers.** A lease is void when any of these is true. The defaults are starting
   values, to be tuned by measurement. The operator can change each of them in the
   configuration, for all kinds or for one kind (section 5). A lease keeps the values that
@@ -83,7 +88,7 @@ leases instead.
   | Trigger | Default | Catches |
   |---|---|---|
   | the machine restarted after the lease was written | n/a | leases that describe an earlier boot |
-  | `booting` past its boot deadline | 5 min | boots that never complete |
+  | `booting` past its boot deadline | 5 min | resets that never complete |
   | held longer than the hard cap | 3 h | runs that are alive but loop |
   | owner process ended, and no touch for a grace period | 5 min | crashed or killed runs |
   | no touch for the idle timeout | 20 min | hung runs, runs that forgot to release |
@@ -130,9 +135,10 @@ Checking ownership when a script starts is not enough: one long test run can las
 minutes, and its lease can become void in the middle.
 
 - **The lease id is a token.** The commands that grant a lease print its id. A script passes
-  it to `enter`, `check`, and `leave`, and `ready` needs it too. A script whose token does
-  not name the current lease of the resource has lost it. So a script of an earlier lease,
-  for example one of the same worktree, never acts on a newer lease.
+  it to `enter`, `check`, and `leave`, and `touch` and `release` need it too. A
+  script whose token does not name the current lease of the resource has lost it. So a
+  script of an earlier lease, for example one of the same worktree, never acts on a newer
+  lease.
 - **The user's side.** A script registers itself with `enter` when it starts: its pid and,
   if it has one, the process group that it created for its work. `enter` also checks and
   touches the lease. A long-running script runs its work in its own process group, and runs
@@ -208,6 +214,10 @@ not code.
   hook or a `preset`, and `preselect` patterns (section 8). A kind has only one of `count`,
   `instances`, `discover`, and `preset`. An instance name must be unique across all kinds,
   because each resource has one lease file. Counted kinds need no hooks.
+- **Rank.** When a request matches instances of several kinds, the kind with the lower `rank`
+  is chosen first (section 6). A rank is a whole number from 0 to 1000. It is 0 by default,
+  and 1 for a kind with the `android-device` preset, because physical devices are usually
+  scarcer than emulators.
 - **Timeouts.** `[defaults]` sets the timeouts of section 3 for every kind, and a kind can
   set its own. A duration is a whole number and a unit: `90s`, `20m`, or `3h`.
   `idle_timeout = "off"` turns the idle timeout off, for example for build slots. An
@@ -238,7 +248,11 @@ not code.
   preset = "android-emulator"
   preselect = ["qa_*"]
   boot_timeout = "8m"
+  on_acquire = ["/usr/local/bin/reset-avd"]
   on_void = ["/usr/local/bin/stop-avd"]
+
+  [kinds.device]
+  preset = "android-device"
   ```
 
 - **`on_void`** is a command that ends a void instance, for example one that kills an
@@ -268,37 +282,81 @@ not code.
   reapers have started the take-back of a lease and none has finished, for example because
   their callers stopped them, the lease is quarantined, so that a slow hook does not run in
   every command.
+- **`on_acquire`** is a command that resets an instance before a run gets it. `acquire` runs
+  it for each new lease of the kind, after it writes the lease and outside the lock, with the
+  hook contract above. If it fails, the lease is given back (section 6). banksman ships no
+  such command.
 - Hooks do device-level work only. App-level work stays in the project's scripts.
-- Still to come: `on_acquire`, which resets an instance before a run gets it, comes with
-  requests (section 6).
 
 ## 6. Requests by properties
 
 A run asks for what it needs, not for a resource by name.
 
 - **Facts** come from the kind's `discover` hook or preset (section 8), and an agent cannot
-  set them: `kind`, `form` (phone, tablet, watch), `api`, `image`, `abi`, `manufacturer`,
-  `model`, `codename`, `display_name`, `avd`, `serial`, and `google_account` (whether an
-  allowed Google account is signed in, which banksman derives from the accounts that
-  discovery finds). A text fact is compared without regard to case, because devices give,
-  for example, both `samsung` and `Google`.
-- **Tags** come from the operator, who assigns them in the machine's inventory with pattern
-  rules.
-- A request is an AND of `--where` clauses. The operators are `=`, `!=`, `~` (glob), `>=`
-  and `<=`. An unknown attribute is an error, never an empty match that waits forever.
+  set them: `form` (phone, tablet, watch), `api`, `image`, `abi`, `manufacturer`, `model`,
+  `codename`, `display_name`, `avd`, `serial`, and `running` (whether the instance runs
+  now). banksman sets three attributes itself, and a hook cannot set them: `kind`; `account`,
+  which is true when an allowed account is signed in on the instance now, false when its
+  accounts are known and none of them is allowed, and missing when its accounts are not
+  known; and `tag`.
+- **Tags** come from the operator, who assigns them in the inventory with name patterns
+  (section 8). A tag gives no access.
+- A request is an AND of `--where` clauses. The operators are `=`, `!=`, `~` (a glob, with `*`
+  and `?`), `>=`, and `<=`. Text is compared without regard to case, because devices give,
+  for example, both `samsung` and `Google`. `>=` and `<=` compare whole numbers only. For
+  `tag`, `=` and `~` ask whether the resource has a matching tag, and `!=` asks whether it
+  has none. A fact that a resource does not have matches no clause, with any operator, so
+  an unknown value never passes for a known one.
+- An attribute that is neither one of the above nor a fact that discovery finds now is an
+  error, never an empty match that waits forever. So is `kind=` with a kind that the
+  configuration does not declare.
+- Only what the configuration declares or the inventory allows, and what is present now, can
+  match. A request cannot widen access, also not when it names a resource.
+
+Quote the clauses in a shell, because `>` and `<` redirect:
 
 ```
-banksman acquire --where form=tablet --where api>=33 \
+banksman acquire --where form=tablet --where 'api>=33' \
                  --for "verify the tablet layout" --expect 20m --wait 15m
 ```
 
 When several resources match, banksman chooses in a fixed order:
 
-1. A matching resource that this owner already holds.
-2. A free emulator that has already booted.
-3. A cold boot of a permitted emulator.
+1. The resource of the caller's lease, if the caller passes the lease id with `--lease` and
+   the resource still matches. The lease is touched, and it records the caller's agent
+   process as its owner process.
+2. A kind with a lower `rank` (section 5). So a request that does not name a kind gets an
+   emulator before a physical device.
+3. An instance that runs before one that does not run, which saves the time and the memory
+   of a start.
+4. The resource name.
 
-It prefers emulators to physical devices unless the request asks for `kind=physical`.
+`acquire` without `--lease` never grants a held resource, also not to the same worktree:
+several agents can work in one worktree at the same time, so only the lease id tells their
+holdings apart (section 9).
+
+- **The grant.** `acquire` prints `KEY=value` lines: `RESOURCE`, `KIND`, `LEASE` (the lease
+  id that the scripts pass back), `STATE`, and `SERIAL` when discovery knows it. Each value
+  has only the characters of a resource name, so that a shell script can use it as it is: a
+  serial with other characters is not printed. With `--json`, it prints the same as JSON.
+- **banksman starts nothing.** Every grant is `ready`. The holder checks whether the
+  instance runs, and starts it if it does not, for example with the `emulator` command. A
+  fact from discovery can be wrong, for example for an emulator that is still starting, so
+  `running` only orders the matches, and the holder decides.
+- **The agent can choose.** `acquire` grants one resource and names it. It does not return a
+  list, because two callers that choose from the same list choose the same resource. An
+  agent that needs a specific resource asks for it, for example with `--where avd=qa_phone`.
+- **`on_acquire`.** When the kind declares an `on_acquire` hook (section 5), the lease is
+  `booting` while the hook runs, and then `ready`. If the hook fails, the lease is given back
+  and `acquire` fails. A failed reset does not make the instance unsafe for the next holder,
+  as a failed take-back does, so the instance is not quarantined. A lease that the caller
+  keeps with `--lease` is not reset again.
+- **Waiting.** While every matching resource is held, `acquire` fails with exit status 4.
+  With `--wait`, it looks again every 5 seconds until the wait ends, and each look reads the
+  machine again. When no permitted resource that is present now matches, held or free,
+  `acquire` fails at once, also with `--wait`, because only a held resource can become free.
+  There is no queue yet: when many callers wait, a caller can get a resource before another
+  caller that started to wait earlier.
 
 ## 7. Several resources at once, and pairs
 
@@ -361,7 +419,10 @@ It prefers emulators to physical devices unless the request asks for `kind=physi
 - **The inventory is policy, not a cache.** The inventory is
   `~/.config/banksman/inventory.toml`, with the home directory from the user database, as
   for the configuration file. It holds only names: the allowed and the refused instances of
-  each kind, and the allowed and the refused accounts. The operator can edit it. banksman
+  each kind, and the allowed and the refused accounts. Under `[tags]`, it also holds the
+  operator's tags: each tag and the name patterns of the resources that have it, for example
+  `lab = ["qa_*"]`. discover keeps the tags when it writes the file. The operator can edit
+  it. banksman
   refuses an inventory that another user owns or that group or others can write to.
   `acquire` reads the machine again and grants only what is both allowed and present now
   (section 6). An entry that has gone is reported, not handed out. Counted kinds and kinds
@@ -383,18 +444,21 @@ It prefers emulators to physical devices unless the request asks for `kind=physi
 
   `schema` is the version of this format, now 1. `name` is a resource name. A fact name
   has lowercase letters, digits, and `_`, and a fact is a text of at most 128 characters
-  without control characters, a whole number, or `true` or `false`. banksman sets the fact
-  `kind` itself, so a hook cannot make an instance look like one of another kind.
+  without control characters, a whole number, or `true` or `false`. banksman sets the
+  attributes `kind`, `account`, and `tag` itself (section 6), so a hook cannot make an
+  instance look like one of another kind, or like one with an allowed account. `running`
+  tells whether the instance runs now.
   `accounts` lists the accounts on the instance; without it, or with `null`, they are not
   known. A value that is not valid is left out with a note, never repaired, and a note never
   shows a name that is not valid. A name can belong to only one kind.
 - **Presets.** `preset = "android-emulator"` finds the AVDs, with the facts `avd`,
   `display_name` (the name that the AVD manager shows), `manufacturer`, `api`, `image`,
-  `abi`, and `form`, and, for an emulator that runs, its `serial` and its accounts.
+  `abi`, `form`, and `running`, and, for an emulator that runs, its `serial` and its
+  accounts. When adb cannot list the running emulators, `running` is left out.
   `preset = "android-device"` finds the physical devices that adb lists, with the facts
-  `serial`, `manufacturer`, `model`, `codename`, `api`, `abi`, and `form`, and their
-  accounts. The facts are what the device gives: a Samsung phone gives the model
-  `SM-S926B`, not "Galaxy S24+". banksman ships no table of marketing names, and it does
+  `serial`, `manufacturer`, `model`, `codename`, `api`, `abi`, `form`, and `running`, which
+  is always true, and their accounts. The facts are what the device gives: a Samsung phone
+  gives the model `SM-S926B`, not "Galaxy S24+". banksman ships no table of marketing names, and it does
   not read the device name in the settings, which a person can change and which often
   holds a personal name. A device that is
   not authorized is reported, not offered. The presets use the SDK in `~/Library/Android/sdk`
@@ -423,6 +487,18 @@ for any agent and for a person at a terminal.
 
 If no known agent is in the ancestry, the owner is the worktree, and only the touch-based
 expiry applies, unless the caller passes `--owner-pid`.
+
+The owner is the readable name of a holding, not its identity: several agents can work in one
+worktree at the same time, each with its own agent process. The lease id identifies a
+holding, and `acquire --lease`, `touch`, and `release` take it. Liveness stays with each
+agent, through its own agent process.
+
+- `touch` records the caller's agent process as the owner process, so a lease survives a
+  restart of the agent.
+- `release --all` gives back only the leases whose owner process is the caller's agent
+  process, so it acts for one agent. After a restart of the agent, it finds a lease only
+  after a touch has recorded the new agent process; until then, the lease ends by its
+  timeouts.
 
 - banksman reads the branch from the `HEAD` file of the worktree, and runs no `git`
   process. A detached `HEAD` has no branch, so the directory name is the fallback.
@@ -481,19 +557,19 @@ kind in the same pool.
 
 ## 12. Command line (sketch)
 
-Only `version`, `status`, `whoami`, `reap`, `enter`, `check`, `leave`, `admin discover`, and
-`admin release` exist today. The rest is the intended shape.
+`watch`, `explain`, `log`, and `acquire --kind build --user-pid` do not exist yet. The rest
+exists.
 
 ```
-banksman acquire --where <attr><op><value> ... [--for <text>] [--expect <duration>] [--wait <duration>]
+banksman acquire --where <attr><op><value> ... [--for <text>] [--expect <duration>]
+                 [--wait <duration>] [--lease <id>] [--issue <id>] [--owner-pid <pid>] [--json]
 banksman acquire --kind build --user-pid <pid> [--wait <duration>]
-banksman reserve --kind emulator --where ... [--wait <duration>]   # lease in state booting
-banksman ready   --resource <name> --lease <id> --serial <serial>  # booting -> ready
 banksman enter   --resource <name> --lease <id> --pid <pid> [--pgid <pgid>]  # check, touch, register
 banksman check   --resource <name> --lease <id>                    # touch; exit 0: yours, 3: lost
 banksman leave   --resource <name> --lease <id> --pid <pid>
-banksman touch   --resource <name> [--expect <duration>]
-banksman release [--resource <name> | --all]
+banksman touch   --resource <name> --lease <id> [--expect <duration>] [--owner-pid <pid>]
+banksman release --resource <name> --lease <id>
+banksman release --all [--owner-pid <pid>]                         # the leases of this agent
 banksman status  [--json] [--verbose]
 banksman whoami  [--json]
 banksman watch
@@ -508,7 +584,8 @@ banksman admin release --force --resource <name>
 
 Commands that grant a resource print `KEY=value` lines, for example `RESOURCE=`, `SERIAL=`,
 and `LEASE=`, the lease id that the scripts pass back, so that a shell script can read them.
-With `--json` they print JSON instead.
+With `--json` they print JSON instead. Exit status 1 is an error, 2 a usage error, 3 a lease
+that is lost, and 4 a request whose matching resources are all in use.
 
 Every command that only an operator may run is under `banksman admin`, so that an agent's
 permission rules can refuse all of them with one pattern, including ones added later.
@@ -531,6 +608,10 @@ permission rules can refuse all of them with one pattern, including ones added l
   scripts both ways.
 - Pass the leased serial to every tool, for example `adb -s <serial>`. A bare `adb` call
   acts on whatever device adb chooses.
+- Keep the lease id that `acquire` prints. Pass it to the scripts, and back to `acquire` with
+  `--lease` to keep the same resource.
+- Start the granted instance when it does not run, and handle one that already runs:
+  discovery can miss an emulator that is still starting.
 - Release leases before waiting for a person, so that a run that waits overnight does not
   hold a device. If a run forgets, the owner and idle checks free the device later.
 - Keep app setup and cleanup in the project's scripts.
@@ -548,11 +629,13 @@ Done:
 - Discovery and the allowlist: `admin discover`, the `discover` hook, presets for Android
   emulators and Android devices, and the inventory.
 - Holder identity for any agent, and `whoami`.
+- Requests by properties: `acquire` with facts, tags, and an order of choice; `touch` and
+  `release`; and the `on_acquire` hook.
 
 Next:
 
-- Requests by properties, joint acquire, and the `on_acquire` hook.
-- `status`, `watch`, `explain`, and `log`.
+- Joint acquire and pairs.
+- `status`, `watch`, `explain`, and `log`, and a queue for the callers that wait.
 - Build slots through a Gradle init script.
 
 ## 16. Open questions
@@ -579,6 +662,9 @@ Next:
 - A raw `adb -s` call from an agent is not fenced, because only the scripts register as
   users. An `adb` wrapper on `PATH`, or an agent hook that checks the lease before a device
   command, would enforce it.
+- Should a lease record the serial of an instance that its holder started, so that `status`
+  and the `on_void` hook know it? That needs a command for the holder to report it, and it
+  changes the lease file format.
 - Only a quarantined lease is kept outside `/tmp`. A void lease whose scripts still run, and
   that no command reaps, is kept only in `/tmp`. If no banksman command runs for 3 days, a
   cleaner of temporary files can delete it before it is quarantined. Should every lease with

@@ -42,6 +42,20 @@ def take_back(
     return None if failure is None else f"the on_void hook {failure}"
 
 
+def reset(
+    kinds: Mapping[str, Kind], lease: Lease, *, timeout: float = HOOK_TIMEOUT_SECONDS
+) -> str | None:
+    """Reset the instance of a new lease with the `on_acquire` hook of its kind, if it has one.
+
+    Return None when the instance is ready for the holder, or how the hook failed.
+    """
+    kind = kinds.get(lease.kind)
+    if kind is None or kind.on_acquire is None:
+        return None
+    failure = run(kind.on_acquire, lease, timeout=timeout)
+    return None if failure is None else f"the on_acquire hook {failure}"
+
+
 def discover(kind: Kind, *, timeout: float = HOOK_TIMEOUT_SECONDS) -> tuple[str | None, bytes]:
     """Run the `discover` hook of a kind. Return how it failed, or None, and what it printed."""
     if kind.discover is None:

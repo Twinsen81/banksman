@@ -109,6 +109,29 @@ def test_on_void_is_a_program_and_its_arguments(config_path):
     assert load_config().kinds["emulator"].on_void == ("/opt/bin/stop-avd", "--now")
 
 
+def test_on_acquire_resets_an_instance_before_a_run_gets_it(config_path):
+    write_config(config_path, '[kinds.emulator]\non_acquire = ["/opt/bin/reset-avd"]\n')
+    assert load_config().kinds["emulator"].on_acquire == ("/opt/bin/reset-avd",)
+    assert Kind("emulator").on_acquire is None
+
+
+def test_physical_devices_have_a_higher_rank_unless_the_operator_sets_one(config_path):
+    write_config(
+        config_path,
+        '[kinds.emulator]\npreset = "android-emulator"\n'
+        '[kinds.device]\npreset = "android-device"\n'
+        '[kinds.bench]\npreset = "android-device"\nrank = 0\n'
+        "[kinds.build]\ncount = 2\nrank = 7\n",
+    )
+    kinds = load_config().kinds
+    assert {name: kind.rank for name, kind in kinds.items()} == {
+        "emulator": 0,
+        "device": 1,
+        "bench": 0,
+        "build": 7,
+    }
+
+
 def test_a_new_counted_kind_needs_only_configuration(config_path, store, system):
     write_config(config_path, '[kinds.port]\ncount = 2\nidle_timeout = "off"\nhard_cap = "1h"\n')
     port = load_config().kinds["port"]
@@ -223,6 +246,12 @@ def test_text_that_is_not_a_duration_is_refused(text):
         ("[kinds.emulator]\non_void = ['bin/stop-avd']", "kinds.emulator.on_void"),
         ("[kinds.emulator]\non_void = ['~/bin/stop-avd']", "kinds.emulator.on_void"),
         ("[kinds.emulator]\non_void = ['$HOME/bin/stop-avd']", "kinds.emulator.on_void"),
+        ("[kinds.emulator]\non_acquire = ['reset-avd']", "kinds.emulator.on_acquire"),
+        ("[kinds.emulator]\non_acquire = []", "kinds.emulator.on_acquire"),
+        ("[kinds.emulator]\nrank = -1", "kinds.emulator.rank"),
+        ("[kinds.emulator]\nrank = 1001", "kinds.emulator.rank"),
+        ("[kinds.emulator]\nrank = '1'", "kinds.emulator.rank"),
+        ("[kinds.emulator]\nrank = true", "kinds.emulator.rank"),
         ("[kinds.emulator]\nstop = 'yes'", "kinds.emulator.stop"),
         ("[kinds.emulator]\nstop = 1", "kinds.emulator.stop"),
         ("[defaults]\nstop = true", "defaults.stop"),

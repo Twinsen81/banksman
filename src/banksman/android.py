@@ -23,6 +23,20 @@ from banksman.errors import BanksmanError
 ADB_TIMEOUT_SECONDS = 15.0
 DISCOVER_SCHEMA = 1
 GOOGLE_ACCOUNT_TYPE = "com.google"
+# The facts that the presets give.
+FACTS = (
+    "avd",
+    "display_name",
+    "manufacturer",
+    "model",
+    "codename",
+    "api",
+    "image",
+    "abi",
+    "form",
+    "serial",
+    "running",
+)
 _MAX_OUTPUT = 1024 * 1024
 _MAX_INI_FILE = 64 * 1024
 _EMULATOR_PREFIX = "emulator-"
@@ -48,6 +62,7 @@ def emulators(settings: Android, run: Run | None = None) -> Document:
     home = avd_home(settings)
     avds = _avds(home, notes)
     running: dict[str, str] = {}
+    listed = True
     try:
         for serial, state in _devices(run, adb):
             if serial.startswith(_EMULATOR_PREFIX) and state == "device":
@@ -57,11 +72,16 @@ def emulators(settings: Android, run: Run | None = None) -> Document:
                 else:
                     running[name] = serial
     except AndroidError as exc:
+        listed = False
         notes.append(f"cannot list the running emulators, so none is shown as running: {exc}")
     instances = []
     for name, config, target in avds:
         instance: Document = {"name": name, "facts": _avd_facts(name, config, target)}
         serial = running.get(name)
+        # An emulator that does not run must be started before use. Without the list of running
+        # emulators, that is not known, so the fact is left out.
+        if listed:
+            instance["facts"]["running"] = serial is not None
         if serial is not None:
             instance["facts"]["serial"] = serial
             instance.update(_accounts(run, adb, serial))
@@ -86,7 +106,7 @@ def devices(settings: Android, run: Run | None = None) -> Document:
         if state != "device":
             notes.append(f"{serial} is {state}, so it is not offered")
             continue
-        instance: Document = {"name": serial, "facts": {"serial": serial}}
+        instance: Document = {"name": serial, "facts": {"serial": serial, "running": True}}
         try:
             getprop = run(_adb(adb, serial, "shell", "getprop"), ADB_TIMEOUT_SECONDS)
         except AndroidError as exc:

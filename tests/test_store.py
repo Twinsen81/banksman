@@ -33,6 +33,7 @@ from banksman.lease import (
 from banksman.store import (
     RELEASED,
     Busy,
+    Choice,
     LockTimeout,
     NotHeld,
     Store,
@@ -116,8 +117,6 @@ def test_a_lease_keeps_the_timeouts_that_it_was_created_with(store, system, stat
     assert data["awake"]["boot_deadline"] == system.now + 8 * 60
     assert data["awake"]["hard_deadline"] == system.now + 60 * 60
     assert (data["idle_timeout"], data["owner_grace"]) == (None, 0)
-    # The same owner gets its lease again with the values that it had.
-    assert store.reserve("emu-1", "emulator", Holder(OWNER)).idle_timeout is None
 
 
 def test_ready_ends_the_boot(store, system):
@@ -131,7 +130,7 @@ def test_ready_ends_the_boot(store, system):
 def test_ready_needs_the_id_of_the_current_lease(store):
     # A script of an earlier boot of the same worktree must not mark a newer lease ready.
     earlier = store.reserve("emu-1", "emulator", Holder(OWNER))
-    store.release("emu-1", OWNER)
+    store.release("emu-1", earlier.lease_id)
     store.reserve("emu-1", "emulator", Holder(OWNER))
     with pytest.raises(NotHeld, match="another lease"):
         store.ready("emu-1", earlier.lease_id)
@@ -149,34 +148,33 @@ def test_a_resource_has_one_holder(store):
         store.reserve("phone-1", "device", Holder(OTHER))
 
 
-def test_the_same_owner_gets_its_own_lease_again(store, system):
-    first = store.acquire("phone-1", "device", Holder(OWNER))
-    system.advance(60)
-    again = store.acquire("phone-1", "device", Holder(OWNER))
-    assert again.lease_id == first.lease_id
-    assert again.touched == system.now
+def test_a_held_resource_is_busy_also_for_the_same_owner(store):
+    # Several agents can work in one worktree, so the owner does not tell their holdings apart.
+    store.acquire("phone-1", "device", Holder(OWNER))
+    with pytest.raises(Busy, match="held by"):
+        store.acquire("phone-1", "device", Holder(OWNER))
 
 
-def test_only_the_owner_can_use_the_lease(store):
+def test_only_the_lease_id_can_use_the_lease(store):
     store.reserve("emu-1", "emulator", Holder(OWNER))
     for call in (store.touch, store.release):
-        with pytest.raises(NotHeld, match="another owner|not held"):
-            call("emu-1", OTHER)
+        with pytest.raises(NotHeld, match="another lease"):
+            call("emu-1", "an-earlier-lease")
 
 
 def test_touch_keeps_the_lease_valid(store, system):
-    store.acquire("phone-1", "device", Holder(OWNER))
+    lease = store.acquire("phone-1", "device", Holder(OWNER))
     for _ in range(3):
         system.advance(15 * 60)
-        store.touch("phone-1", OWNER)
+        store.touch("phone-1", lease.lease_id)
     assert reaped(store) == []
 
 
 def test_touch_records_the_new_process_of_a_restarted_owner(store, system):
     system.processes = {100: "start-100", 200: "start-200"}
-    store.acquire("phone-1", "device", Holder(OWNER, owner_pid=100))
+    first = store.acquire("phone-1", "device", Holder(OWNER, owner_pid=100))
     del system.processes[100]
-    lease = store.touch("phone-1", OWNER, owner_pid=200)
+    lease = store.touch("phone-1", first.lease_id, owner_pid=200)
     assert (lease.owner_pid, lease.owner_started) == (200, "start-200")
     system.advance(10 * 60)
     assert reaped(store) == []
@@ -205,10 +203,87 @@ def test_a_lease_records_its_holder_and_the_expected_hold_time(store, system, st
 
 
 def test_a_touch_can_change_the_expected_hold_time(store, system):
-    store.acquire("phone-1", "device", Holder(OWNER))
+    lease_id = store.acquire("phone-1", "device", Holder(OWNER)).lease_id
     system.advance(60)
-    assert store.touch("phone-1", OWNER).expected is None
-    assert store.touch("phone-1", OWNER, expect=5 * 60).expected == system.now + 5 * 60
+    assert store.touch("phone-1", lease_id).expected is None
+    assert store.touch("phone-1", lease_id, expect=5 * 60).expected == system.now + 5 * 60
+
+
+def test_grant_takes_the_first_free_choice(store):
+    store.acquire("emu-1", "emulator", Holder(OTHER))
+    choices = [
+        Choice("emu-1", "emulator"),
+        Choice("emu-2", "emulator"),
+        Choice("phone-1", "device"),
+    ]
+    granted = store.grant(choices, Holder(OWNER))
+    assert (granted.lease.resource, granted.lease.owner, granted.kept) == ("emu-2", OWNER, False)
+    assert store.grant(choices, Holder(OWNER)).lease.resource == "phone-1"
+    assert store.grant(choices, Holder(OWNER)) is None
+
+
+def test_grant_gives_each_choice_its_state_and_timeouts(store, system):
+    timeouts = Timeouts(boot_timeout=8 * 60, hard_cap=60 * 60)
+    choice = Choice("emu-1", "emulator", BOOTING, timeouts)
+    lease = store.grant([choice], Holder(OWNER), expect=20 * 60).lease
+    assert (lease.state, lease.boot_deadline) == (BOOTING, system.now + 8 * 60)
+    assert (lease.hard_deadline, lease.expected) == (system.now + 60 * 60, system.now + 20 * 60)
+
+
+def test_grant_keeps_the_lease_whose_id_the_caller_passes(store, system):
+    system.processes = {100: "start-100", 200: "start-200"}
+    choices = [Choice("emu-1", "emulator"), Choice("emu-2", "emulator")]
+    store.grant(choices, Holder(OTHER))
+    held = store.grant(choices, Holder(OWNER, owner_pid=100)).lease
+    assert held.resource == "emu-2"
+    system.advance(60)
+    # A restarted agent keeps its lease, and the lease records its new process.
+    kept = store.grant(choices, Holder(OWNER, owner_pid=200), keep=held.lease_id, expect=60)
+    assert kept.kept
+    assert (kept.lease.lease_id, kept.lease.touched) == (held.lease_id, system.now)
+    assert (kept.lease.owner_pid, kept.lease.owner_started) == (200, "start-200")
+    assert kept.lease.expected == system.now + 60
+
+
+def test_grant_does_not_keep_a_lease_that_is_lost_or_that_does_not_match(store, system):
+    held = store.grant([Choice("emu-1", "emulator")], Holder(OWNER)).lease
+    # The request no longer matches the resource of the lease: the caller gets another one.
+    other = store.grant([Choice("emu-2", "emulator")], Holder(OWNER), keep=held.lease_id)
+    assert (other.lease.resource, other.kept) == ("emu-2", False)
+    system.advance(20 * 60)
+    choices = [Choice("emu-1", "emulator"), Choice("emu-3", "emulator")]
+    again = store.grant(choices, Holder(OWNER), keep=held.lease_id)
+    assert (again.lease.resource, again.kept) == ("emu-3", False)
+
+
+def test_release_all_gives_back_the_leases_of_one_agent_process(store, system):
+    system.processes = {100: "start-100", 200: "start-200"}
+    store.acquire("phone-1", "device", Holder(OWNER, owner_pid=100))
+    store.acquire("emu-1", "emulator", Holder(OWNER, owner_pid=100))
+    store.acquire("emu-2", "emulator", Holder(OWNER, owner_pid=200))
+    store.acquire("emu-3", "emulator", Holder(OWNER))
+    released = store.release_all(100)
+    assert sorted((lease.resource, after) for lease, after in released) == [
+        ("emu-1", None),
+        ("phone-1", None),
+    ]
+    assert [lease.resource for lease in store.snapshot().leases] == ["emu-2", "emu-3"]
+
+
+def test_release_all_does_not_take_the_lease_of_an_earlier_process_with_the_same_pid(
+    store, system
+):
+    system.processes = {100: "start-100"}
+    store.acquire("phone-1", "device", Holder(OWNER, owner_pid=100))
+    system.processes = {100: "start-100-again"}
+    assert store.release_all(100) == []
+
+
+def test_release_all_drains_a_lease_whose_scripts_still_run(store, system):
+    entered(store, system)
+    ((lease, drained),) = store.release_all(101)
+    assert lease.resource == "phone-1"
+    assert (drained.state, drained.void_reason) == (DRAINING, RELEASE)
 
 
 def test_a_holder_that_is_not_valid_gets_no_lease(store, state_dir):
@@ -223,17 +298,17 @@ def test_the_owner_process_must_run(store):
 
 
 def test_a_touch_does_not_revive_a_void_lease(store, system):
-    store.acquire("phone-1", "device", Holder(OWNER))
+    lease = store.acquire("phone-1", "device", Holder(OWNER))
     system.advance(20 * 60)
     with pytest.raises(NotHeld, match="void"):
-        store.touch("phone-1", OWNER)
+        store.touch("phone-1", lease.lease_id)
     with pytest.raises(Busy):
         store.acquire("phone-1", "device", Holder(OWNER))
 
 
 def test_release_frees_the_resource(store, state_dir):
-    store.acquire("phone-1", "device", Holder(OWNER))
-    store.release("phone-1", OWNER)
+    lease = store.acquire("phone-1", "device", Holder(OWNER))
+    assert store.release("phone-1", lease.lease_id) is None
     assert not (state_dir / "phone-1.json").exists()
     assert store.acquire("phone-1", "device", Holder(OTHER)).owner == OTHER
 
@@ -276,10 +351,10 @@ def test_an_idle_lease_is_reaped(store, system):
 
 
 def test_the_hard_cap_is_enforced_although_the_holder_touches(store, system):
-    store.acquire("phone-1", "device", Holder(OWNER))
+    lease = store.acquire("phone-1", "device", Holder(OWNER))
     for _ in range(17):
         system.advance(10 * 60)
-        store.touch("phone-1", OWNER)
+        store.touch("phone-1", lease.lease_id)
     assert reaped(store) == []
     system.advance(10 * 60)
     assert reaped(store) == [("phone-1", HARD_CAP, RELEASED)]
@@ -343,7 +418,7 @@ def test_the_owner_check_fails_while_the_lease_drains(state_dir, system):
 
     def take_back(lease):
         with pytest.raises(NotHeld, match="draining"):
-            Store(state_dir, system).touch("phone-1", OWNER)
+            Store(state_dir, system).touch("phone-1", lease.lease_id)
         checks.append(lease.state)
         return True
 
@@ -797,8 +872,8 @@ def test_the_instance_is_ended_once_and_before_its_scripts_end(state_dir, system
 def test_a_release_while_scripts_run_drains_without_ending_the_instance(state_dir, system):
     ended = []
     store = Store(state_dir, system, take_back=lambda lease: ended.append(lease) or True)
-    entered(store, system)
-    drained = store.release("phone-1", OWNER)
+    lease = entered(store, system)
+    drained = store.release("phone-1", lease.lease_id)
     assert (drained.state, drained.void_reason) == (DRAINING, RELEASE)
     with pytest.raises(Busy, match="draining"):
         store.acquire("phone-1", "device", Holder(OTHER))
@@ -812,9 +887,9 @@ def test_a_release_while_scripts_run_drains_without_ending_the_instance(state_di
 def test_a_release_after_the_scripts_have_ended_frees_the_resource_at_once(
     store, system, state_dir
 ):
-    entered(store, system)
+    lease = entered(store, system)
     end_the_script(system)
-    assert store.release("phone-1", OWNER) is None
+    assert store.release("phone-1", lease.lease_id) is None
     assert not (state_dir / "phone-1.json").exists()
 
 
@@ -1026,8 +1101,9 @@ def test_a_resource_name_that_is_not_valid_is_refused_by_every_call(store):
     calls = [
         lambda: store.force_release("../phone-1"),
         lambda: store.check("../phone-1", "lease-1"),
-        lambda: store.touch("../phone-1", OWNER),
-        lambda: store.release("../phone-1", OWNER),
+        lambda: store.touch("../phone-1", "lease-1"),
+        lambda: store.release("../phone-1", "lease-1"),
+        lambda: store.grant([Choice("../phone-1", "device")], Holder(OWNER)),
     ]
     for call in calls:
         with pytest.raises(BanksmanError, match="resource name"):

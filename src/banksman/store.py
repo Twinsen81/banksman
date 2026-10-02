@@ -14,7 +14,7 @@ import stat
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -81,6 +81,24 @@ class Unreadable:
 class Snapshot:
     leases: list[Lease]
     unreadable: list[Unreadable]
+
+
+@dataclass(frozen=True)
+class Choice:
+    """A resource that a request may get, with the lease that it would get."""
+
+    resource: str
+    kind: str
+    # BOOTING when the instance must be started or reset before the holder uses it.
+    state: str = READY
+    timeouts: Timeouts = Timeouts()
+
+
+@dataclass(frozen=True)
+class Granted:
+    lease: Lease
+    # The caller already held this lease, and passed its id to keep it.
+    kept: bool = False
 
 
 @dataclass(frozen=True)
@@ -191,6 +209,46 @@ class Store:
         """Write a `ready` lease, for a resource that needs no start."""
         return self._grant(resource, kind, holder, READY, timeouts, expect)
 
+    def grant(
+        self,
+        choices: Sequence[Choice],
+        holder: Holder,
+        *,
+        keep: str | None = None,
+        expect: float | None = None,
+    ) -> Granted | None:
+        """Grant the first choice that is free, or None when every choice is held.
+
+        With `keep`, the id of a lease that the caller holds, the resource of that lease comes
+        first, if it is one of the choices: the lease is touched, and it records the holder's
+        owner process. Otherwise a held resource is never granted, also not to the same owner,
+        because several agents can work in one worktree.
+        """
+        for choice in choices:
+            check_names(choice.resource, choice.kind, holder)
+        with self._lock():
+            if keep is not None:
+                for choice in choices:
+                    current = self._read(choice.resource)
+                    if (
+                        isinstance(current, Lease)
+                        and current.lease_id == keep
+                        and current.resource == choice.resource
+                        and current.state in HELD
+                        and self._void_reason(current) is None
+                    ):
+                        lease = self._touched(current, holder.owner_pid)
+                        if expect is not None:
+                            lease = replace(lease, expected=self.system.clock() + expect)
+                        return Granted(self._write(lease), kept=True)
+            for choice in choices:
+                if self._read(choice.resource) is None:
+                    lease = self._new_lease(
+                        choice.resource, choice.kind, holder, choice.state, choice.timeouts, expect
+                    )
+                    return Granted(self._write(lease))
+        return None
+
     def ready(self, resource: str, lease_id: str) -> Lease:
         with self._lock():
             lease = self._held(resource, lease_id)
@@ -201,13 +259,15 @@ class Store:
     def touch(
         self,
         resource: str,
-        owner: str,
+        lease_id: str,
         owner_pid: int | None = None,
         *,
         expect: float | None = None,
     ) -> Lease:
+        """Touch a lease, and record `owner_pid` as its owner process, for example after the
+        agent restarted."""
         with self._lock():
-            lease = self._touched(self._owned(resource, owner), owner_pid)
+            lease = self._touched(self._held(resource, lease_id), owner_pid)
             if expect is not None:
                 lease = replace(lease, expected=self.system.clock() + expect)
             return self._write(lease)
@@ -253,25 +313,29 @@ class Store:
             others = tuple(user for user in lease.users if user.pid != pid)
             self._write(replace(lease, users=others))
 
-    def release(self, resource: str, owner: str) -> Lease | None:
+    def release(self, resource: str, lease_id: str) -> Lease | None:
         """Give the resource back. Return the lease while it drains, or None when it is free."""
         with self._lock():
-            lease = self._read(resource)
-            if (
-                not isinstance(lease, Lease)
-                or lease.resource != resource
-                or lease.owner != owner
-                or lease.state not in HELD
-            ):
-                raise NotHeld(f"{resource} is not held by this owner")
-            running = self._running_users(lease)
-            if not running:
-                self._delete(resource)
-                return None
-            # The scripts must end before the resource is handed on, as for a void lease. The
-            # holder gives the instance back as it is, so no hook ends it.
-            drained = _drained(replace(lease, users=running), RELEASE, self.system.clock())
-            return self._write(drained)
+            lease = self._current(resource, lease_id)
+            if lease.state not in HELD:
+                raise NotHeld(f"the lease on {resource} is {lease.state}")
+            return self._give_back(lease)
+
+    def release_all(self, owner_pid: int) -> list[tuple[Lease, Lease | None]]:
+        """Give back every held lease whose owner process is `owner_pid`.
+
+        Return each lease, and the lease while it drains or None when its resource is free.
+        """
+        with self._lock():
+            started = self._start_time(owner_pid)
+            mine = [
+                entry
+                for entry in self._scan()
+                if isinstance(entry, Lease)
+                and entry.state in HELD
+                and (entry.owner_pid, entry.owner_started) == (owner_pid, started)
+            ]
+            return [(lease, self._give_back(lease)) for lease in mine]
 
     def force_release(self, resource: str) -> tuple[Lease | Unreadable, tuple[User, ...]]:
         """Remove the lease on a resource in any state, without a hook and without a signal.
@@ -406,6 +470,16 @@ class Store:
         table = self.system.process_table()
         return tuple(user for user in lease.users if fencing.runs(user, table))
 
+    def _give_back(self, lease: Lease) -> Lease | None:
+        running = self._running_users(lease)
+        if not running:
+            self._delete(lease.resource)
+            return None
+        # The scripts must end before the resource is handed on, as for a void lease. The
+        # holder gives the instance back as it is, so no hook ends it.
+        drained = _drained(replace(lease, users=running), RELEASE, self.system.clock())
+        return self._write(drained)
+
     def _grant(
         self,
         resource: str,
@@ -421,41 +495,45 @@ class Store:
             if isinstance(current, Unreadable):
                 raise Busy(f"{resource} has a lease file that cannot be read")
             if current is not None:
-                if (
-                    current.resource == resource
-                    and current.owner == holder.owner
-                    and current.state in HELD
-                    and self._void_reason(current) is None
-                ):
-                    return self._write(self._touched(current, holder.owner_pid))
+                # Also for the same owner: several agents can work in one worktree, so only the
+                # lease id tells a holding apart.
                 raise Busy(f"{resource} is {current.state}, held by {current.owner}")
-            now = self.system.clock()
-            wall = self.system.wall_clock()
-            return self._write(
-                Lease(
-                    lease_id=uuid.uuid4().hex,
-                    resource=resource,
-                    kind=kind,
-                    state=state,
-                    owner=holder.owner,
-                    owner_pid=holder.owner_pid,
-                    owner_started=self._start_time(holder.owner_pid),
-                    issue=holder.issue,
-                    agent=holder.agent,
-                    session=holder.session,
-                    purpose=holder.purpose,
-                    expected=None if expect is None else now + expect,
-                    boot_id=self.system.boot_id(),
-                    acquired_at=wall,
-                    touched_at=wall,
-                    touched=now,
-                    boot_deadline=now + timeouts.boot_timeout if state == BOOTING else None,
-                    hard_deadline=now + timeouts.hard_cap,
-                    idle_timeout=timeouts.idle_timeout,
-                    owner_grace=timeouts.owner_grace,
-                    drain_timeout=timeouts.drain_timeout,
-                )
-            )
+            return self._write(self._new_lease(resource, kind, holder, state, timeouts, expect))
+
+    def _new_lease(
+        self,
+        resource: str,
+        kind: str,
+        holder: Holder,
+        state: str,
+        timeouts: Timeouts,
+        expect: float | None,
+    ) -> Lease:
+        now = self.system.clock()
+        wall = self.system.wall_clock()
+        return Lease(
+            lease_id=uuid.uuid4().hex,
+            resource=resource,
+            kind=kind,
+            state=state,
+            owner=holder.owner,
+            owner_pid=holder.owner_pid,
+            owner_started=self._start_time(holder.owner_pid),
+            issue=holder.issue,
+            agent=holder.agent,
+            session=holder.session,
+            purpose=holder.purpose,
+            expected=None if expect is None else now + expect,
+            boot_id=self.system.boot_id(),
+            acquired_at=wall,
+            touched_at=wall,
+            touched=now,
+            boot_deadline=now + timeouts.boot_timeout if state == BOOTING else None,
+            hard_deadline=now + timeouts.hard_cap,
+            idle_timeout=timeouts.idle_timeout,
+            owner_grace=timeouts.owner_grace,
+            drain_timeout=timeouts.drain_timeout,
+        )
 
     def _current(self, resource: str, lease_id: str) -> Lease:
         # A script passes the id of the lease that it started under, so a script of an earlier
@@ -471,16 +549,6 @@ class Store:
 
     def _held(self, resource: str, lease_id: str) -> Lease:
         return self._valid(self._current(resource, lease_id))
-
-    def _owned(self, resource: str, owner: str) -> Lease:
-        lease = self._read(resource)
-        if isinstance(lease, Unreadable):
-            raise NotHeld(f"{resource} has a lease file that cannot be read")
-        if lease is None or lease.resource != resource:
-            raise NotHeld(f"{resource} has no lease")
-        if lease.owner != owner:
-            raise NotHeld(f"{resource} is held by another owner")
-        return self._valid(lease)
 
     def _valid(self, lease: Lease) -> Lease:
         if lease.state not in HELD:

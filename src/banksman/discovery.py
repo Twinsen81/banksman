@@ -38,6 +38,13 @@ _MAX_ACCOUNTS = 100
 _MAX_FACT_NUMBER = 10**9
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
+# Attributes that banksman sets itself: the kind of an instance, whether an allowed account is
+# signed in on it, and its tags from the inventory. A hook cannot set them, so it cannot make an
+# instance look like one of another kind, or like one with an allowed account.
+KIND = "kind"
+ACCOUNT = "account"
+TAG = "tag"
+
 FactValue = str | int | bool
 
 
@@ -123,8 +130,7 @@ def _instance(kind: str, data: object, notes: list[str]) -> Instance | None:
         notes.append("an instance has a name that is not a valid resource name, so it is left out")
         return None
     facts = _facts(name, data.get("facts", {}), notes)
-    # banksman sets the kind: a hook cannot make an instance look like one of another kind.
-    facts["kind"] = kind
+    facts[KIND] = kind
     note = data.get("note")
     return Instance(
         name=name,
@@ -142,6 +148,8 @@ def _facts(name: str, raw: object, notes: list[str]) -> dict[str, FactValue]:
     for key, value in list(raw.items())[:_MAX_FACTS]:
         if not isinstance(key, str) or FACT_NAME.fullmatch(key) is None:
             notes.append(f"{name}: a fact has a name that is not valid, so it is left out")
+        elif key in (ACCOUNT, TAG):
+            notes.append(f"{name}: banksman sets the fact {key} itself, so it is left out")
         elif _fact_value(value):
             facts[key] = value
         else:
