@@ -24,6 +24,7 @@ from banksman.lease import (
 START = 1000.0
 LEASE = Lease(
     lease_id="lease-1",
+    holding="holding-1",
     resource="phone-1",
     kind="emulator",
     state=READY,
@@ -116,7 +117,8 @@ def test_json_round_trip():
         purpose="verify the tablet layout",
         expected=START + 600,
     )
-    for lease in (LEASE, OWNED, booting, draining, users, described):
+    paired = replace(LEASE, accounts=("qa@example.test", "qb@example.test"))
+    for lease in (LEASE, OWNED, booting, draining, users, described, paired):
         assert Lease.from_json(lease.to_json()) == lease
 
 
@@ -167,6 +169,11 @@ def _user(**changes):
         lambda data: data.update(purpose="verify\x1b[2J"),
         lambda data: data.update(purpose="x" * 201),
         lambda data: data["awake"].update(expected=float("inf")),
+        lambda data: data.update(accounts=None),
+        lambda data: data.update(accounts="qa@example.test"),
+        lambda data: data.update(accounts=["../escape"]),
+        lambda data: data.update(accounts=["qa@example.test", "qa@example.test"]),
+        lambda data: data.update(accounts=[f"qa{index}@example.test" for index in range(101)]),
         _without_awake,
     ],
 )

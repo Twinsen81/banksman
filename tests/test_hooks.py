@@ -18,6 +18,7 @@ from banksman.system import Machine
 
 LEASE = Lease(
     lease_id="lease-1",
+    holding="holding-1",
     resource="emu-1",
     kind="emulator",
     state=READY,

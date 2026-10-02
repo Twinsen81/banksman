@@ -58,7 +58,7 @@ def test_status_lists_the_leases(capsys, state_dir):
 
     assert main(["status"]) == 0
     header, row = capsys.readouterr().out.splitlines()
-    assert header.split() == ["RESOURCE", "KIND", "STATE", "HOLDER", "SINCE"]
+    assert header.split() == ["RESOURCE", "KIND", "STATE", "HOLDER", "SINCE", "ACCOUNTS"]
     assert row.split()[:4] == ["phone-1", "device", "ready", "tree-a"]
 
 

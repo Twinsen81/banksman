@@ -43,6 +43,8 @@ ISSUE = re.compile(r"[A-Za-z0-9#][A-Za-z0-9._#/-]{0,63}")
 PROGRAM_NAME = re.compile(r"[A-Za-z0-9._+-]{1,64}")
 SESSION = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 MAX_PURPOSE_LENGTH = 200
+# The most accounts that one lease can list.
+MAX_LEASE_ACCOUNTS = 100
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _MAX_OWNER_LENGTH = 1024
 # The last second that a date can show: 9999-12-31 23:59:59 UTC.
@@ -122,7 +124,11 @@ class User:
 
 @dataclass(frozen=True)
 class Lease:
+    # Each lease has its own id: scripts pass it back as a token, so a script of an earlier
+    # lease never acts on a newer lease of the same resource.
     lease_id: str
+    # The leases that one acquire grants form one holding, and the holder uses them together.
+    holding: str
     resource: str
     kind: str
     state: str
@@ -161,11 +167,16 @@ class Lease:
     purpose: str | None = None
     # When the holder expects to give the resource back, in awake time. Only a hint.
     expected: float | None = None
+    # The accounts on the instance that the holder got with it. An account is in use while a
+    # lease in any state lists it: also while the lease drains, the scripts of its holder can
+    # still use the account.
+    accounts: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         return {
             "schema": SCHEMA_VERSION,
             "lease_id": self.lease_id,
+            "holding": self.holding,
             "resource": self.resource,
             "kind": self.kind,
             "state": self.state,
@@ -190,6 +201,7 @@ class Lease:
             "owner_grace": self.owner_grace,
             "drain_timeout": self.drain_timeout,
             "users": [user.to_json() for user in self.users],
+            "accounts": list(self.accounts),
             "void_reason": self.void_reason,
             "ended": self.ended,
             "attempts": self.attempts,
@@ -209,8 +221,10 @@ class Lease:
         users = data.get("users")
         if not isinstance(users, list):
             raise LeaseFormatError("users is missing or not valid")
+        accounts = _get(data, "accounts", _is_accounts)
         lease = cls(
             lease_id=_get(data, "lease_id", _is_text),
+            holding=_get(data, "holding", _is_text),
             resource=_get(data, "resource", _is_resource),
             kind=_get(data, "kind", _is_kind),
             state=_get(data, "state", lambda value: isinstance(value, str) and value in STATES),
@@ -233,6 +247,7 @@ class Lease:
             owner_grace=_get(data, "owner_grace", _is_number),
             drain_timeout=_get(data, "drain_timeout", _is_number),
             users=tuple(User.from_json(user) for user in users),
+            accounts=tuple(accounts),
             void_reason=_get(data, "void_reason", _optional(_is_void_reason)),
             ended=_get(data, "ended", lambda value: isinstance(value, bool)),
             attempts=_get(data, "attempts", _is_count),
@@ -344,6 +359,15 @@ def _is_pid(value: object) -> bool:
 
 def _is_resource(value: object) -> bool:
     return isinstance(value, str) and RESOURCE_NAME.fullmatch(value) is not None
+
+
+def _is_accounts(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= MAX_LEASE_ACCOUNTS
+        and all(_is_resource(account) for account in value)
+        and len(set(value)) == len(value)
+    )
 
 
 def _is_kind(value: object) -> bool:
