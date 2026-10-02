@@ -17,6 +17,7 @@ PRINT_ARGUMENT = "import sys; print(sys.argv[1])"
 # The hooks write the resource that they got to a file, so that a test sees that they ran.
 RECORD = "import os, sys; open(sys.argv[1], 'a').write(os.environ['BANKSMAN_RESOURCE'] + '\\n')"
 FAIL = "raise SystemExit(5)"
+READ = "import sys; print(open(sys.argv[1]).read())"
 BENCH = [
     {"name": "qa_tablet", "facts": {"form": "tablet", "api": 33, "running": False}},
     {
@@ -78,7 +79,7 @@ def test_acquire_prints_the_lease_as_key_value_lines(capsys, config_path):
         "SERIAL": "emulator-5554",
     }
     assert (lease.purpose, lease.owner_pid) == ("verify the layout", None)
-    assert lease.expected == pytest.approx(lease.touched + 20 * 60)
+    assert lease.expected == lease.touched + 20 * 60
 
 
 def test_acquire_prints_json(capsys, config_path):
@@ -151,7 +152,8 @@ def test_a_kept_lease_records_the_new_owner_process_and_the_new_expected_time(
     assert json.loads(capsys.readouterr().out)["kept"] is True
     lease = leases()["build-0"]
     assert lease.owner_pid == os.getpid()
-    assert lease.expected == pytest.approx(lease.touched + 5 * 60)
+    # One clock reading gives both, so that they differ by exactly the expected time.
+    assert lease.expected == lease.touched + 5 * 60
 
 
 def test_a_waiting_acquire_gets_a_resource_when_it_is_released(capsys, config_path, monkeypatch):
@@ -165,6 +167,25 @@ def test_a_waiting_acquire_gets_a_resource_when_it_is_released(capsys, config_pa
     status, values, _ = acquire(capsys, "--where", "kind=build", "--wait", "15m")
     assert (status, values["RESOURCE"]) == (0, "build-0")
     assert values["LEASE"] != held.lease_id
+
+
+def test_a_waiting_acquire_reaps_with_the_current_configuration(
+    capsys, config_path, monkeypatch, state_dir, tmp_path
+):
+    record = tmp_path / "taken-back"
+    hook_line = f"on_void = {json.dumps(hook(RECORD, str(record)))}\n"
+    write_config(config_path, f"[holder]\nagents = []\n[kinds.build]\ncount = 1\n{hook_line}")
+    Store(cli.default_state_dir(), Machine()).acquire("build-0", "build", Holder("/w/b"))
+
+    def change_while_waiting(self, seconds):
+        # The operator removes the hook, and the lease of the other holder becomes void.
+        write_config(config_path, "[holder]\nagents = []\n[kinds.build]\ncount = 1\n")
+        age_lease(state_dir, "build-0", 21 * 60)
+
+    monkeypatch.setattr(Machine, "sleep", change_while_waiting)
+    status, values, _ = acquire(capsys, "--where", "kind=build", "--wait", "15m")
+    assert (status, values["RESOURCE"]) == (0, "build-0")
+    assert not record.exists()
 
 
 def test_a_wait_has_a_limit(capsys, config_path, monkeypatch):
@@ -227,6 +248,44 @@ def test_on_acquire_resets_a_new_instance_once(capsys, config_path, tmp_path):
     _, kept, _ = acquire(capsys, "--where", "form=phone", "--lease", first["LEASE"])
     assert kept["LEASE"] == first["LEASE"]
     assert record.read_text() == "qa_phone\nqa_tablet\n"
+
+
+def test_the_serial_is_read_again_after_a_reset(capsys, config_path, tmp_path):
+    # The hook restarts the emulator, and it comes back with another serial.
+    found = tmp_path / "found.json"
+    before = {"name": "qa_phone", "facts": {"running": True, "serial": "emulator-5554"}}
+    after = {"name": "qa_phone", "facts": {"running": True, "serial": "emulator-5556"}}
+    found.write_text(json.dumps({"schema": 1, "instances": [before]}))
+    moved = json.dumps({"schema": 1, "instances": [after]})
+    restart = f"open({str(found)!r}, 'w').write({moved!r})"
+    write_config(
+        config_path,
+        "[holder]\nagents = []\n[kinds.emulator]\n"
+        f"discover = {json.dumps(hook(READ, str(found)))}\n"
+        f"on_acquire = {json.dumps(hook(restart))}\n",
+    )
+    save_inventory(Inventory(kinds={"emulator": Decisions(allowed=("qa_phone",))}))
+    status, values, _ = acquire(capsys, "--where", "serial=emulator-5554")
+    assert (status, values["RESOURCE"], values["SERIAL"]) == (0, "qa_phone", "emulator-5556")
+
+
+def test_no_serial_is_printed_for_an_instance_that_is_gone_after_its_reset(
+    capsys, config_path, tmp_path
+):
+    found = tmp_path / "found.json"
+    before = {"name": "qa_phone", "facts": {"running": True, "serial": "emulator-5554"}}
+    found.write_text(json.dumps({"schema": 1, "instances": [before]}))
+    stop = f"open({str(found)!r}, 'w').write({json.dumps({'schema': 1, 'instances': []})!r})"
+    write_config(
+        config_path,
+        "[holder]\nagents = []\n[kinds.emulator]\n"
+        f"discover = {json.dumps(hook(READ, str(found)))}\n"
+        f"on_acquire = {json.dumps(hook(stop))}\n",
+    )
+    save_inventory(Inventory(kinds={"emulator": Decisions(allowed=("qa_phone",))}))
+    status, values, _ = acquire(capsys, "--where", "serial=emulator-5554")
+    assert (status, values["RESOURCE"]) == (0, "qa_phone")
+    assert "SERIAL" not in values
 
 
 def test_a_failing_on_acquire_hook_gives_the_lease_back(capsys, config_path):

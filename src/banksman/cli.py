@@ -8,13 +8,13 @@ import json
 import os
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from banksman import SCHEMA_VERSION, __version__, hooks
 from banksman.config import Config, Kind, load_config, parse_duration
-from banksman.discovery import Found, Instance, discover
+from banksman.discovery import FactValue, Found, Instance, discover
 from banksman.errors import BanksmanError
 from banksman.identity import find_agent, find_holder
 from banksman.inventory import (
@@ -27,7 +27,7 @@ from banksman.inventory import (
     preselected,
     save_inventory,
 )
-from banksman.lease import BOOTING, QUARANTINED, READY, RESOURCE_NAME, VOID_REASONS, Lease, User
+from banksman.lease import QUARANTINED, RESOURCE_NAME, VOID_REASONS, Lease, User
 from banksman.request import Candidate, Clause, check_kinds, parse_clause, search
 from banksman.sanitize import clean
 from banksman.store import (
@@ -508,9 +508,11 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
     )
     give_up = machine.clock() + args.wait
     while True:
+        # The configuration, the inventory, and the machine are read again on every look. The
+        # reaper must use the hooks of the current configuration, so that a hook that the
+        # operator removes stops at once, also for a caller that waits.
+        config = load_config()
         store, _ = _reaped_store(config)
-        # The machine is read again on every look: the inventory is only an allowlist, and a
-        # device can be unplugged or an emulator started at any time.
         found = search(config, load_inventory(), clauses)
         if not found.candidates:
             # Waiting helps only when a matching resource is held now.
@@ -527,9 +529,12 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         machine.sleep(min(POLL_SECONDS, left))
     candidate = next(each for each in found.candidates if each.resource == granted.lease.resource)
     lease = granted.lease
-    if not granted.kept:
+    facts = candidate.facts
+    if not granted.kept and config.kinds[lease.kind].on_acquire is not None:
         lease = _prepare(store, config, lease)
-    _print_grant(lease, candidate, granted.kept, args.json)
+        # The hook can restart the instance, and a restarted emulator can get another serial.
+        facts = _facts_now(config, candidate)
+    _print_grant(lease, facts, granted.kept, args.json)
     return 0
 
 
@@ -544,15 +549,13 @@ def _choice(candidate: Candidate, config: Config) -> Choice:
     # banksman starts nothing: the holder starts an instance that does not run. A lease is
     # booting only while the on_acquire hook resets its instance, so that a caller that dies in
     # the middle loses the lease at the boot deadline.
-    state = READY if kind.on_acquire is None else BOOTING
-    return Choice(candidate.resource, candidate.kind, state, kind.timeouts)
+    return Choice(
+        candidate.resource, candidate.kind, kind.timeouts, reset=kind.on_acquire is not None
+    )
 
 
 def _prepare(store: Store, config: Config, lease: Lease) -> Lease:
-    """Reset the instance of a new lease with the on_acquire hook of its kind, if it has one."""
-    kind = config.kinds.get(lease.kind)
-    if kind is None or kind.on_acquire is None:
-        return lease
+    """Reset the instance of a new lease with the on_acquire hook of its kind."""
     try:
         failure = hooks.reset(config.kinds, lease)
     except BaseException:
@@ -564,6 +567,18 @@ def _prepare(store: Store, config: Config, lease: Lease) -> Lease:
         _give_back(store, lease)
         raise BanksmanError(f"cannot reset {lease.resource}: {failure}; the lease is given back")
     return store.ready(lease.resource, lease.lease_id)
+
+
+def _facts_now(config: Config, candidate: Candidate) -> Mapping[str, FactValue]:
+    kind = config.kinds[candidate.kind]
+    if not kind.discovered:
+        return candidate.facts
+    instance = next(
+        (each for each in discover(kind, config).instances if each.name == candidate.resource),
+        None,
+    )
+    # An instance that discovery does not find now has no serial to print.
+    return {} if instance is None else instance.facts
 
 
 def _give_back(store: Store, lease: Lease) -> None:
@@ -589,10 +604,12 @@ def _print_notes(notes: Sequence[str]) -> None:
         print(clean(f"banksman: note: {note}"), file=sys.stderr)
 
 
-def _print_grant(lease: Lease, candidate: Candidate, kept: bool, as_json: bool) -> None:
+def _print_grant(
+    lease: Lease, facts: Mapping[str, FactValue], kept: bool, as_json: bool
+) -> None:
     # Facts come from devices and hooks. Only a serial is printed, and only when it has the
     # characters of a resource name, so that a shell script can use every value as it is.
-    serial = candidate.facts.get("serial")
+    serial = facts.get("serial")
     if not isinstance(serial, str) or RESOURCE_NAME.fullmatch(serial) is None:
         serial = None
     if as_json:
@@ -662,10 +679,12 @@ def _owner_process(config: Config, owner_pid: int | None) -> int | None:
 def _released(resource: str, drained: Lease | None) -> str:
     if drained is None:
         return f"Released {resource}: it is free."
-    return (
-        f"Released {resource}: it is free when its scripts have ended:"
-        f" {_processes(drained.users)}."
-    )
+    waits = []
+    if drained.users:
+        waits.append(f"its scripts have ended: {_processes(drained.users)}")
+    if drained.reaper_pid is not None:
+        waits.append(f"banksman process {drained.reaper_pid} has ended its reset")
+    return f"Released {resource}: it is free when {', and '.join(waits)}."
 
 
 def _cmd_admin_release(args: argparse.Namespace) -> int:

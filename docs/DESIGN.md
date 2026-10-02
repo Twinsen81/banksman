@@ -123,7 +123,10 @@ leases instead.
   ended. Otherwise the lease drains until its scripts end, and later commands check them
   again. Only one reaper takes a lease back: another reaper leaves a `draining` lease alone
   while the reaper named in it runs, and finishes it only after that reaper has ended. So a
-  late take-back never acts on a newer lease.
+  late take-back never acts on a newer lease. A lease whose instance `acquire` resets names
+  that process in the same way (section 6): when the lease becomes void during the reset, it
+  drains, and it is taken back only after that process has ended. So a take-back never runs
+  next to a reset.
 - **Damaged lease files.** A lease file with a newer `schema` stops every command, because
   two versions of banksman must not share one state directory. A lease file that cannot be
   read keeps its resource out of use, and `status` shows it. Other resources are not
@@ -154,8 +157,8 @@ minutes, and its lease can become void in the middle.
   no process is left in its group. If a script still runs at the drain deadline
   (`drain_timeout`, section 5), the lease is quarantined: it is never handed on, and it
   stays in `status` until a person runs `banksman admin release --force`, also when the
-  script ends later. That command refuses while a banksman process takes the lease back,
-  because that take-back could end the instance of the next holder. The command that
+  script ends later. That command refuses while a banksman process takes the lease back or
+  resets its instance, because that process could act on the instance of the next holder. The command that
   quarantines the lease names the processes that still run, on standard error. The reason:
   banksman must never stop a process that the user did not expect, whatever agent the user
   runs. A blocked device costs time; a stopped process costs trust.
@@ -350,10 +353,16 @@ holdings apart (section 9).
   `booting` while the hook runs, and then `ready`. If the hook fails, the lease is given back
   and `acquire` fails. A failed reset does not make the instance unsafe for the next holder,
   as a failed take-back does, so the instance is not quarantined. A lease that the caller
-  keeps with `--lease` is not reset again.
+  keeps with `--lease` is not reset again. The hook can restart the instance, so `acquire`
+  reads its facts again after the reset, and prints the serial that discovery finds then.
+- **No other process acts on the instance during a reset.** The lease names the `acquire`
+  that runs the hook, and a hook never outlives that process (section 5). When the lease
+  becomes void or is released during the reset, it drains, and the resource is taken back
+  or freed only after that process has ended. `admin release --force` refuses meanwhile.
 - **Waiting.** While every matching resource is held, `acquire` fails with exit status 4.
   With `--wait`, it looks again every 5 seconds until the wait ends, and each look reads the
-  machine again. When no permitted resource that is present now matches, held or free,
+  configuration, the inventory, and the machine again. So the reaper of a caller that waits
+  also uses the hooks of the current configuration (section 5). When no permitted resource that is present now matches, held or free,
   `acquire` fails at once, also with `--wait`, because only a held resource can become free.
   There is no queue yet: when many callers wait, a caller can get a resource before another
   caller that started to wait earlier.

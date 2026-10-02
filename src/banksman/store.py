@@ -89,9 +89,11 @@ class Choice:
 
     resource: str
     kind: str
-    # BOOTING when the instance must be started or reset before the holder uses it.
-    state: str = READY
     timeouts: Timeouts = Timeouts()
+    # The caller resets the instance before the holder uses it. Until then the lease is
+    # booting, and it names the caller, so that no other banksman process acts on the instance
+    # while the reset runs.
+    reset: bool = False
 
 
 @dataclass(frozen=True)
@@ -239,22 +241,36 @@ class Store:
                     ):
                         lease = self._touched(current, holder.owner_pid)
                         if expect is not None:
-                            lease = replace(lease, expected=self.system.clock() + expect)
+                            lease = replace(lease, expected=lease.touched + expect)
                         return Granted(self._write(lease), kept=True)
             for choice in choices:
                 if self._read(choice.resource) is None:
+                    state = BOOTING if choice.reset else READY
                     lease = self._new_lease(
-                        choice.resource, choice.kind, holder, choice.state, choice.timeouts, expect
+                        choice.resource, choice.kind, holder, state, choice.timeouts, expect
                     )
+                    if choice.reset:
+                        me = os.getpid()
+                        lease = replace(
+                            lease, reaper_pid=me, reaper_started=self._start_time(me)
+                        )
                     return Granted(self._write(lease))
         return None
 
     def ready(self, resource: str, lease_id: str) -> Lease:
+        """End the boot or the reset of an instance: the holder may use it now."""
         with self._lock():
             lease = self._held(resource, lease_id)
             if lease.state == READY:
                 return lease
-            return self._write(replace(self._touched(lease, None), state=READY, boot_deadline=None))
+            ready = replace(
+                self._touched(lease, None),
+                state=READY,
+                boot_deadline=None,
+                reaper_pid=None,
+                reaper_started=None,
+            )
+            return self._write(ready)
 
     def touch(
         self,
@@ -269,7 +285,7 @@ class Store:
         with self._lock():
             lease = self._touched(self._held(resource, lease_id), owner_pid)
             if expect is not None:
-                lease = replace(lease, expected=self.system.clock() + expect)
+                lease = replace(lease, expected=lease.touched + expect)
             return self._write(lease)
 
     def enter(self, resource: str, lease_id: str, pid: int, pgid: int | None = None) -> Lease:
@@ -346,7 +362,7 @@ class Store:
             current = self._read(resource)
             if current is None:
                 raise BanksmanError(f"{resource} has no lease")
-            # A take-back that still runs could end the instance of the next holder.
+            # A take-back or a reset that still runs could act on the instance of the next holder.
             if (
                 isinstance(current, Lease)
                 and current.reaper_pid is not None
@@ -355,8 +371,8 @@ class Store:
                 == current.reaper_started
             ):
                 raise BanksmanError(
-                    f"banksman process {current.reaper_pid} takes {resource} back now; run this"
-                    " command again when that process has ended"
+                    f"banksman process {current.reaper_pid} takes {resource} back or resets it"
+                    " now; run this command again when that process has ended"
                 )
             running = self._running_users(current) if isinstance(current, Lease) else ()
             self._delete(resource)
@@ -390,6 +406,12 @@ class Store:
                     if reason is None:
                         continue
                     lease = _drained(lease, reason, now)
+                    if _other_reaper_runs(lease, running, me):
+                        # The acquire that resets the instance still runs. The lease drains, so
+                        # that no ownership check passes, and it is taken back when that
+                        # process has ended, so that a take-back never runs next to a reset.
+                        self._write(lease)
+                        continue
                 elif lease.boot_id != boot_id:
                     lease = _restarted(lease, now)
                 elif lease.state != DRAINING or _other_reaper_runs(lease, running, me):
@@ -472,13 +494,24 @@ class Store:
 
     def _give_back(self, lease: Lease) -> Lease | None:
         running = self._running_users(lease)
-        if not running:
-            self._delete(lease.resource)
-            return None
-        # The scripts must end before the resource is handed on, as for a void lease. The
-        # holder gives the instance back as it is, so no hook ends it.
+        if not self._reset_runs(lease):
+            lease = replace(lease, reaper_pid=None, reaper_started=None)
+            if not running:
+                self._delete(lease.resource)
+                return None
+        # The scripts, and a reset by another banksman process, must end before the resource is
+        # handed on, as for a void lease. The holder gives the instance back as it is, so no
+        # hook ends it.
         drained = _drained(replace(lease, users=running), RELEASE, self.system.clock())
         return self._write(drained)
+
+    def _reset_runs(self, lease: Lease) -> bool:
+        """Whether another banksman process still resets the instance of a held lease."""
+        # This process resets nothing while it gives a lease back: its own hook has ended.
+        if lease.reaper_pid is None or lease.reaper_pid == os.getpid():
+            return False
+        pid = lease.reaper_pid
+        return self.system.running([pid]).get(pid) == lease.reaper_started
 
     def _grant(
         self,

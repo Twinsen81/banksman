@@ -150,7 +150,9 @@ class Lease:
     ended: bool = False
     # How many reapers have started to take the lease back.
     attempts: int = 0
-    # The reaper that takes a draining lease back.
+    # The banksman process that acts on the instance outside the lock: the acquire that resets
+    # it with the on_acquire hook, or the reaper that takes a draining lease back. No other
+    # banksman process acts on the instance while it runs.
     reaper_pid: int | None = None
     reaper_started: str | None = None
     issue: str | None = None

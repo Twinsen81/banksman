@@ -222,12 +222,98 @@ def test_grant_takes_the_first_free_choice(store):
     assert store.grant(choices, Holder(OWNER)) is None
 
 
-def test_grant_gives_each_choice_its_state_and_timeouts(store, system):
+def test_grant_gives_each_choice_its_timeouts(store, system):
     timeouts = Timeouts(boot_timeout=8 * 60, hard_cap=60 * 60)
-    choice = Choice("emu-1", "emulator", BOOTING, timeouts)
-    lease = store.grant([choice], Holder(OWNER), expect=20 * 60).lease
+    lease = store.grant([Choice("emu-1", "emulator", timeouts)], Holder(OWNER), expect=60).lease
+    assert (lease.state, lease.boot_deadline, lease.reaper_pid) == (READY, None, None)
+    assert (lease.hard_deadline, lease.expected) == (system.now + 60 * 60, system.now + 60)
+
+
+def test_a_lease_whose_instance_is_reset_names_the_process_that_resets_it(store, system):
+    choice = Choice("emu-1", "emulator", Timeouts(boot_timeout=8 * 60), reset=True)
+    lease = store.grant([choice], Holder(OWNER)).lease
     assert (lease.state, lease.boot_deadline) == (BOOTING, system.now + 8 * 60)
-    assert (lease.hard_deadline, lease.expected) == (system.now + 60 * 60, system.now + 20 * 60)
+    assert (lease.reaper_pid, lease.reaper_started) == (os.getpid(), "start-self")
+    ready = store.ready("emu-1", lease.lease_id)
+    assert (ready.state, ready.boot_deadline, ready.reaper_pid, ready.reaper_started) == (
+        READY,
+        None,
+        None,
+        None,
+    )
+
+
+def reset_by_another_process(store, system, state_dir):
+    """Grant emu-1 with a reset that process 4242 runs, as another acquire would."""
+    system.spawn(4242)
+    lease = store.grant([Choice("emu-1", "emulator", reset=True)], Holder(OWNER)).lease
+    edit_lease(
+        state_dir, "emu-1", lambda data: data.update(reaper_pid=4242, reaper_started="start-4242")
+    )
+    return lease
+
+
+def test_a_void_lease_is_taken_back_only_after_its_reset_has_ended(state_dir, system):
+    taken = []
+    store = Store(state_dir, system, take_back=lambda lease: taken.append(lease) or True)
+    lease = reset_by_another_process(store, system, state_dir)
+    system.advance(5 * 60)
+    # The reset can still act on the instance, so no take-back runs next to it.
+    assert reaped(store) == []
+    assert lease_file(state_dir, "emu-1")["state"] == DRAINING
+    with pytest.raises(NotHeld, match="draining"):
+        store.ready("emu-1", lease.lease_id)
+    with pytest.raises(Busy):
+        store.acquire("emu-1", "emulator", Holder(OTHER))
+    assert reaped(store) == []
+    system.end(4242)
+    assert reaped(store) == [("emu-1", BOOT_TIMEOUT, RELEASED)]
+    assert len(taken) == 1
+
+
+def test_a_release_during_a_reset_by_another_process_waits_for_the_reset(state_dir, system):
+    taken = []
+    store = Store(state_dir, system, take_back=lambda lease: taken.append(lease) or True)
+    lease = reset_by_another_process(store, system, state_dir)
+    drained = store.release("emu-1", lease.lease_id)
+    assert (drained.state, drained.void_reason, drained.reaper_pid) == (DRAINING, RELEASE, 4242)
+    with pytest.raises(Busy):
+        store.acquire("emu-1", "emulator", Holder(OTHER))
+    system.end(4242)
+    assert reaped(store) == [("emu-1", RELEASE, RELEASED)]
+    assert taken == []
+
+
+def test_release_all_during_a_reset_by_another_process_waits_for_the_reset(
+    store, system, state_dir
+):
+    system.spawn(100)
+    system.spawn(4242)
+    choice = Choice("emu-1", "emulator", reset=True)
+    store.grant([choice], Holder(OWNER, owner_pid=100))
+    edit_lease(
+        state_dir, "emu-1", lambda data: data.update(reaper_pid=4242, reaper_started="start-4242")
+    )
+    ((_, drained),) = store.release_all(100)
+    assert (drained.state, drained.reaper_pid) == (DRAINING, 4242)
+
+
+def test_the_process_that_resets_an_instance_gives_its_lease_back_at_once(store, state_dir):
+    lease = store.grant([Choice("emu-1", "emulator", reset=True)], Holder(OWNER)).lease
+    assert store.release("emu-1", lease.lease_id) is None
+    assert not (state_dir / "emu-1.json").exists()
+
+
+def test_a_reset_that_ended_does_not_hold_a_released_lease(store, system, state_dir):
+    lease = reset_by_another_process(store, system, state_dir)
+    system.end(4242)
+    assert store.release("emu-1", lease.lease_id) is None
+
+
+def test_force_release_waits_for_a_reset_that_runs(store, system, state_dir):
+    reset_by_another_process(store, system, state_dir)
+    with pytest.raises(BanksmanError, match="process 4242 takes emu-1 back or resets it now"):
+        store.force_release("emu-1")
 
 
 def test_grant_keeps_the_lease_whose_id_the_caller_passes(store, system):
@@ -954,7 +1040,7 @@ def test_a_take_back_that_never_finishes_is_quarantined(state_dir, system):
 
 def test_force_release_waits_for_a_take_back_that_runs(state_dir, system):
     def take_back(lease):
-        with pytest.raises(BanksmanError, match=f"process {os.getpid()} takes phone-1 back now"):
+        with pytest.raises(BanksmanError, match=f"process {os.getpid()} takes phone-1 back"):
             Store(state_dir, system).force_release("phone-1")
         return True
 

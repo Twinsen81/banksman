@@ -73,7 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--wait` waits while every matching resource is held, and exit status 4 means that they
   are all in use.
 - The `on_acquire` hook of a kind resets an instance before a run gets it. When it fails,
-  the lease is given back.
+  the lease is given back. The lease names the process that runs the hook, and no other
+  command takes the resource back or hands it on until that process has ended. After the
+  reset, `acquire` reads the facts of the instance again, so that it prints the current
+  serial.
 - `banksman touch` and `banksman release` take the lease id. `touch` records the agent
   process as the owner process, and `release --all` gives back the leases of the caller's
   agent process. A held resource is never granted again without its lease id, also not to
