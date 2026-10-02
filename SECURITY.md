@@ -45,7 +45,10 @@ hook that ends anything.
 **Agents are clients, not operators.** Agents acquire, touch, check, and release leases.
 Discovery, which decides what agents may use, and forced release, which takes a resource
 from another holder, are operator commands under `banksman admin`. An agent's permission
-rules can refuse all of them with one pattern. That is a guardrail against a careless
+rules can refuse all of them with one pattern. The inventory that discovery writes,
+`~/.config/banksman/inventory.toml`, decides what agents may use, so banksman refuses an
+inventory that another user owns or that group or others can write to, as for the
+configuration file. A new scan never allows a name that a person refused. That is a guardrail against a careless
 agent, not a boundary against a determined one: an agent that runs as the same user can
 edit files that user can edit. Running agents under a separate user account is the
 stronger option. Such agents use that account's state directory, so banksman does not
@@ -55,7 +58,14 @@ coordinate their leases with the leases of the operator's own account.
 an agent and read by people and by other agents, so it is a channel for prompt injection
 between agents. The JSON that agents read by default carries only validated fields. The
 purpose appears in the human console, and in JSON only with `--verbose`. banksman removes
-terminal control sequences from all output and limits the length of the purpose.
+terminal control sequences from all output and limits the length of the purpose. The other
+holder fields have fixed character sets: an issue id has only letters, digits, and `#._/-`,
+so a branch name that anybody can choose gives a valid issue id or none.
+
+**Discovered values are untrusted.** Device names, models, and notes come from devices and
+from discover hooks. banksman refuses an instance name that is not a valid resource name,
+keeps only short facts without control characters, removes terminal control sequences from
+notes, and never shows an account name that it does not accept.
 
 **No credentials.** For accounts on devices, banksman stores identifiers such as email
 addresses, never passwords or tokens. The account is already signed in on the device; a

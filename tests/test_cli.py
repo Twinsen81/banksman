@@ -10,6 +10,7 @@ from helpers import SRC, age_lease, edit_lease, hook, reap_in_child, write_confi
 
 from banksman import SCHEMA_VERSION, __version__
 from banksman.cli import main
+from banksman.lease import Holder
 from banksman.store import Store
 from banksman.system import Machine
 
@@ -43,7 +44,7 @@ def test_status_table(capsys):
 
 
 def test_status_lists_the_leases(capsys, state_dir):
-    Store(state_dir, Machine()).acquire("phone-1", "device", OWNER)
+    Store(state_dir, Machine()).acquire("phone-1", "device", Holder(OWNER))
     assert main(["status", "--json"]) == 0
     (lease,) = json.loads(capsys.readouterr().out)["leases"]
     assert {key: lease[key] for key in ("resource", "kind", "state", "owner", "owner_pid")} == {
@@ -57,12 +58,63 @@ def test_status_lists_the_leases(capsys, state_dir):
 
     assert main(["status"]) == 0
     header, row = capsys.readouterr().out.splitlines()
-    assert header.split() == ["RESOURCE", "KIND", "STATE", "OWNER", "SINCE"]
-    assert row.split()[:4] == ["phone-1", "device", "ready", OWNER]
+    assert header.split() == ["RESOURCE", "KIND", "STATE", "HOLDER", "SINCE"]
+    assert row.split()[:4] == ["phone-1", "device", "ready", "tree-a"]
+
+
+def test_status_shows_the_holder_and_keeps_the_purpose_out_of_default_json(capsys, state_dir):
+    holder = Holder(
+        OWNER,
+        issue="#123",
+        agent="codex",
+        session="s-1",
+        purpose="verify the tablet layout",
+    )
+    Store(state_dir, Machine()).acquire("phone-1", "device", holder)
+    assert main(["status"]) == 0
+    row = capsys.readouterr().out.splitlines()[1]
+    assert "codex · #123 · verify the tablet layout" in row
+
+    assert main(["status", "--json"]) == 0
+    (lease,) = json.loads(capsys.readouterr().out)["leases"]
+    assert {key: lease[key] for key in ("agent", "issue", "session")} == {
+        "agent": "codex",
+        "issue": "#123",
+        "session": "s-1",
+    }
+    assert "purpose" not in lease
+
+    assert main(["status", "--json", "--verbose"]) == 0
+    (lease,) = json.loads(capsys.readouterr().out)["leases"]
+    assert lease["purpose"] == "verify the tablet layout"
+
+
+def test_whoami_shows_the_holder(capsys, tmp_path, monkeypatch):
+    tree = tmp_path / "abc-12-tablet"
+    tree.mkdir()
+    monkeypatch.chdir(tree)
+    assert main(["whoami", "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert (shown["schema"], shown["owner"], shown["issue"]) == (
+        SCHEMA_VERSION,
+        str(tree.resolve()),
+        "abc-12",
+    )
+    assert main(["whoami"]) == 0
+    rows = dict(line.split(None, 1) for line in capsys.readouterr().out.splitlines()[1:])
+    assert (rows["owner"], rows["issue"]) == (str(tree.resolve()), "abc-12")
+
+
+def test_whoami_uses_the_agents_of_the_configuration(capsys, config_path, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    write_config(config_path, "[holder]\nagents = []\n")
+    assert main(["whoami", "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert (shown["agent"], shown["owner_pid"], shown["session"]) == (None, None, None)
 
 
 def test_status_reaps_first(capsys, state_dir):
-    Store(state_dir, Machine()).acquire("phone-1", "device", OWNER)
+    Store(state_dir, Machine()).acquire("phone-1", "device", Holder(OWNER))
     age_lease(state_dir, "phone-1", 21 * 60)
     assert main(["status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["leases"] == []
@@ -78,7 +130,7 @@ def test_status_removes_terminal_control_sequences(capsys, state_dir):
 
 
 def test_reap_reports_what_it_took_back(capsys, state_dir):
-    Store(state_dir, Machine()).acquire("phone-1", "device", OWNER)
+    Store(state_dir, Machine()).acquire("phone-1", "device", Holder(OWNER))
     age_lease(state_dir, "phone-1", 21 * 60)
     assert main(["reap", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
@@ -97,7 +149,7 @@ def test_reap_reports_what_it_took_back(capsys, state_dir):
 
 
 def test_status_survives_a_lease_file_with_infinity(capsys, state_dir):
-    Store(state_dir, Machine()).acquire("phone-1", "device", OWNER)
+    Store(state_dir, Machine()).acquire("phone-1", "device", Holder(OWNER))
     edit_lease(state_dir, "phone-1", lambda data: data.update(acquired_at=float("inf")))
     assert main(["status"]) == 0
     assert "unreadable lease file" in capsys.readouterr().out
@@ -120,7 +172,7 @@ def test_a_killed_owner_frees_its_lease(state_dir):
     # command in its own process.
     owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
-        Store(state_dir, Machine()).acquire("phone-1", "device", OWNER, owner_pid=owner.pid)
+        Store(state_dir, Machine()).acquire("phone-1", "device", Holder(OWNER, owner_pid=owner.pid))
         # The last touch was 6 minutes ago: past the grace period, not yet idle.
         age_lease(state_dir, "phone-1", 6 * 60)
         assert reap_in_child(state_dir) == []
@@ -142,7 +194,7 @@ def test_reap_runs_the_on_void_hook_of_the_kind(capsys, state_dir, config_path, 
     out = tmp_path / "out"
     code = "import os, sys; open(sys.argv[1], 'w').write(os.environ['BANKSMAN_RESOURCE'])"
     write_config(config_path, f"[kinds.emulator]\non_void = {json.dumps(hook(code, str(out)))}\n")
-    Store(state_dir, Machine()).acquire("emu-1", "emulator", OWNER)
+    Store(state_dir, Machine()).acquire("emu-1", "emulator", Holder(OWNER))
     age_lease(state_dir, "emu-1", 21 * 60)
     assert main(["reap", "--json"]) == 0
     (reaped,) = json.loads(capsys.readouterr().out)["reaped"]
@@ -154,7 +206,7 @@ def test_a_failing_on_void_hook_quarantines_the_lease(capsys, state_dir, config_
     write_config(
         config_path, f"[kinds.emulator]\non_void = {json.dumps(hook('raise SystemExit(3)'))}\n"
     )
-    Store(state_dir, Machine()).acquire("emu-1", "emulator", OWNER)
+    Store(state_dir, Machine()).acquire("emu-1", "emulator", Holder(OWNER))
     age_lease(state_dir, "emu-1", 21 * 60)
     assert main(["status"]) == 0
     captured = capsys.readouterr()
@@ -191,7 +243,7 @@ def test_a_process_id_that_is_not_valid_is_refused(pid):
 
 
 def test_check_exits_3_when_the_lease_is_lost(capsys, state_dir):
-    lease = Store(state_dir, Machine()).acquire("phone-1", "device", OWNER)
+    lease = Store(state_dir, Machine()).acquire("phone-1", "device", Holder(OWNER))
     assert main(["check", "--resource", "phone-1", "--lease", lease.lease_id]) == 0
     assert main(["check", "--resource", "phone-1", "--lease", "an-earlier-lease"]) == 3
     assert capsys.readouterr().err == (
@@ -202,7 +254,7 @@ def test_check_exits_3_when_the_lease_is_lost(capsys, state_dir):
 
 
 def test_a_script_enters_and_leaves_a_lease(capsys, state_dir):
-    lease = Store(state_dir, Machine()).acquire("phone-1", "device", OWNER)
+    lease = Store(state_dir, Machine()).acquire("phone-1", "device", Holder(OWNER))
     script = subprocess.Popen([sys.executable, "-c", SLEEP], start_new_session=True)
     try:
         arguments = ["--resource", "phone-1", "--lease", lease.lease_id, "--pid", str(script.pid)]
@@ -235,7 +287,7 @@ script.wait()
 
 
 def test_enter_refuses_a_group_that_holds_a_fake_agent(capsys, state_dir):
-    lease = Store(state_dir, Machine()).acquire("phone-1", "device", OWNER)
+    lease = Store(state_dir, Machine()).acquire("phone-1", "device", Holder(OWNER))
     agent = _start(FAKE_AGENT)
     try:
         script = int(agent.stdout.readline())
@@ -279,7 +331,8 @@ time.sleep(60)
 
 
 def test_a_script_whose_lease_is_revoked_ends_by_its_own_check_loop(state_dir):
-    lease = Store(state_dir, Machine()).acquire("phone-1", "device", OWNER, owner_pid=os.getpid())
+    holder = Holder(OWNER, owner_pid=os.getpid())
+    lease = Store(state_dir, Machine()).acquire("phone-1", "device", holder)
     script = _start(SCRIPT_WITH_A_CHECK_LOOP, "phone-1", lease.lease_id)
     work = None
     try:
@@ -294,7 +347,8 @@ def test_a_script_whose_lease_is_revoked_ends_by_its_own_check_loop(state_dir):
 
 
 def test_by_default_a_script_that_does_not_stop_quarantines_its_lease(capsys, state_dir):
-    lease = Store(state_dir, Machine()).acquire("phone-1", "device", OWNER, owner_pid=os.getpid())
+    holder = Holder(OWNER, owner_pid=os.getpid())
+    lease = Store(state_dir, Machine()).acquire("phone-1", "device", holder)
     script = _start(SCRIPT_WITHOUT_A_CHECK_LOOP)
     work = None
     try:
@@ -327,7 +381,8 @@ def test_with_stopping_on_the_reaper_stops_a_script_that_does_not_check(
 ):
     write_config(config_path, "[kinds.device]\nstop = true\n")
     # This test process is the owner, so the reaper may signal the processes that it started.
-    lease = Store(state_dir, Machine()).acquire("phone-1", "device", OWNER, owner_pid=os.getpid())
+    holder = Holder(OWNER, owner_pid=os.getpid())
+    lease = Store(state_dir, Machine()).acquire("phone-1", "device", holder)
     script = _start(SCRIPT_WITHOUT_A_CHECK_LOOP)
     work = None
     try:
@@ -355,7 +410,7 @@ def test_admin_release_clears_a_quarantine(capsys, state_dir, quarantine_dir, co
     write_config(
         config_path, f"[kinds.emulator]\non_void = {json.dumps(hook('raise SystemExit(3)'))}\n"
     )
-    Store(state_dir, Machine()).acquire("emu-1", "emulator", OWNER)
+    Store(state_dir, Machine()).acquire("emu-1", "emulator", Holder(OWNER))
     age_lease(state_dir, "emu-1", 21 * 60)
     assert main(["reap"]) == 0
     assert (quarantine_dir / "emu-1.json").exists()

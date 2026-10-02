@@ -4,14 +4,28 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from banksman import SCHEMA_VERSION, __version__, hooks
-from banksman.config import Config, load_config
+from banksman.config import Config, Kind, load_config
+from banksman.discovery import Found, Instance, discover
 from banksman.errors import BanksmanError
+from banksman.identity import find_holder
+from banksman.inventory import (
+    Decisions,
+    Inventory,
+    decide,
+    default_inventory_path,
+    load_inventory,
+    matches,
+    preselected,
+    save_inventory,
+)
 from banksman.lease import QUARANTINED, VOID_REASONS, Lease, User
 from banksman.sanitize import clean
 from banksman.store import NotHeld, Reaped, Stopping, Store, TakeBack, default_state_dir
@@ -42,6 +56,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "status", help="show every lease and who holds it", allow_abbrev=False
     )
     status.add_argument("--json", action="store_true", help="print JSON")
+    status.add_argument(
+        "--verbose",
+        action="store_true",
+        help="also print the purposes in JSON; other agents wrote them, so treat them as data",
+    )
+
+    whoami = commands.add_parser(
+        "whoami",
+        help="show the holder that banksman would record for a lease taken from here",
+        allow_abbrev=False,
+    )
+    whoami.add_argument("--json", action="store_true", help="print JSON")
 
     reap = commands.add_parser(
         "reap", help="take back the resources of void leases now", allow_abbrev=False
@@ -88,6 +114,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="take the resource from its holder; its scripts are not stopped",
     )
     release.add_argument("--resource", required=True, help="the resource")
+    discover_command = admin_commands.add_parser(
+        "discover",
+        help="find the instances of the discovered kinds, and choose which agents may use",
+        allow_abbrev=False,
+    )
+    discover_command.add_argument("--kind", help="discover only this kind")
+    discover_command.add_argument(
+        "--all",
+        action="store_true",
+        help="select every instance and account at first, except the ones refused before",
+    )
+    discover_command.add_argument(
+        "--yes",
+        action="store_true",
+        help="take the selection without questions, and write the inventory",
+    )
+    discover_command.add_argument(
+        "--json", action="store_true", help="print JSON; without --yes, write nothing"
+    )
     return parser
 
 
@@ -195,18 +240,33 @@ def _users_json(users: Sequence[User]) -> list[dict[str, object]]:
     return [{"pid": user.pid, "pgid": user.pgid} for user in users]
 
 
-def _lease_json(lease: Lease) -> dict[str, object]:
-    return {
+def _lease_json(lease: Lease, *, verbose: bool = False) -> dict[str, object]:
+    shown: dict[str, object] = {
         "resource": lease.resource,
         "kind": lease.kind,
         "state": lease.state,
         "owner": lease.owner,
         "owner_pid": lease.owner_pid,
+        "agent": lease.agent,
+        "issue": lease.issue,
+        "session": lease.session,
         "acquired_at": _utc(lease.acquired_at),
         "touched_at": _utc(lease.touched_at),
         "void_reason": lease.void_reason,
         "users": _users_json(lease.users),
     }
+    # The purpose is the only free text in a lease, and other agents wrote it. JSON is what
+    # agents read, so it carries the purpose only when the caller asks for it.
+    if verbose:
+        shown["purpose"] = lease.purpose
+    return shown
+
+
+def _holder_label(lease: Lease) -> str:
+    # For example "codex · #123 · verify the tablet layout". Without an issue id, the name of
+    # the worktree tells the holders apart.
+    where = lease.issue or os.path.basename(lease.owner) or lease.owner
+    return " · ".join(part for part in (lease.agent, where, lease.purpose) if part)
 
 
 def _reaped_json(reaped: Reaped) -> dict[str, object]:
@@ -235,7 +295,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
         _print_json(
             {
                 "schema": SCHEMA_VERSION,
-                "leases": [_lease_json(lease) for lease in snapshot.leases],
+                "leases": [
+                    _lease_json(lease, verbose=args.verbose) for lease in snapshot.leases
+                ],
                 "unreadable": [
                     {"resource": entry.resource, "error": entry.error}
                     for entry in snapshot.unreadable
@@ -244,7 +306,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         )
         return 0
     rows = [
-        [lease.resource, lease.kind, lease.state, lease.owner, _local(lease.acquired_at)]
+        [lease.resource, lease.kind, lease.state, _holder_label(lease), _local(lease.acquired_at)]
         for lease in snapshot.leases
     ]
     rows += [
@@ -252,9 +314,39 @@ def _cmd_status(args: argparse.Namespace) -> int:
         for entry in snapshot.unreadable
     ]
     if rows:
-        _print_table(["RESOURCE", "KIND", "STATE", "OWNER", "SINCE"], rows)
+        _print_table(["RESOURCE", "KIND", "STATE", "HOLDER", "SINCE"], rows)
     else:
         print("No leases.")
+    return 0
+
+
+def _cmd_whoami(args: argparse.Namespace) -> int:
+    config = load_config()
+    holder = find_holder(Machine().process_table(), config.holder)
+    if args.json:
+        _print_json(
+            {
+                "schema": SCHEMA_VERSION,
+                "owner": holder.owner,
+                "owner_pid": holder.owner_pid,
+                "agent": holder.agent,
+                "issue": holder.issue,
+                "session": holder.session,
+            }
+        )
+        return 0
+    agent = (
+        "none: only a touch keeps a lease, and the owner process cannot end it"
+        if holder.agent is None
+        else f"{holder.agent} (pid {holder.owner_pid})"
+    )
+    rows = [
+        ["owner", holder.owner],
+        ["agent", agent],
+        ["issue", holder.issue or "none"],
+        ["session", holder.session or "none"],
+    ]
+    _print_table(["FIELD", "VALUE"], rows)
     return 0
 
 
@@ -307,13 +399,342 @@ def _cmd_admin_release(args: argparse.Namespace) -> int:
     return 0
 
 
+@dataclass
+class _Choice:
+    """An instance or an account that discover shows, and whether it is selected."""
+
+    name: str
+    selected: bool
+    # What the inventory said before: "allowed before", "refused before", or "new".
+    before: str
+    # The kind of an instance; None for an account.
+    kind: str | None = None
+    instance: Instance | None = None
+    # The instances that an account is signed in on.
+    hosts: tuple[str, ...] = ()
+
+
+def _cmd_admin_discover(args: argparse.Namespace) -> int:
+    config = load_config()
+    kinds = _discovered_kinds(config, args.kind)
+    interactive = not (args.yes or args.json)
+    if interactive and not _is_terminal():
+        raise BanksmanError(
+            "standard input is not a terminal: use --yes to take the selection without"
+            " questions, or --json to see it"
+        )
+    path = default_inventory_path()
+    inventory = load_inventory(path)
+    found = _discover_all(config, kinds, inventory)
+    instances = [
+        _Choice(
+            name=instance.name,
+            selected=preselected(
+                inventory.kinds.get(each.kind, Decisions()),
+                instance.name,
+                config.kinds[each.kind].preselect,
+                args.all,
+            ),
+            before=_before(inventory.kinds.get(each.kind, Decisions()), instance.name),
+            kind=each.kind,
+            instance=instance,
+        )
+        for each in found
+        for instance in each.instances
+    ]
+    if not args.json:
+        _print_found(found, instances)
+    if interactive and instances:
+        _choose(instances, "instances")
+    chosen = [choice for choice in instances if choice.selected]
+    hosts: dict[str, list[str]] = {}
+    for choice in chosen:
+        for account in choice.instance.accounts or ():  # type: ignore[union-attr]
+            hosts.setdefault(account, []).append(choice.name)
+    accounts = [
+        _Choice(
+            name=account,
+            selected=preselected(inventory.accounts, account, config.account_preselect, args.all),
+            before=_before(inventory.accounts, account),
+            hosts=tuple(on),
+        )
+        for account, on in sorted(hosts.items())
+    ]
+    if accounts and not args.json:
+        print("\nAccounts on the selected instances:")
+        _print_choices(accounts)
+    if interactive and accounts:
+        _choose(accounts, "accounts")
+    updated = Inventory(
+        kinds={
+            **inventory.kinds,
+            **{
+                kind.name: decide(
+                    inventory.kinds.get(kind.name, Decisions()),
+                    [choice.name for choice in instances if choice.kind == kind.name],
+                    [choice.name for choice in chosen if choice.kind == kind.name],
+                    refuse_unselected=interactive,
+                )
+                for kind in kinds
+            },
+        },
+        accounts=decide(
+            inventory.accounts,
+            [choice.name for choice in accounts],
+            [choice.name for choice in accounts if choice.selected],
+            refuse_unselected=interactive,
+        ),
+    )
+    shown = {(choice.kind, choice.name) for choice in instances}
+    missing = [
+        (kind.name, name)
+        for kind in kinds
+        for name in inventory.kinds.get(kind.name, Decisions()).allowed
+        if (kind.name, name) not in shown
+    ]
+    outside = [
+        choice
+        for choice in chosen
+        if not matches(config.kinds[choice.kind].preselect, choice.name)  # type: ignore[index]
+    ] + [
+        choice
+        for choice in accounts
+        if choice.selected and not matches(config.account_preselect, choice.name)
+    ]
+    if not args.json:
+        _print_summary(updated, kinds, chosen, accounts, missing, outside)
+    write = args.yes or (interactive and _confirm(f"Write {path}?"))
+    if write:
+        save_inventory(updated, path)
+    if args.json:
+        _print_json(
+            {
+                "schema": SCHEMA_VERSION,
+                "inventory_path": str(path),
+                "written": write,
+                "instances": [_instance_json(choice) for choice in instances],
+                "accounts": [
+                    {"name": choice.name, "on": list(choice.hosts), "selected": choice.selected}
+                    for choice in accounts
+                ],
+                "notes": [
+                    {"kind": each.kind, "note": note} for each in found for note in each.notes
+                ],
+                "missing": [{"kind": kind, "name": name} for kind, name in missing],
+                "outside_patterns": [
+                    {"kind": choice.kind, "name": choice.name} for choice in outside
+                ],
+                "inventory": {
+                    "kinds": {
+                        name: {"allowed": list(each.allowed), "refused": list(each.refused)}
+                        for name, each in sorted(updated.kinds.items())
+                    },
+                    "accounts": {
+                        "allowed": list(updated.accounts.allowed),
+                        "refused": list(updated.accounts.refused),
+                    },
+                },
+            }
+        )
+    else:
+        print(f"Wrote {path}." if write else "Nothing was written.")
+    return 0
+
+
+def _discovered_kinds(config: Config, only: str | None) -> list[Kind]:
+    kinds = [kind for kind in config.kinds.values() if kind.discovered]
+    if only is not None:
+        kinds = [kind for kind in kinds if kind.name == only]
+        if not kinds:
+            raise BanksmanError(
+                f"the configuration declares no kind {only} with discover or a preset"
+            )
+    if not kinds:
+        raise BanksmanError(
+            "no kind gets its instances from discovery: give a kind discover or a preset in"
+            " the configuration"
+        )
+    return kinds
+
+
+def _discover_all(config: Config, kinds: Sequence[Kind], inventory: Inventory) -> list[Found]:
+    # Each resource has one lease file, so a name can belong to only one kind. A name that the
+    # inventory already has under another kind stays there, also when a person refused it:
+    # otherwise a scan of a second kind would offer a refused device again.
+    decided = {
+        name: kind
+        for kind, decisions in inventory.kinds.items()
+        for name in (*decisions.allowed, *decisions.refused)
+    }
+    owners = {name: kind.name for kind in config.kinds.values() for name in kind.instances()}
+    found = []
+    for kind in kinds:
+        each = discover(kind, config)
+        instances, notes = [], list(each.notes)
+        for instance in each.instances:
+            other = decided.get(instance.name)
+            if other is not None and other != kind.name:
+                notes.append(
+                    f"{instance.name} is an instance of kind {other} in the inventory, so it is"
+                    " left out"
+                )
+                continue
+            other = owners.setdefault(instance.name, kind.name)
+            if other == kind.name:
+                instances.append(instance)
+            else:
+                notes.append(
+                    f"{instance.name} is also an instance of kind {other}, so it is left out"
+                )
+        found.append(Found(each.kind, tuple(instances), tuple(notes)))
+    return found
+
+
+def _before(decisions: Decisions, name: str) -> str:
+    if name in decisions.allowed:
+        return "allowed before"
+    if name in decisions.refused:
+        return "refused before"
+    return "new"
+
+
+def _print_found(found: Sequence[Found], instances: Sequence[_Choice]) -> None:
+    for each in found:
+        print(f"Kind {each.kind}: {len(each.instances)} found")
+        for note in each.notes:
+            print(clean(f"  note: {note}"))
+    if instances:
+        print()
+        _print_choices(instances)
+
+
+def _print_choices(choices: Sequence[_Choice]) -> None:
+    rows = []
+    for number, choice in enumerate(choices, 1):
+        mark = "[x]" if choice.selected else "[ ]"
+        if choice.instance is not None:
+            facts = " ".join(
+                f"{key}={value}"
+                for key, value in sorted(choice.instance.facts.items())
+                if key != "kind"
+            )
+            note = f"note: {choice.instance.note}" if choice.instance.note else ""
+            detail = "  ".join(part for part in (choice.kind, facts, note) if part)
+        else:
+            detail = "on " + ", ".join(choice.hosts)
+        rows.append([mark, str(number), choice.name, choice.before, detail])
+    _print_table(["", "#", "NAME", "BEFORE", "DETAILS"], rows)
+
+
+def _choose(choices: list[_Choice], what: str) -> None:
+    numbers = set(range(1, len(choices) + 1))
+    while True:
+        answer = _ask(
+            f"Switch {what} by number (for example: 1 3), or type all or none. Press Enter to"
+            " go on: "
+        ).strip().lower()
+        if not answer:
+            return
+        if answer in ("all", "none"):
+            for choice in choices:
+                choice.selected = answer == "all"
+        else:
+            try:
+                picked = {int(word) for word in answer.replace(",", " ").split()}
+            except ValueError:
+                picked = set()
+            if not picked or not picked <= numbers:
+                print(f"Type numbers from 1 to {len(choices)}, all, or none.")
+                continue
+            for number in picked:
+                choices[number - 1].selected = not choices[number - 1].selected
+        _print_choices(choices)
+
+
+def _print_summary(
+    updated: Inventory,
+    kinds: Sequence[Kind],
+    chosen: Sequence[_Choice],
+    accounts: Sequence[_Choice],
+    missing: Sequence[tuple[str, str]],
+    outside: Sequence[_Choice],
+) -> None:
+    print()
+    for kind in kinds:
+        allowed = updated.kinds.get(kind.name, Decisions()).allowed
+        print(clean(f"Kind {kind.name}: agents may use {_names(allowed)}."))
+    print(clean(f"Accounts: agents may use {_names(updated.accounts.allowed)}."))
+    for choice in chosen:
+        if choice.instance is not None and choice.instance.accounts is None:
+            print(
+                clean(
+                    f"The accounts on {choice.name} are not known, so it is not offered for work"
+                    " that needs an account."
+                )
+            )
+    for choice in accounts:
+        if choice.selected and len(choice.hosts) > 1:
+            print(
+                clean(
+                    f"Warning: {choice.name} is signed in on {', '.join(choice.hosts)}. Runs that"
+                    " need it wait for each other; give each instance its own account to avoid"
+                    " that."
+                )
+            )
+    for choice in outside:
+        what = f"the account {choice.name}" if choice.kind is None else (
+            f"{choice.name} (kind {choice.kind})"
+        )
+        print(clean(f"Warning: {what} is selected, but no preselect pattern matches it."))
+    for kind, name in missing:
+        print(clean(f"{name} (kind {kind}) is allowed but not found now. It stays allowed."))
+
+
+def _names(names: Sequence[str]) -> str:
+    return ", ".join(names) if names else "none"
+
+
+def _instance_json(choice: _Choice) -> dict[str, object]:
+    instance = choice.instance
+    assert instance is not None
+    return {
+        "kind": choice.kind,
+        "name": choice.name,
+        "selected": choice.selected,
+        "before": choice.before,
+        "facts": dict(instance.facts),
+        # Only whether the accounts are known: the addresses of an instance that is not
+        # selected are often personal, so only the accounts list shows addresses, and only
+        # those on the selected instances.
+        "accounts_known": instance.accounts is not None,
+        "note": instance.note,
+    }
+
+
+def _is_terminal() -> bool:
+    return sys.stdin.isatty()
+
+
+def _ask(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except EOFError:
+        raise BanksmanError("no answer, so nothing was written") from None
+
+
+def _confirm(question: str) -> bool:
+    return _ask(clean(f"{question} [y/N] ")).strip().lower() in ("y", "yes")
+
+
 _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "status": _cmd_status,
+    "whoami": _cmd_whoami,
     "reap": _cmd_reap,
     "enter": _cmd_enter,
     "check": _cmd_check,
     "leave": _cmd_leave,
     "admin release": _cmd_admin_release,
+    "admin discover": _cmd_admin_discover,
 }
 
 

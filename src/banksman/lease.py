@@ -36,6 +36,13 @@ VOID_REASONS = {
 
 RESOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}")
 KIND_NAME = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+# An issue id such as #123 or abc-123. It comes from the caller or from a branch name, and other
+# agents read it, so it has only characters that cannot carry instructions or escape sequences.
+ISSUE = re.compile(r"[A-Za-z0-9#][A-Za-z0-9._#/-]{0,63}")
+# The last part of the path of an agent's executable, such as claude or codex.
+PROGRAM_NAME = re.compile(r"[A-Za-z0-9._+-]{1,64}")
+SESSION = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+MAX_PURPOSE_LENGTH = 200
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _MAX_OWNER_LENGTH = 1024
 # The last second that a date can show: 9999-12-31 23:59:59 UTC.
@@ -60,6 +67,23 @@ class Timeouts:
     hard_cap: float = 3 * 60 * 60
     # How long a void lease waits for its scripts to end before it is quarantined.
     drain_timeout: float = 5 * 60
+
+
+@dataclass(frozen=True)
+class Holder:
+    """Who holds a lease, and why."""
+
+    # The worktree: the caller's git toplevel.
+    owner: str
+    # The agent process, or the process that holds the lease for a person. It decides liveness.
+    owner_pid: int | None = None
+    issue: str | None = None
+    # The program name of the agent process.
+    agent: str | None = None
+    # An agent-specific id of the session, for display only.
+    session: str | None = None
+    # Text that one agent writes and other agents read. It is untrusted.
+    purpose: str | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +153,12 @@ class Lease:
     # The reaper that takes a draining lease back.
     reaper_pid: int | None = None
     reaper_started: str | None = None
+    issue: str | None = None
+    agent: str | None = None
+    session: str | None = None
+    purpose: str | None = None
+    # When the holder expects to give the resource back, in awake time. Only a hint.
+    expected: float | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -140,6 +170,10 @@ class Lease:
             "owner": self.owner,
             "owner_pid": self.owner_pid,
             "owner_started": self.owner_started,
+            "issue": self.issue,
+            "agent": self.agent,
+            "session": self.session,
+            "purpose": self.purpose,
             "boot_id": self.boot_id,
             "acquired_at": self.acquired_at,
             "touched_at": self.touched_at,
@@ -148,6 +182,7 @@ class Lease:
                 "boot_deadline": self.boot_deadline,
                 "hard_deadline": self.hard_deadline,
                 "drain_deadline": self.drain_deadline,
+                "expected": self.expected,
             },
             "idle_timeout": self.idle_timeout,
             "owner_grace": self.owner_grace,
@@ -180,6 +215,10 @@ class Lease:
             owner=_get(data, "owner", _is_owner),
             owner_pid=_get(data, "owner_pid", _optional(_is_pid)),
             owner_started=_get(data, "owner_started", _optional(_is_text)),
+            issue=_get(data, "issue", _optional(_is_issue)),
+            agent=_get(data, "agent", _optional(_is_program_name)),
+            session=_get(data, "session", _optional(_is_session)),
+            purpose=_get(data, "purpose", _optional(_is_purpose)),
             boot_id=_get(data, "boot_id", _is_text),
             acquired_at=_get(data, "acquired_at", _is_wall_time),
             touched_at=_get(data, "touched_at", _is_wall_time),
@@ -187,6 +226,7 @@ class Lease:
             boot_deadline=_get(awake, "boot_deadline", _optional(_is_number)),
             hard_deadline=_get(awake, "hard_deadline", _is_number),
             drain_deadline=_get(awake, "drain_deadline", _optional(_is_number)),
+            expected=_get(awake, "expected", _optional(_is_number)),
             idle_timeout=_get(data, "idle_timeout", _optional(_is_number)),
             owner_grace=_get(data, "owner_grace", _is_number),
             drain_timeout=_get(data, "drain_timeout", _is_number),
@@ -218,12 +258,25 @@ def check_resource(resource: str) -> None:
         raise BanksmanError(f"not a valid resource name: {resource!r}")
 
 
-def check_names(resource: str, kind: str, owner: str) -> None:
+def check_names(resource: str, kind: str, holder: Holder) -> None:
     check_resource(resource)
     if not _is_kind(kind):
         raise BanksmanError(f"not a valid kind name: {kind!r}")
-    if not _is_owner(owner):
-        raise BanksmanError(f"not a valid owner: {owner!r}")
+    if not _is_owner(holder.owner):
+        raise BanksmanError(f"not a valid owner: {holder.owner!r}")
+    if holder.issue is not None and not _is_issue(holder.issue):
+        raise BanksmanError(
+            "an issue id has 1 to 64 letters, digits, and the characters '#', '.', '_', '/',"
+            " and '-'"
+        )
+    if holder.agent is not None and not _is_program_name(holder.agent):
+        raise BanksmanError(f"not a valid agent program name: {holder.agent!r}")
+    if holder.session is not None and not _is_session(holder.session):
+        raise BanksmanError(f"not a valid session id: {holder.session!r}")
+    if holder.purpose is not None and not _is_purpose(holder.purpose):
+        raise BanksmanError(
+            f"a purpose has 1 to {MAX_PURPOSE_LENGTH} characters and no control characters"
+        )
 
 
 def void_reason(
@@ -297,6 +350,26 @@ def _is_kind(value: object) -> bool:
 
 def _is_void_reason(value: object) -> bool:
     return isinstance(value, str) and value in VOID_REASONS
+
+
+def _is_issue(value: object) -> bool:
+    return isinstance(value, str) and ISSUE.fullmatch(value) is not None
+
+
+def _is_program_name(value: object) -> bool:
+    return isinstance(value, str) and PROGRAM_NAME.fullmatch(value) is not None
+
+
+def _is_session(value: object) -> bool:
+    return isinstance(value, str) and SESSION.fullmatch(value) is not None
+
+
+def _is_purpose(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= MAX_PURPOSE_LENGTH
+        and _CONTROL.search(value) is None
+    )
 
 
 def _is_owner(value: object) -> bool:

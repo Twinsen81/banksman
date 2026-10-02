@@ -7,7 +7,9 @@ from helpers import write_config
 
 from banksman import config
 from banksman.config import (
+    DEFAULT_AGENTS,
     MAX_COUNT,
+    Android,
     Config,
     ConfigError,
     Kind,
@@ -15,7 +17,7 @@ from banksman.config import (
     load_config,
     parse_duration,
 )
-from banksman.lease import HARD_CAP, Timeouts
+from banksman.lease import HARD_CAP, Holder, Timeouts
 from banksman.store import RELEASED
 
 OWNER = "/work/tree-a"
@@ -78,7 +80,7 @@ def test_a_kind_can_list_its_instances_by_name(config_path, store):
     write_config(config_path, '[kinds.port]\ninstances = ["9101", "9102", "9103"]\n')
     port = load_config().kinds["port"]
     assert (port.count, port.instances()) == (None, ("9101", "9102", "9103"))
-    lease = store.acquire(port.instances()[1], port.name, OWNER, timeouts=port.timeouts)
+    lease = store.acquire(port.instances()[1], port.name, Holder(OWNER), timeouts=port.timeouts)
     assert (lease.resource, lease.kind) == ("9102", "port")
 
 
@@ -98,7 +100,7 @@ def test_the_drain_timeout_is_a_timeout_like_the_others(config_path, store):
     kinds = load_config().kinds
     assert kinds["device"].timeouts.drain_timeout == 120
     assert kinds["emulator"].timeouts.drain_timeout == 90
-    lease = store.acquire("emu-1", "emulator", OWNER, timeouts=kinds["emulator"].timeouts)
+    lease = store.acquire("emu-1", "emulator", Holder(OWNER), timeouts=kinds["emulator"].timeouts)
     assert lease.drain_timeout == 90
 
 
@@ -110,7 +112,7 @@ def test_on_void_is_a_program_and_its_arguments(config_path):
 def test_a_new_counted_kind_needs_only_configuration(config_path, store, system):
     write_config(config_path, '[kinds.port]\ncount = 2\nidle_timeout = "off"\nhard_cap = "1h"\n')
     port = load_config().kinds["port"]
-    lease = store.acquire(port.instances()[1], port.name, OWNER, timeouts=port.timeouts)
+    lease = store.acquire(port.instances()[1], port.name, Holder(OWNER), timeouts=port.timeouts)
     assert (lease.resource, lease.idle_timeout) == ("port-1", None)
     system.advance(60 * 60 - 1)
     assert store.reap() == []
@@ -118,6 +120,44 @@ def test_a_new_counted_kind_needs_only_configuration(config_path, store, system)
     assert [(item.lease.void_reason, item.outcome) for item in store.reap()] == [
         (HARD_CAP, RELEASED)
     ]
+
+
+def test_the_holder_rules_have_defaults_and_can_be_changed(config_path):
+    assert load_config().holder.agents == DEFAULT_AGENTS == ("claude", "codex")
+    assert load_config().holder.issue_pattern.search("xyz-183-paired").group(0) == "xyz-183"
+    write_config(
+        config_path, '[holder]\nagents = ["claude", "gemini"]\nissue_pattern = "#([0-9]+)"\n'
+    )
+    holder = load_config().holder
+    assert holder.agents == ("claude", "gemini")
+    assert holder.issue_pattern.pattern == "#([0-9]+)"
+
+
+def test_a_kind_can_get_its_instances_from_discovery(config_path):
+    write_config(
+        config_path,
+        "[kinds.emulator]\n"
+        'preset = "android-emulator"\n'
+        'preselect = ["qa_*"]\n'
+        "[kinds.lab]\n"
+        'discover = ["/usr/local/bin/find-lab-devices", "--json"]\n'
+        "[accounts]\n"
+        'preselect = ["*@example.test"]\n'
+        "[android]\n"
+        'sdk = "/opt/android-sdk"\n',
+    )
+    loaded = load_config()
+    emulator, lab = loaded.kinds["emulator"], loaded.kinds["lab"]
+    assert (emulator.preset, emulator.preselect, emulator.discovered) == (
+        "android-emulator",
+        ("qa_*",),
+        True,
+    )
+    assert lab.discover == ("/usr/local/bin/find-lab-devices", "--json")
+    assert lab.instances() == ()
+    assert loaded.account_preselect == ("*@example.test",)
+    assert loaded.android == Android(sdk=Path("/opt/android-sdk"))
+    assert not Kind("build", count=2).discovered
 
 
 @pytest.mark.parametrize(
@@ -188,6 +228,22 @@ def test_text_that_is_not_a_duration_is_refused(text):
         ("[defaults]\nstop = true", "defaults.stop"),
         ("[defaults]\ndrain_timeout = '0s'", "defaults.drain_timeout"),
         ("[kinds.emulator]\ndrain_timeout = 'off'", "kinds.emulator.drain_timeout"),
+        ("[holder]\nagent = ['claude']", "holder.agent"),
+        ("[holder]\nagents = 'claude'", "holder.agents"),
+        ("[holder]\nagents = ['/usr/bin/claude']", "holder.agents"),
+        ("[holder]\nissue_pattern = '('", "holder.issue_pattern"),
+        ("[holder]\nissue_pattern = ''", "holder.issue_pattern"),
+        ("[kinds.emulator]\npreset = 'ios-simulator'", "kinds.emulator.preset"),
+        ("[kinds.emulator]\npreset = 'android-emulator'\ncount = 2", "kinds.emulator.preset"),
+        ("[kinds.lab]\ndiscover = ['find-lab-devices']", "kinds.lab.discover"),
+        ("[kinds.lab]\ninstances = ['a']\ndiscover = ['/bin/x']", "kinds.lab.discover"),
+        ("[kinds.port]\ninstances = ['9101']\npreselect = ['9*']", "kinds.port.preselect"),
+        ("[kinds.lab]\ndiscover = ['/bin/x']\npreselect = []", "kinds.lab.preselect"),
+        ("[kinds.lab]\ndiscover = ['/bin/x']\npreselect = 'qa_*'", "kinds.lab.preselect"),
+        ('[accounts]\npreselect = ["qa\\u001b@example.test"]', "accounts.preselect"),
+        ("[accounts]\npattern = ['*']", "accounts.pattern"),
+        ("[android]\nsdk = 'Library/Android/sdk'", "android.sdk"),
+        ("[android]\nadb = '/opt/adb'", "android.adb"),
     ],
 )
 def test_a_configuration_that_is_not_valid_is_refused(config_path, text, key):

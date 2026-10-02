@@ -19,6 +19,8 @@ from banksman.errors import BanksmanError
 
 _TIMEOUT_SECONDS = 5.0
 _MAX_MACOS_PID = 99_999
+# With LC_ALL=C, ps prints a start time as "Fri Oct  2 10:09:25 2026".
+_LSTART_FIELDS = 5
 OUTSIDE_SANDBOX = (
     "If banksman runs inside an agent's sandbox, let the agent run it outside the sandbox."
 )
@@ -34,6 +36,9 @@ class Process:
     ppid: int
     pgid: int
     started: str
+    # The executable as the process list shows it: a full path on macOS, and the program name,
+    # at most 15 characters, on Linux.
+    program: str = ""
 
 
 class System(Protocol):
@@ -186,9 +191,12 @@ def _read_stat(pid: int) -> Process | None:
     state, ppid, pgid, start_ticks = fields[0], fields[1], fields[2], fields[19]
     if state in ("Z", "X"):
         return None
+    program = line[line.index("(") + 1 : line.rindex(")")]
     # The start time in clock ticks after boot does not change when the wall clock is set,
     # unlike the start date that ps prints on Linux.
-    return Process(pid=pid, ppid=int(ppid), pgid=int(pgid), started=start_ticks)
+    return Process(
+        pid=pid, ppid=int(ppid), pgid=int(pgid), started=start_ticks, program=program
+    )
 
 
 def _running_from_ps(pids: list[int]) -> dict[int, str]:
@@ -207,14 +215,19 @@ def _running_from_ps(pids: list[int]) -> dict[int, str]:
 
 def _table_from_ps() -> dict[int, Process]:
     table = {}
-    for line in _ps(["-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="]).splitlines():
-        fields = line.split()
-        if len(fields) < 5 or not all(field.isdigit() for field in fields[:3]):
+    # -ww: the program, in the last column, is never cut. Its path can contain spaces, so the
+    # line is split only up to it.
+    output = _ps(["-ww", "-A", "-o", "pid=,ppid=,pgid=,stat=,lstart=,comm="])
+    for line in output.splitlines():
+        fields = line.split(None, 4 + _LSTART_FIELDS)
+        if len(fields) < 4 + _LSTART_FIELDS or not all(field.isdigit() for field in fields[:3]):
             continue
         if not fields[3].startswith("Z"):
             pid, ppid, pgid = (int(field) for field in fields[:3])
             # Joined the same way as by _running_from_ps, so both give one start time.
-            table[pid] = Process(pid=pid, ppid=ppid, pgid=pgid, started=" ".join(fields[4:]))
+            started = " ".join(fields[4 : 4 + _LSTART_FIELDS])
+            program = fields[4 + _LSTART_FIELDS] if len(fields) > 4 + _LSTART_FIELDS else ""
+            table[pid] = Process(pid=pid, ppid=ppid, pgid=pgid, started=started, program=program)
     return table
 
 

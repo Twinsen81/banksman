@@ -5,9 +5,10 @@ so that two agents never use the same device at the same time, and a dead run ne
 one forever.
 
 > **Status: pre-alpha, not usable yet.** This repository has the design, the lease core
-> (lease files, void triggers, and the reaper), resource kinds as configuration, and
-> fencing. Discovery, requests, and the console are not written yet, so no command can take
-> a lease yet. The design is in [docs/DESIGN.md](docs/DESIGN.md).
+> (lease files, void triggers, and the reaper), resource kinds as configuration, fencing,
+> discovery with the allowlist, and holder identity. Requests and the console are not
+> written yet, so no command can take a lease yet. The design is in
+> [docs/DESIGN.md](docs/DESIGN.md).
 
 A *banksman* is the person on a building site who directs crane lifts and tells each
 operator when it is safe to move. This tool does that job for agents that share a machine:

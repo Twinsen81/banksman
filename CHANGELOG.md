@@ -40,6 +40,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Quarantined leases are also kept in `~/.local/state/banksman/quarantine`, so that a
   quarantine outlives cleaners of temporary files and restarts, and
   `banksman admin release --force` removes a lease in any state.
+- Holder identity for any agent. A lease records its owner (the worktree, found from the
+  `.git` entry without running `git`), the issue id (from the branch name or the worktree
+  directory name, through `issue_pattern`), the agent (the nearest ancestor process whose
+  program is in `agents`, `claude` and `codex` by default), the agent's process as the owner
+  process, a session id when the agent gives one, a purpose, and an expected hold time.
+  The `[holder]` table of the configuration sets `agents` and `issue_pattern`. `status`
+  shows the holder as, for example, `codex · #123 · verify the tablet layout`, and
+  `status --json` carries the purpose only with `--verbose`. `banksman whoami` shows the
+  holder that banksman would record. Lease files carry the holder, so their schema is now 3.
+- Discovery and the allowlist. `banksman admin discover` runs the `discover` hook or the
+  preset of each discovered kind, asks which instances and accounts agents may use, and
+  writes `~/.config/banksman/inventory.toml`. It selects at first only what the `preselect`
+  patterns match, refuses what a person leaves unselected, and never allows a refused name
+  again on its own, also not with `--all` or as an instance of another kind. `--yes` and `--json` make it scriptable. It warns
+  about an account that is signed in on several selected instances, and an instance whose
+  accounts are not known is not offered for work that needs an account. The presets
+  `android-emulator` and `android-device` find AVDs, running emulators, and physical
+  devices with their facts (such as `manufacturer`, `model`, `codename`, and the
+  `display_name` of an AVD) and Google accounts; they only read, and they find the SDK in a
+  fixed place or in `[android]`, never through `$ANDROID_HOME`.
 - Design document ([docs/DESIGN.md](docs/DESIGN.md)), recorded decisions
   ([DECISIONS.md](DECISIONS.md)), security policy and threat model
   ([SECURITY.md](SECURITY.md)), and contribution guide.
