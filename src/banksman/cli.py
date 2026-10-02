@@ -425,7 +425,7 @@ def _cmd_admin_discover(args: argparse.Namespace) -> int:
         )
     path = default_inventory_path()
     inventory = load_inventory(path)
-    found = _discover_all(config, kinds)
+    found = _discover_all(config, kinds, inventory)
     instances = [
         _Choice(
             name=instance.name,
@@ -557,14 +557,28 @@ def _discovered_kinds(config: Config, only: str | None) -> list[Kind]:
     return kinds
 
 
-def _discover_all(config: Config, kinds: Sequence[Kind]) -> list[Found]:
-    # Each resource has one lease file, so a name can belong to only one kind.
+def _discover_all(config: Config, kinds: Sequence[Kind], inventory: Inventory) -> list[Found]:
+    # Each resource has one lease file, so a name can belong to only one kind. A name that the
+    # inventory already has under another kind stays there, also when a person refused it:
+    # otherwise a scan of a second kind would offer a refused device again.
+    decided = {
+        name: kind
+        for kind, decisions in inventory.kinds.items()
+        for name in (*decisions.allowed, *decisions.refused)
+    }
     owners = {name: kind.name for kind in config.kinds.values() for name in kind.instances()}
     found = []
     for kind in kinds:
         each = discover(kind, config)
         instances, notes = [], list(each.notes)
         for instance in each.instances:
+            other = decided.get(instance.name)
+            if other is not None and other != kind.name:
+                notes.append(
+                    f"{instance.name} is an instance of kind {other} in the inventory, so it is"
+                    " left out"
+                )
+                continue
             other = owners.setdefault(instance.name, kind.name)
             if other == kind.name:
                 instances.append(instance)
@@ -689,7 +703,10 @@ def _instance_json(choice: _Choice) -> dict[str, object]:
         "selected": choice.selected,
         "before": choice.before,
         "facts": dict(instance.facts),
-        "accounts": None if instance.accounts is None else list(instance.accounts),
+        # Only whether the accounts are known: the addresses of an instance that is not
+        # selected are often personal, so only the accounts list shows addresses, and only
+        # those on the selected instances.
+        "accounts_known": instance.accounts is not None,
         "note": instance.note,
     }
 

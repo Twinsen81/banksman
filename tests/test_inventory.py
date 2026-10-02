@@ -145,3 +145,13 @@ def test_without_a_person_an_unselected_name_gets_no_decision():
 def test_a_name_that_was_not_seen_keeps_its_decision():
     assert decide(DECISIONS, [], set(), refuse_unselected=True) == DECISIONS
 
+def test_a_name_belongs_to_only_one_kind(tmp_path):
+    path = tmp_path / "inventory.toml"
+    path.write_text("[kinds.lab]\nallowed = ['a']\n[kinds.rack]\nrefused = ['a']\n")
+    path.chmod(0o600)
+    with pytest.raises(InventoryError, match="kinds.rack: 'a' is also listed under kinds.lab"):
+        load_inventory(path)
+    both = Inventory(kinds={"lab": Decisions(allowed=("a",)), "rack": Decisions(allowed=("a",))})
+    with pytest.raises(InventoryError, match="'a' is also listed under kinds.lab"):
+        save_inventory(both, path)
+

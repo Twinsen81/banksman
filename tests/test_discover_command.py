@@ -269,3 +269,57 @@ def test_text_from_a_hook_is_shown_without_control_sequences(capsys, config_path
     assert "\x1b" not in out
     assert "note: slow" in out
 
+def test_json_shows_no_account_of_an_instance_that_is_not_selected(capsys, config_path):
+    configure(config_path, preselect=["R5CR5678DEF"])
+    assert main(["admin", "discover", "--json"]) == 0
+    out = capsys.readouterr().out
+    # R5CR1234ABC is not selected, so its accounts stay out, also its personal one.
+    assert "someone@example.com" not in out
+    shown = json.loads(out)
+    assert all("accounts" not in item for item in shown["instances"])
+    assert {item["name"]: item["accounts_known"] for item in shown["instances"]} == {
+        "qa_phone_api35": True,
+        "Pixel_7_API_34": False,
+        "R5CR1234ABC": True,
+        "R5CR5678DEF": True,
+        "R5CR9999XYZ": False,
+    }
+    assert [item["name"] for item in shown["accounts"]] == [
+        "qa-1@example.test",
+        "qa-2@example.test",
+    ]
+
+
+def two_kinds(config_path, found, *, preselect="*"):
+    text = ""
+    for kind in ("lab", "rack"):
+        document = json.dumps({"schema": 1, "instances": found})
+        text += f"[kinds.{kind}]\ndiscover = {json.dumps(hook(PRINT_ARGUMENT, document))}\n"
+        text += f"preselect = {json.dumps([preselect])}\n"
+    write_config(config_path, text)
+
+
+def test_a_name_that_another_kind_has_in_the_inventory_is_left_out(capsys, config_path):
+    two_kinds(config_path, [{"name": "a"}])
+    assert main(["admin", "discover", "--yes", "--kind", "lab"]) == 0
+    capsys.readouterr()
+    shown = run_json(capsys, "--yes", "--kind", "rack")
+    assert shown["instances"] == []
+    assert shown["notes"] == [
+        {"kind": "rack", "note": "a is an instance of kind lab in the inventory, so it is left out"}
+    ]
+    assert load_inventory().kinds == {"lab": Decisions(allowed=("a",)), "rack": Decisions()}
+
+
+def test_a_refusal_under_one_kind_holds_for_every_kind(capsys, config_path):
+    save_inventory(Inventory(kinds={"lab": Decisions(refused=("a",))}))
+    two_kinds(config_path, [{"name": "a"}, {"name": "b"}])
+    # A person refused "a" as a lab instance. A scan of rack alone, with --all, must not
+    # allow it as a rack instance.
+    shown = run_json(capsys, "--yes", "--all", "--kind", "rack")
+    assert [item["name"] for item in shown["instances"]] == ["b"]
+    assert load_inventory().kinds == {
+        "lab": Decisions(refused=("a",)),
+        "rack": Decisions(allowed=("b",)),
+    }
+

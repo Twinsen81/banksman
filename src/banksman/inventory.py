@@ -104,6 +104,10 @@ def load_inventory(path: Path | None = None) -> Inventory:
 def save_inventory(inventory: Inventory, path: Path | None = None) -> Path:
     path = default_inventory_path() if path is None else Path(path)
     try:
+        _check_unique(inventory)
+    except _Invalid as exc:
+        raise InventoryError(f"not written to {path}: {exc}") from None
+    try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(prefix=".inventory-", dir=path.parent)
     except OSError as exc:
@@ -196,10 +200,24 @@ def _inventory(data: dict[str, object]) -> Inventory:
     for name in kinds:
         if KIND_NAME.fullmatch(name) is None:
             raise _Invalid(f"kinds.{name}", "is not a valid kind name")
-    return Inventory(
+    inventory = Inventory(
         kinds={name: _decisions(value, f"kinds.{name}") for name, value in kinds.items()},
         accounts=_decisions(data.get("accounts", {}), "accounts"),
     )
+    _check_unique(inventory)
+    return inventory
+
+
+def _check_unique(inventory: Inventory) -> None:
+    # Each resource has one lease file, so a name belongs to one kind. A refusal counts too:
+    # a device that a person refused as one kind must not come back as another.
+    owners: dict[str, str] = {}
+    for kind in sorted(inventory.kinds):
+        decisions = inventory.kinds[kind]
+        for name in (*decisions.allowed, *decisions.refused):
+            other = owners.setdefault(name, kind)
+            if other != kind:
+                raise _Invalid(f"kinds.{kind}", f"{name!r} is also listed under kinds.{other}")
 
 
 def _decisions(value: object, where: str) -> Decisions:

@@ -53,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preset of each discovered kind, asks which instances and accounts agents may use, and
   writes `~/.config/banksman/inventory.toml`. It selects at first only what the `preselect`
   patterns match, refuses what a person leaves unselected, and never allows a refused name
-  again on its own, also not with `--all`. `--yes` and `--json` make it scriptable. It warns
+  again on its own, also not with `--all` or as an instance of another kind. `--yes` and `--json` make it scriptable. It warns
   about an account that is signed in on several selected instances, and an instance whose
   accounts are not known is not offered for work that needs an account. The presets
   `android-emulator` and `android-device` find AVDs, running emulators, and physical

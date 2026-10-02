@@ -349,10 +349,14 @@ It prefers emulators to physical devices unless the request asks for `kind=physi
   inventory. With `--yes`, the selection is the pre-selection, and an unselected name gets
   no decision, so that a pattern that the operator adds later can still select it. A name
   that discover does not find keeps its decision, so a phone that is unplugged during
-  discover keeps its place. So a new scan can never silently widen access.
+  discover keeps its place. A name belongs to one kind: when the inventory has it under one
+  kind, allowed or refused, a scan of another kind leaves it out, so a refused device does
+  not come back as an instance of another kind. So a new scan can never silently widen
+  access.
 - **Scriptable.** `--yes` takes the pre-selection without questions and writes the
   inventory. `--json` prints what discover found and the inventory that it would write, and
-  writes it only together with `--yes`. Without a terminal, discover needs one of the two.
+  writes it only together with `--yes`. Like the questions, it shows only the accounts of
+  the selected instances; for each instance it says only whether its accounts are known. Without a terminal, discover needs one of the two.
   `--kind` limits discover to one kind; the decisions for the other kinds do not change.
 - **The inventory is policy, not a cache.** The inventory is
   `~/.config/banksman/inventory.toml`, with the home directory from the user database, as
