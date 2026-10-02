@@ -30,6 +30,7 @@ from banksman.lease import (
     REBOOTED,
     RELEASE,
     VOID_REASONS,
+    Holder,
     Lease,
     LeaseFormatError,
     Timeouts,
@@ -166,25 +167,29 @@ class Store:
         self,
         resource: str,
         kind: str,
-        owner: str,
-        owner_pid: int | None = None,
+        holder: Holder,
         *,
         timeouts: Timeouts = Timeouts(),
+        expect: float | None = None,
     ) -> Lease:
-        """Write a `booting` lease, before the resource is started."""
-        return self._grant(resource, kind, owner, owner_pid, BOOTING, timeouts)
+        """Write a `booting` lease, before the resource is started.
+
+        `expect` is how long the holder expects to keep the resource, in seconds. It is only a
+        hint for other callers.
+        """
+        return self._grant(resource, kind, holder, BOOTING, timeouts, expect)
 
     def acquire(
         self,
         resource: str,
         kind: str,
-        owner: str,
-        owner_pid: int | None = None,
+        holder: Holder,
         *,
         timeouts: Timeouts = Timeouts(),
+        expect: float | None = None,
     ) -> Lease:
         """Write a `ready` lease, for a resource that needs no start."""
-        return self._grant(resource, kind, owner, owner_pid, READY, timeouts)
+        return self._grant(resource, kind, holder, READY, timeouts, expect)
 
     def ready(self, resource: str, lease_id: str) -> Lease:
         with self._lock():
@@ -193,9 +198,19 @@ class Store:
                 return lease
             return self._write(replace(self._touched(lease, None), state=READY, boot_deadline=None))
 
-    def touch(self, resource: str, owner: str, owner_pid: int | None = None) -> Lease:
+    def touch(
+        self,
+        resource: str,
+        owner: str,
+        owner_pid: int | None = None,
+        *,
+        expect: float | None = None,
+    ) -> Lease:
         with self._lock():
-            return self._write(self._touched(self._owned(resource, owner), owner_pid))
+            lease = self._touched(self._owned(resource, owner), owner_pid)
+            if expect is not None:
+                lease = replace(lease, expected=self.system.clock() + expect)
+            return self._write(lease)
 
     def enter(self, resource: str, lease_id: str, pid: int, pgid: int | None = None) -> Lease:
         """Check the lease, touch it, and register a script as a user of the resource."""
@@ -395,12 +410,12 @@ class Store:
         self,
         resource: str,
         kind: str,
-        owner: str,
-        owner_pid: int | None,
+        holder: Holder,
         state: str,
         timeouts: Timeouts,
+        expect: float | None,
     ) -> Lease:
-        check_names(resource, kind, owner)
+        check_names(resource, kind, holder)
         with self._lock():
             current = self._read(resource)
             if isinstance(current, Unreadable):
@@ -408,11 +423,11 @@ class Store:
             if current is not None:
                 if (
                     current.resource == resource
-                    and current.owner == owner
+                    and current.owner == holder.owner
                     and current.state in HELD
                     and self._void_reason(current) is None
                 ):
-                    return self._write(self._touched(current, owner_pid))
+                    return self._write(self._touched(current, holder.owner_pid))
                 raise Busy(f"{resource} is {current.state}, held by {current.owner}")
             now = self.system.clock()
             wall = self.system.wall_clock()
@@ -422,9 +437,14 @@ class Store:
                     resource=resource,
                     kind=kind,
                     state=state,
-                    owner=owner,
-                    owner_pid=owner_pid,
-                    owner_started=self._start_time(owner_pid),
+                    owner=holder.owner,
+                    owner_pid=holder.owner_pid,
+                    owner_started=self._start_time(holder.owner_pid),
+                    issue=holder.issue,
+                    agent=holder.agent,
+                    session=holder.session,
+                    purpose=holder.purpose,
+                    expected=None if expect is None else now + expect,
                     boot_id=self.system.boot_id(),
                     acquired_at=wall,
                     touched_at=wall,

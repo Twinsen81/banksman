@@ -1,8 +1,9 @@
 # banksman design
 
-**Status:** the project scaffold, the lease core, kinds as configuration, and fencing
-exist. Sections 3, 4, and 5 are implemented, with `banksman reap`, a `status` that lists
-the leases, the commands that scripts run (`enter`, `check`, and `leave`), and
+**Status:** the project scaffold, the lease core, kinds as configuration, fencing, discovery,
+and holder identity exist. Sections 3, 4, 5, 8, and 9 are implemented, with `banksman reap`, a
+`status` that lists the leases and their holders, `banksman whoami`, the commands that scripts
+run (`enter`, `check`, and `leave`), `banksman admin discover`, and
 `banksman admin release --force`. The rest is not implemented yet: no command can take a
 lease yet. Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md);
 the threat model is in [SECURITY.md](../SECURITY.md).
@@ -203,9 +204,10 @@ not code.
 - **Kinds.** Each `[kinds.<name>]` table declares a kind. A kind with `count` is counted:
   its instances are `<name>-0`, `<name>-1`, and so on. A kind can instead list its
   instances by name with `instances`, for example port numbers; a run then gets the port
-  itself as its resource. A kind with neither gets its instances from discovery
-  (section 8). An instance name must be unique across all kinds, because each resource has
-  one lease file. Counted kinds need no hooks.
+  itself as its resource. Or a kind gets its instances from discovery, with a `discover`
+  hook or a `preset`, and `preselect` patterns (section 8). A kind has only one of `count`,
+  `instances`, `discover`, and `preset`. An instance name must be unique across all kinds,
+  because each resource has one lease file. Counted kinds need no hooks.
 - **Timeouts.** `[defaults]` sets the timeouts of section 3 for every kind, and a kind can
   set its own. A duration is a whole number and a unit: `90s`, `20m`, or `3h`.
   `idle_timeout = "off"` turns the idle timeout off, for example for build slots. An
@@ -233,6 +235,8 @@ not code.
   instances = ["9101", "9102", "9103"]
 
   [kinds.emulator]
+  preset = "android-emulator"
+  preselect = ["qa_*"]
   boot_timeout = "8m"
   on_void = ["/usr/local/bin/stop-avd"]
   ```
@@ -265,18 +269,19 @@ not code.
   their callers stopped them, the lease is quarantined, so that a slow hook does not run in
   every command.
 - Hooks do device-level work only. App-level work stays in the project's scripts.
-- Still to come: `discover`, which finds the instances of a named kind, comes with
-  discovery (section 8), and `on_acquire`, which resets an instance before a run gets it,
-  comes with requests (section 6). Presets for Android emulators and Android devices come
-  with discovery too.
+- Still to come: `on_acquire`, which resets an instance before a run gets it, comes with
+  requests (section 6).
 
 ## 6. Requests by properties
 
 A run asks for what it needs, not for a resource by name.
 
-- **Facts** come from the kind's `discover` hook, and an agent cannot set them: `kind`,
-  `form` (phone, tablet, watch), `api`, `image`, `abi`, `model`, `avd`, `serial`, and
-  `google_account` (whether a Google account is signed in).
+- **Facts** come from the kind's `discover` hook or preset (section 8), and an agent cannot
+  set them: `kind`, `form` (phone, tablet, watch), `api`, `image`, `abi`, `manufacturer`,
+  `model`, `codename`, `display_name`, `avd`, `serial`, and `google_account` (whether an
+  allowed Google account is signed in, which banksman derives from the accounts that
+  discovery finds). A text fact is compared without regard to case, because devices give,
+  for example, both `samsung` and `Google`.
 - **Tags** come from the operator, who assigns them in the machine's inventory with pattern
   rules.
 - A request is an AND of `--where` clauses. The operators are `=`, `!=`, `~` (glob), `>=`
@@ -312,21 +317,91 @@ It prefers emulators to physical devices unless the request asks for `kind=physi
 
 ## 8. Discovery and the allowlist
 
-- **A human gate that defaults to closed.** `banksman admin discover` lists what is
-  attached and running, asks which instances agents may use, and writes the inventory. A
-  machine with test devices on it usually also has something personal on it. Offering that
-  by mistake gives an unattended agent real credentials, while leaving out a test device by
-  mistake costs one more run of `discover`.
-- The operator can pre-select by name patterns in the machine's configuration. banksman
-  ships no default pattern. Anything outside the patterns starts unselected, and a selected
-  entry outside them is shown again as a warning.
-- **The inventory is policy, not a cache.** What is on a device changes, so `acquire` reads
-  the machine again and grants only what is both permitted and present now. An entry that
-  has gone is reported, not handed out. Running `discover` again merges: an entry that was
-  refused stays refused unless the operator enables it.
+- **A human gate that defaults to closed.** `banksman admin discover` runs the discovery of
+  every kind that has a `discover` hook or a preset, shows what it found, asks which
+  instances and which accounts agents may use, and writes the inventory. A machine with
+  test devices on it usually also has something personal on it. Offering that by mistake
+  gives an unattended agent real credentials, while leaving out a test device by mistake
+  costs one more run of `discover`.
+- **Pre-selection.** The `preselect` patterns of a kind, and `preselect` in the `[accounts]`
+  table, name what discover selects at first. `*` matches any text, `?` matches one
+  character, and case matters. banksman ships no default pattern. Anything outside the
+  patterns starts unselected, and a selected name outside them is shown again as a warning.
+  `--all` selects everything at first. A pattern gives no access by itself: only the
+  inventory does.
+
+  ```toml
+  [kinds.device]
+  preset = "android-device"
+
+  [accounts]
+  preselect = ["*@example.test"]
+  ```
+
+- **Accounts.** discover shows only the accounts of the selected instances. An account is
+  allowed or refused as a whole, wherever it is signed in, because two runs that use one
+  account on two devices interfere through the account (section 7). discover warns when one
+  selected account is signed in on several selected instances. An instance whose accounts
+  are not known is not offered for work that needs an account.
+- **A refusal is a person's decision.** In the interactive mode, a name that the person sees
+  and leaves unselected is refused. A refused name stays refused when discover runs again,
+  also when a pattern or `--all` matches it, until a person selects it again or edits the
+  inventory. With `--yes`, the selection is the pre-selection, and an unselected name gets
+  no decision, so that a pattern that the operator adds later can still select it. A name
+  that discover does not find keeps its decision, so a phone that is unplugged during
+  discover keeps its place. So a new scan can never silently widen access.
+- **Scriptable.** `--yes` takes the pre-selection without questions and writes the
+  inventory. `--json` prints what discover found and the inventory that it would write, and
+  writes it only together with `--yes`. Without a terminal, discover needs one of the two.
+  `--kind` limits discover to one kind; the decisions for the other kinds do not change.
+- **The inventory is policy, not a cache.** The inventory is
+  `~/.config/banksman/inventory.toml`, with the home directory from the user database, as
+  for the configuration file. It holds only names: the allowed and the refused instances of
+  each kind, and the allowed and the refused accounts. The operator can edit it. banksman
+  refuses an inventory that another user owns or that group or others can write to.
+  `acquire` reads the machine again and grants only what is both allowed and present now
+  (section 6). An entry that has gone is reported, not handed out. Counted kinds and kinds
+  that list their instances need no inventory: the configuration that declares them is the
+  permission. `BANKSMAN_INVENTORY` changes the path for tests; when only `BANKSMAN_CONFIG`
+  is set, the inventory is next to that file.
+- **The `discover` hook** is a program and its arguments, run like `on_void` (section 5),
+  with `BANKSMAN_KIND` in its environment and 60 seconds to end. It prints one JSON
+  document:
+
+  ```json
+  {"schema": 1,
+   "instances": [{"name": "R5CR1234ABC",
+                  "facts": {"form": "phone", "api": 35},
+                  "accounts": ["qa@example.test"],
+                  "note": "a short text for the operator"}],
+   "notes": ["0A1B2C3D is unauthorized, so it is not offered"]}
+  ```
+
+  `schema` is the version of this format, now 1. `name` is a resource name. A fact name
+  has lowercase letters, digits, and `_`, and a fact is a text of at most 128 characters
+  without control characters, a whole number, or `true` or `false`. banksman sets the fact
+  `kind` itself, so a hook cannot make an instance look like one of another kind.
+  `accounts` lists the accounts on the instance; without it, or with `null`, they are not
+  known. A value that is not valid is left out with a note, never repaired, and a note never
+  shows a name that is not valid. A name can belong to only one kind.
+- **Presets.** `preset = "android-emulator"` finds the AVDs, with the facts `avd`,
+  `display_name` (the name that the AVD manager shows), `manufacturer`, `api`, `image`,
+  `abi`, and `form`, and, for an emulator that runs, its `serial` and its accounts.
+  `preset = "android-device"` finds the physical devices that adb lists, with the facts
+  `serial`, `manufacturer`, `model`, `codename`, `api`, `abi`, and `form`, and their
+  accounts. The facts are what the device gives: a Samsung phone gives the model
+  `SM-S926B`, not "Galaxy S24+". banksman ships no table of marketing names, and it does
+  not read the device name in the settings, which a person can change and which often
+  holds a personal name. A device that is
+  not authorized is reported, not offered. The presets use the SDK in `~/Library/Android/sdk`
+  on macOS and in `~/Android/Sdk` on Linux, and the AVDs in `~/.android/avd`. The `sdk` and
+  `avd_home` keys of the `[android]` table change them. The presets never read
+  `$ANDROID_HOME` or `$ANDROID_AVD_HOME`, for the same reason as for the state directory.
+  They only read, and they declare no `on_void`.
 - **Identifiers only.** For accounts, banksman stores addresses, never credentials. Reading
-  the accounts on an Android device depends on `dumpsys` output, which is not a stable
-  interface. A parse failure means "no accounts found", and banksman says so.
+  the accounts on an Android device depends on `dumpsys account` output, which is not a
+  stable interface. When that output has no list of accounts, the accounts are not known,
+  and banksman says so. The presets keep only accounts of type `com.google`.
 
 ## 9. Holder identity
 
@@ -336,21 +411,38 @@ for any agent and for a person at a terminal.
 
 | Field | Source |
 |---|---|
-| owner | the worktree: the caller's git toplevel |
-| issue | `--issue`, otherwise the branch name or the worktree directory name, through a configurable pattern |
-| agent | the nearest ancestor process whose program is in a configured list of agent programs (`claude`, `codex`, and so on) |
+| owner | the worktree: the nearest directory, from the caller's working directory up, that has a `.git` entry; outside a repository, the working directory |
+| issue | `--issue`, otherwise the first match of `issue_pattern` in the branch name, then in the name of the worktree directory |
+| agent | the nearest ancestor process whose program is in `agents`: the last part of its executable path, with case |
 | owner process | that process's pid and start time, used for liveness |
-| session | an agent-specific extra when the environment has one, never required |
+| session | an agent-specific extra when the environment has one, never required: `CLAUDE_CODE_SESSION_ID` for `claude` |
 
 If no known agent is in the ancestry, the owner is the worktree, and only the touch-based
 expiry applies, unless the caller passes `--owner-pid`.
 
+- banksman reads the branch from the `HEAD` file of the worktree, and runs no `git`
+  process. A detached `HEAD` has no branch, so the directory name is the fallback.
+- The `[holder]` table of the configuration sets `agents`, by default
+  `["claude", "codex"]`, and `issue_pattern`, a regular expression that by default finds ids
+  of letters, a hyphen, and digits, such as `abc-123` in the branch `abc-123-tablet-layout`.
+  With a group in the pattern, the issue id is the text of the first group. An empty
+  `agents` list turns the agent detection off.
+- An issue id has 1 to 64 letters, digits, and the characters `#`, `.`, `_`, `/`, and `-`.
+  A branch name is text that anybody can choose, so a match that is not a valid issue id is
+  not used, and an explicit `--issue` that is not valid is an error.
+- `banksman whoami` shows the holder that banksman would record for a lease taken from the
+  current directory. It is the quick check that banksman finds the agent inside a given
+  agent app.
+
 The caller adds only a purpose (`--for`) and an expected hold time (`--expect`, which a
 later `touch` can update). The console then shows, for example,
-`codex · #123 · verify the tablet layout`.
+`codex · #123 · verify the tablet layout`; without an issue id it shows the name of the
+worktree directory.
 
 The purpose is text that one agent writes and other agents read. It is untrusted: see
-SECURITY.md.
+SECURITY.md. Its whitespace becomes single spaces, its control characters are removed, and
+it has at most 200 characters. `status --json` carries the owner, the owner process, the
+agent, the issue, and the session, and the purpose only with `--verbose`.
 
 ## 10. Status, queries, and history
 
@@ -385,8 +477,8 @@ kind in the same pool.
 
 ## 12. Command line (sketch)
 
-Only `version`, `status`, `reap`, `enter`, `check`, `leave`, and `admin release` exist
-today. The rest is the intended shape.
+Only `version`, `status`, `whoami`, `reap`, `enter`, `check`, `leave`, `admin discover`, and
+`admin release` exist today. The rest is the intended shape.
 
 ```
 banksman acquire --where <attr><op><value> ... [--for <text>] [--expect <duration>] [--wait <duration>]
@@ -399,6 +491,7 @@ banksman leave   --resource <name> --lease <id> --pid <pid>
 banksman touch   --resource <name> [--expect <duration>]
 banksman release [--resource <name> | --all]
 banksman status  [--json] [--verbose]
+banksman whoami  [--json]
 banksman watch
 banksman explain --where <attr><op><value> ...
 banksman log     [--since <time>]
@@ -448,13 +541,13 @@ Done:
   instances, timeouts for each kind, and the `on_void` hook.
 - Fencing in both directions and confirmed termination, with quarantines that last until a
   person releases them.
+- Discovery and the allowlist: `admin discover`, the `discover` hook, presets for Android
+  emulators and Android devices, and the inventory.
+- Holder identity for any agent, and `whoami`.
 
 Next:
 
-- Discovery and the allowlist, with the `discover` hook and presets for Android emulators
-  and Android devices.
 - Requests by properties, joint acquire, and the `on_acquire` hook.
-- Holder identity for any agent.
 - `status`, `watch`, `explain`, and `log`.
 - Build slots through a Gradle init script.
 
@@ -471,7 +564,8 @@ Next:
   sandbox, and also for background sessions? Holder identity depends on it. Checked for the
   same setups: the parent of each command is the agent process. Still open: background
   sessions, whether one agent process serves several sessions of an app, and whether the
-  Codex background server keeps running after its session ends.
+  Codex background server keeps running after its session ends. `banksman whoami` shows
+  what banksman finds in each setup.
 - Is the idle timeout longer than the longest silent period of a legitimate run, for
   example a cold build that also waits for a build slot?
 - Some agents run their shell commands in a sandbox. On macOS, a sandboxed command cannot

@@ -16,9 +16,9 @@ SRC = str(Path(banksman.__file__).resolve().parents[1])
 class FakeSystem:
     """A machine whose clock, boot, and processes the test sets.
 
-    A process has its parent in `parents` and its group in `groups`; by default its parent is
-    process 1, and it leads its own group. A signal ends the process that it reaches, unless
-    the process ignores that signal.
+    A process has its parent in `parents`, its group in `groups`, and its executable in
+    `programs`; by default its parent is process 1, and it leads its own group. A signal ends the
+    process that it reaches, unless the process ignores that signal.
     """
 
     def __init__(self) -> None:
@@ -28,6 +28,7 @@ class FakeSystem:
         self.processes: dict[int, str] = {}
         self.parents: dict[int, int] = {}
         self.groups: dict[int, int] = {}
+        self.programs: dict[int, str] = {}
         self.ignores: dict[int, set[int]] = {}
         self.signals: list[tuple[str, int, int]] = []
 
@@ -48,7 +49,13 @@ class FakeSystem:
     def process_table(self):
         known = {os.getpid(): "start-self", **self.processes}
         return {
-            pid: Process(pid, self.parents.get(pid, 1), self.groups.get(pid, pid), started)
+            pid: Process(
+                pid,
+                self.parents.get(pid, 1),
+                self.groups.get(pid, pid),
+                started,
+                self.programs.get(pid, "/bin/sh"),
+            )
             for pid, started in known.items()
         }
 
@@ -67,10 +74,13 @@ class FakeSystem:
         self.now += seconds
         self.wall += seconds
 
-    def spawn(self, pid: int, parent: int = 1, group: int | None = None) -> None:
+    def spawn(
+        self, pid: int, parent: int = 1, group: int | None = None, program: str = "/bin/sh"
+    ) -> None:
         self.processes[pid] = f"start-{pid}"
         self.parents[pid] = parent
         self.groups[pid] = pid if group is None else group
+        self.programs[pid] = program
 
     def end(self, *pids: int) -> None:
         for pid in pids:

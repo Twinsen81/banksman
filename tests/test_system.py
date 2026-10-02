@@ -90,12 +90,30 @@ def test_a_pid_that_cannot_exist_is_not_running():
     assert Machine().running([1_000_000]) == {}
 
 
-def test_the_process_table_shows_parent_group_and_start_time():
+def test_the_process_table_shows_parent_group_start_time_and_program():
     machine = Machine()
     table = machine.process_table()
     own = os.getpid()
-    assert table[own] == Process(own, os.getppid(), os.getpgrp(), machine.running([own])[own])
+    process = table[own]
+    assert process == Process(
+        own, os.getppid(), os.getpgrp(), machine.running([own])[own], process.program
+    )
     assert table[os.getppid()].pid == os.getppid()
+
+
+def test_the_process_table_keeps_a_program_path_with_spaces(tmp_path):
+    folder = tmp_path / "Application Support"
+    folder.mkdir()
+    program = folder / "sleep for agents"
+    program.symlink_to("/bin/sleep")
+    child = subprocess.Popen([str(program), "60"])
+    try:
+        shown = Machine().process_table()[child.pid].program
+        # Linux shows only the last part of the path, cut to 15 characters.
+        assert shown == (str(program) if sys.platform == "darwin" else program.name[:15])
+    finally:
+        child.kill()
+        child.wait()
 
 
 def test_a_child_in_a_new_session_leads_its_own_group():

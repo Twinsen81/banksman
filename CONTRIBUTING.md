@@ -27,9 +27,12 @@ that already run on the machine.
 
 - `src/banksman/`: the package. `cli.py` is the entry point, `store.py` keeps the lease
   files, `config.py` reads the configuration file, `fencing.py` has the rules for the
-  scripts that use a resource and for the signals that the reaper may send, `hooks.py` is
-  the only module that runs hook programs (through `supervisor.py`), and `system.py` is the
-  only module that reads the process list and the boot id, and that sends signals.
+  scripts that use a resource and for the signals that the reaper may send, `identity.py`
+  finds the holder of a lease, `discovery.py` checks what discovery finds, `inventory.py`
+  reads and writes the allowlist, `hooks.py` is the only module that runs hook programs
+  (through `supervisor.py`), `android.py` is the only module that runs `adb`, and
+  `system.py` is the only module that reads the process list and the boot id, and that sends
+  signals.
 - `tests/`: the pytest suite.
 - `docs/DESIGN.md`: architecture and behavior. Read it before proposing structural changes.
 - `DECISIONS.md`: resolved design decisions and how to change them.

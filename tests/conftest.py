@@ -2,6 +2,7 @@ import pytest
 from helpers import FakeSystem
 
 from banksman.config import CONFIG_ENV
+from banksman.inventory import INVENTORY_ENV
 from banksman.store import QUARANTINE_DIR_ENV, STATE_DIR_ENV, Store
 
 
@@ -27,6 +28,14 @@ def config_path(tmp_path, monkeypatch):
     # test writes it.
     path = tmp_path / "config.toml"
     monkeypatch.setenv(CONFIG_ENV, str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
+def inventory_path(tmp_path, monkeypatch):
+    # No test may read or write the real inventory of the machine.
+    path = tmp_path / "inventory.toml"
+    monkeypatch.setenv(INVENTORY_ENV, str(path))
     return path
 
 

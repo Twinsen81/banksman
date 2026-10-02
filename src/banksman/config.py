@@ -15,13 +15,25 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from banksman.errors import BanksmanError
-from banksman.lease import KIND_NAME, RESOURCE_NAME, Timeouts
+from banksman.lease import KIND_NAME, PROGRAM_NAME, RESOURCE_NAME, Timeouts
 
 CONFIG_ENV = "BANKSMAN_CONFIG"
 MAX_COUNT = 1000
+ANDROID_EMULATOR = "android-emulator"
+ANDROID_DEVICE = "android-device"
+PRESETS = (ANDROID_EMULATOR, ANDROID_DEVICE)
+# The agents whose commands banksman recognizes. Each is the last part of the path of the
+# agent's executable, as the process list shows it.
+DEFAULT_AGENTS = ("claude", "codex")
+# An issue id such as abc-123 in a branch name or a directory name.
+DEFAULT_ISSUE_PATTERN = r"\b[A-Za-z][A-Za-z0-9]*-[0-9]+\b"
 
 _TIMEOUT_KEYS = ("boot_timeout", "owner_grace", "idle_timeout", "hard_cap", "drain_timeout")
-_KIND_KEYS = ("count", "instances", "on_void", "stop", *_TIMEOUT_KEYS)
+_SOURCE_KEYS = ("count", "instances", "discover", "preset")
+_KIND_KEYS = (*_SOURCE_KEYS, "preselect", "on_void", "stop", *_TIMEOUT_KEYS)
+_MAX_PATTERNS = 100
+_MAX_PATTERN_LENGTH = 256
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _DURATION = re.compile(r"([0-9]{1,7})([smh])")
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 60 * 60}
 _OFF = "off"
@@ -47,6 +59,18 @@ class Kind:
     # it on, because a stopped process that its user did not expect costs more than a blocked
     # resource.
     stop: bool = False
+    # The command that finds the instances of the kind and their facts.
+    discover: tuple[str, ...] | None = None
+    # A discovery that banksman ships, used instead of a discover command.
+    preset: str | None = None
+    # Name patterns of the instances that `admin discover` selects at first. They give no
+    # access by themselves: only the inventory does.
+    preselect: tuple[str, ...] = ()
+
+    @property
+    def discovered(self) -> bool:
+        """Whether the instances come from discovery, and agents may use only allowed ones."""
+        return self.discover is not None or self.preset is not None
 
     def instances(self) -> tuple[str, ...]:
         """Return the instances that the configuration declares.
@@ -60,9 +84,29 @@ class Kind:
 
 
 @dataclass(frozen=True)
+class HolderRules:
+    """How banksman finds the holder of a lease from the caller."""
+
+    agents: tuple[str, ...] = DEFAULT_AGENTS
+    issue_pattern: re.Pattern[str] = re.compile(DEFAULT_ISSUE_PATTERN)
+
+
+@dataclass(frozen=True)
+class Android:
+    """Where the Android presets find the SDK and the emulators. None means the default place."""
+
+    sdk: Path | None = None
+    avd_home: Path | None = None
+
+
+@dataclass(frozen=True)
 class Config:
     defaults: Timeouts = Timeouts()
     kinds: Mapping[str, Kind] = field(default_factory=dict)
+    holder: HolderRules = HolderRules()
+    # Patterns of the accounts that `admin discover` selects at first.
+    account_preselect: tuple[str, ...] = ()
+    android: Android = Android()
 
 
 def default_config_path() -> Path:
@@ -134,14 +178,90 @@ class _Invalid(Exception):
 
 
 def _config(data: dict[str, object]) -> Config:
-    _check_keys(data, None, ("defaults", "kinds"))
+    _check_keys(data, None, ("defaults", "kinds", "holder", "accounts", "android"))
     table = _table(data.get("defaults", {}), "defaults")
     _check_keys(table, "defaults", _TIMEOUT_KEYS)
     defaults = _timeouts(table, "defaults", Timeouts())
     table = _table(data.get("kinds", {}), "kinds")
     kinds = {name: _kind(name, value, defaults) for name, value in table.items()}
     _check_unique_instances(kinds)
-    return Config(defaults=defaults, kinds=kinds)
+    accounts = _table(data.get("accounts", {}), "accounts")
+    _check_keys(accounts, "accounts", ("preselect",))
+    return Config(
+        defaults=defaults,
+        kinds=kinds,
+        holder=_holder(_table(data.get("holder", {}), "holder")),
+        account_preselect=_patterns(accounts.get("preselect"), "accounts.preselect"),
+        android=_android(_table(data.get("android", {}), "android")),
+    )
+
+
+def _holder(table: dict[str, object]) -> HolderRules:
+    _check_keys(table, "holder", ("agents", "issue_pattern"))
+    agents = table.get("agents", list(DEFAULT_AGENTS))
+    # An empty list is allowed: banksman then recognizes no agent, and only the touch-based
+    # rules free a lease.
+    if (
+        not isinstance(agents, list)
+        or len(agents) > _MAX_PATTERNS
+        or not all(isinstance(name, str) and PROGRAM_NAME.fullmatch(name) for name in agents)
+    ):
+        raise _Invalid(
+            "holder.agents",
+            'must be a list of program names, such as ["claude", "codex"]: the last part of the'
+            " path of each agent's executable",
+        )
+    pattern = table.get("issue_pattern", DEFAULT_ISSUE_PATTERN)
+    if not isinstance(pattern, str) or not 0 < len(pattern) <= _MAX_PATTERN_LENGTH:
+        raise _Invalid(
+            "holder.issue_pattern",
+            f"must be a regular expression of 1 to {_MAX_PATTERN_LENGTH} characters",
+        )
+    try:
+        compiled = re.compile(pattern)
+    except re.error as exc:
+        raise _Invalid(
+            "holder.issue_pattern", f"is not a valid regular expression: {exc}"
+        ) from None
+    return HolderRules(agents=tuple(agents), issue_pattern=compiled)
+
+
+def _android(table: dict[str, object]) -> Android:
+    _check_keys(table, "android", ("sdk", "avd_home"))
+    return Android(
+        sdk=_directory(table.get("sdk"), "android.sdk"),
+        avd_home=_directory(table.get("avd_home"), "android.avd_home"),
+    )
+
+
+def _directory(value: object, where: str) -> Path | None:
+    if value is None:
+        return None
+    # The same reason as for a hook program: every caller must find the same directory.
+    if not isinstance(value, str) or "\x00" in value or not os.path.isabs(value):
+        raise _Invalid(where, "must be an absolute path")
+    return Path(value)
+
+
+def _patterns(value: object, where: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= _MAX_PATTERNS
+        or not all(
+            isinstance(pattern, str)
+            and 0 < len(pattern) <= _MAX_PATTERN_LENGTH
+            and _CONTROL.search(pattern) is None
+            for pattern in value
+        )
+    ):
+        raise _Invalid(
+            where,
+            f'must be a list of 1 to {_MAX_PATTERNS} name patterns, such as ["qa_*"], where'
+            " * matches any text and ? matches one character",
+        )
+    return tuple(value)
 
 
 def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
@@ -154,17 +274,32 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
         )
     table = _table(value, where)
     _check_keys(table, where, _KIND_KEYS)
-    count = _count(table.get("count"), f"{where}.count")
-    listed = _instances(table.get("instances"), f"{where}.instances")
-    if count is not None and listed:
-        raise _Invalid(f"{where}.instances", "a kind has either count or instances, not both")
+    sources = [key for key in _SOURCE_KEYS if key in table]
+    if len(sources) > 1:
+        raise _Invalid(
+            f"{where}.{sources[1]}",
+            "a kind gets its instances from only one of count, instances, discover, and preset",
+        )
+    preset = table.get("preset")
+    if preset is not None and preset not in PRESETS:
+        raise _Invalid(f"{where}.preset", f"must be one of {', '.join(PRESETS)}")
+    discover = _command(table.get("discover"), f"{where}.discover")
+    preselect = _patterns(table.get("preselect"), f"{where}.preselect")
+    if preselect and discover is None and preset is None:
+        raise _Invalid(
+            f"{where}.preselect",
+            "applies only to a kind whose instances come from discover or a preset",
+        )
     return Kind(
         name=name,
         timeouts=_timeouts(table, where, defaults),
-        count=count,
-        listed=listed,
+        count=_count(table.get("count"), f"{where}.count"),
+        listed=_instances(table.get("instances"), f"{where}.instances"),
         on_void=_command(table.get("on_void"), f"{where}.on_void"),
         stop=_boolean(table.get("stop", False), f"{where}.stop"),
+        discover=discover,
+        preset=preset,  # type: ignore[arg-type]
+        preselect=preselect,
     )
 
 
