@@ -63,6 +63,10 @@ class Found:
     kind: str
     instances: tuple[Instance, ...] = ()
     notes: tuple[str, ...] = ()
+    # Why the discovery of the kind failed as a whole, also in `notes`. banksman writes it, and it
+    # names no instance. The other notes can name an instance that agents may not use, such as a
+    # personal phone that is not authorized.
+    failure: str | None = None
 
 
 def discover(kind: Kind, config: Config) -> Found:
@@ -73,14 +77,14 @@ def discover(kind: Kind, config: Config) -> Found:
         if kind.preset == ANDROID_DEVICE:
             return parse(kind.name, android.devices(config.android))
     except BanksmanError as exc:
-        return Found(kind.name, notes=(note_text(str(exc)),))
+        return _failed(kind.name, note_text(str(exc)))
     failure, output = hooks.discover(kind)
     if failure is not None:
-        return Found(kind.name, notes=(note_text(failure),))
+        return _failed(kind.name, note_text(failure))
     try:
         document = json.loads(output)
     except (ValueError, UnicodeDecodeError):
-        return Found(kind.name, notes=("the discover hook printed text that is not JSON",))
+        return _failed(kind.name, "the discover hook printed text that is not JSON")
     return parse(kind.name, document)
 
 
@@ -91,12 +95,10 @@ def parse(kind: str, document: object) -> Found:
         or document.get("schema") != DISCOVER_SCHEMA
         or not isinstance(document.get("instances"), list)
     ):
-        return Found(
+        return _failed(
             kind,
-            notes=(
-                f'the discover output is not an object with "schema": {DISCOVER_SCHEMA} and a'
-                ' list of "instances"',
-            ),
+            f'the discover output is not an object with "schema": {DISCOVER_SCHEMA} and a list'
+            ' of "instances"',
         )
     notes = [note_text(note) for note in _texts(document.get("notes"))][:_MAX_NOTES]
     raw = document["instances"]
@@ -112,6 +114,10 @@ def parse(kind: str, document: object) -> Found:
             continue
         instances.append(instance)
     return Found(kind, tuple(instances), tuple(notes))
+
+
+def _failed(kind: str, failure: str) -> Found:
+    return Found(kind, notes=(failure,), failure=failure)
 
 
 def note_text(text: str) -> str:

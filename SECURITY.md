@@ -62,6 +62,13 @@ terminal control sequences from all output and limits the length of the purpose.
 holder fields have fixed character sets: an issue id has only letters, digits, and `#._/-`,
 so a branch name that anybody can choose gives a valid issue id or none.
 
+**The log is history, not evidence.** `~/.local/state/banksman/log.jsonl` keeps the holder of
+every lease, the purpose included. banksman creates it with mode `0600` in a directory with
+mode `0700`, and refuses a log that another user owns or that group or others can write to.
+Every program of the user can change it, an agent too, so banksman checks each line when it
+reads it, as it checks a lease file, and leaves out a line that is not a valid event. The JSON
+of `banksman log` carries the purpose only with `--verbose`, as `status` does.
+
 **Discovered values are untrusted.** Device names, models, and notes come from devices and
 from discover hooks. banksman refuses an instance name that is not a valid resource name,
 keeps only short facts without control characters, removes terminal control sequences from
@@ -69,7 +76,11 @@ notes, and never shows an account name that it does not accept. banksman sets th
 `kind`, `account`, and `tag` itself, so a hook cannot make an instance look like one of
 another kind or like one with an allowed account. A request grants only what the
 configuration declares or the inventory allows, also when it names a resource, and an
-account only when the inventory allows it.
+account only when the inventory allows it. `status` shows only the resources that the configuration
+declares or the inventory allows, and the resources that have a lease, so it never shows an
+instance that the operator did not allow, which can be personal. A note of discovery can name
+such an instance, so `status` and `acquire` show only why a discovery failed and how many other
+notes it has; only `banksman admin discover` shows the notes.
 
 **A grant is safe to read in a shell.** The `KEY=value` lines of `acquire` carry only the
 resource name, the kind, the lease id, the state, a serial, and the granted accounts, and each

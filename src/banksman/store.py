@@ -22,6 +22,16 @@ from pathlib import Path
 from banksman import SCHEMA_VERSION, fencing
 from banksman.assign import Option, Part, assign
 from banksman.errors import BanksmanError
+from banksman.history import (
+    ACQUIRE,
+    FORCE_RELEASE,
+    QUARANTINE,
+    REAP,
+    RELEASE as RELEASE_EVENT,
+    VOID,
+    Event,
+    processes,
+)
 from banksman.lease import (
     BOOTING,
     DRAINING,
@@ -44,6 +54,7 @@ from banksman.system import OUTSIDE_SANDBOX, System
 
 STATE_DIR_ENV = "BANKSMAN_STATE_DIR"
 QUARANTINE_DIR_ENV = "BANKSMAN_QUARANTINE_DIR"
+LOG_ENV = "BANKSMAN_LOG"
 LOCK_WAIT_SECONDS = 10.0
 RELEASED = "released"
 # A take-back that this many reapers started and none finished is quarantined.
@@ -134,6 +145,9 @@ class Reaped:
 TakeBack = Callable[[Lease], bool]
 # Whether the reaper may signal the scripts of a void lease.
 Stopping = Callable[[Lease], bool]
+# Adds an event to the log. It runs under the lock, and it must not raise: a lease that changed
+# stays changed when its event cannot be written.
+Record = Callable[[Event], None]
 
 
 def default_state_dir() -> Path:
@@ -156,16 +170,32 @@ def default_quarantine_dir() -> Path:
     if state_dir:
         return Path(state_dir).with_name(f"{Path(state_dir).name}-quarantine")
     # Outside /tmp: cleaners of temporary files delete old files there, and macOS empties it at
-    # boot, but a quarantine lasts until a person releases it. The home directory comes from
-    # the user database, as for the configuration file, so that every caller of one user finds
-    # the same quarantines.
+    # boot, but a quarantine lasts until a person releases it.
+    return _lasting_dir(QUARANTINE_DIR_ENV) / "quarantine"
+
+
+def default_log_path() -> Path:
+    override = os.environ.get(LOG_ENV)
+    if override:
+        return Path(override)
+    state_dir = os.environ.get(STATE_DIR_ENV)
+    if state_dir:
+        return Path(state_dir).with_name(f"{Path(state_dir).name}-log.jsonl")
+    # Outside /tmp, as the quarantines: the history must outlive restarts and cleaners of
+    # temporary files.
+    return _lasting_dir(LOG_ENV) / "log.jsonl"
+
+
+def _lasting_dir(variable: str) -> Path:
+    # The home directory comes from the user database, as for the configuration file, so that
+    # every caller of one user finds the same files.
     try:
         home = pwd.getpwuid(os.geteuid()).pw_dir
     except KeyError as exc:
         raise StoreError(
-            f"cannot find the home directory of user {os.geteuid()}; set {QUARANTINE_DIR_ENV}"
+            f"cannot find the home directory of user {os.geteuid()}; set {variable}"
         ) from exc
-    return Path(home) / ".local" / "state" / "banksman" / "quarantine"
+    return Path(home) / ".local" / "state" / "banksman"
 
 
 def _take_back_nothing(lease: Lease) -> bool:
@@ -176,6 +206,10 @@ def _stop_nothing(lease: Lease) -> bool:
     return False
 
 
+def _record_nothing(event: Event) -> None:
+    pass
+
+
 class Store:
     def __init__(
         self,
@@ -184,6 +218,7 @@ class Store:
         *,
         take_back: TakeBack = _take_back_nothing,
         stopping: Stopping = _stop_nothing,
+        record: Record = _record_nothing,
         quarantine_dir: Path | None = None,
         lock_wait: float = LOCK_WAIT_SECONDS,
     ) -> None:
@@ -194,6 +229,7 @@ class Store:
         self.system = system
         self._take_back = take_back
         self._stopping = stopping
+        self._record = record
         self._lock_wait = lock_wait
         self._locked = False
 
@@ -304,6 +340,7 @@ class Store:
                         reaper_started=self._start_time(me),
                     )
                 granted.append(Granted(self._write(lease), pick.accounts))
+                self._log(ACQUIRE, lease)
             return granted
 
     def ready(self, resource: str, lease_id: str) -> Lease:
@@ -445,6 +482,17 @@ class Store:
                 )
             running = self._running_users(current) if isinstance(current, Lease) else ()
             self._delete(resource)
+            if isinstance(current, Lease):
+                self._log(FORCE_RELEASE, current, state=current.state, running=processes(running))
+            else:
+                self._record(
+                    Event(
+                        self.system.wall_clock(),
+                        FORCE_RELEASE,
+                        resource,
+                        problem=f"the lease file could not be read: {current.error}",
+                    )
+                )
             return current, running
 
     def snapshot(self) -> Snapshot:
@@ -474,6 +522,7 @@ class Store:
                     reason = void_reason(lease, boot_id=boot_id, now=now, running=running)
                     if reason is None:
                         continue
+                    self._log(VOID, lease, reason=reason, **self._spent(lease, final=False))
                     lease = _drained(lease, reason, now)
                     if _other_reaper_runs(lease, running, me):
                         # The acquire that resets the instance still runs. The lease drains, so
@@ -482,6 +531,8 @@ class Store:
                         self._write(lease)
                         continue
                 elif lease.boot_id != boot_id:
+                    if lease.state == QUARANTINED:
+                        self._log(VOID, lease, reason=REBOOTED)
                     lease = _restarted(lease, now)
                 elif lease.state != DRAINING or _other_reaper_runs(lease, running, me):
                     continue
@@ -495,6 +546,7 @@ class Store:
                     # caller stopped it. A take-back in every command would block every command.
                     problem = f"{TAKE_BACK_ATTEMPTS} take-backs started and none finished"
                     quarantined = self._write(_quarantined(lease))
+                    self._log(QUARANTINE, quarantined, problem=problem)
                     reaped.append(Reaped(quarantined, QUARANTINED, problem=problem))
                     continue
                 if not lease.ended:
@@ -533,7 +585,9 @@ class Store:
             ):
                 return []
             if not freed:
-                return [Reaped(self._write(_quarantined(current)), QUARANTINED)]
+                quarantined = self._write(_quarantined(current))
+                self._log(QUARANTINE, quarantined, problem="its instance could not be taken back")
+                return [Reaped(quarantined, QUARANTINED)]
             ended = replace(current, ended=True, reaper_pid=None, reaper_started=None)
             table = self.system.process_table() if ended.users else {}
             outcome, users = _settled(ended, table, self.system.clock())
@@ -544,8 +598,15 @@ class Store:
     def _finish(self, lease: Lease, outcome: str, users: tuple[User, ...]) -> Reaped:
         if outcome == RELEASED:
             self._delete(lease.resource)
+            self._log(REAP, lease, reason=lease.void_reason)
             return Reaped(lease, RELEASED)
-        return Reaped(self._write(_quarantined(replace(lease, users=users))), QUARANTINED, users)
+        quarantined = self._write(_quarantined(replace(lease, users=users)))
+        # While stopping is off, the log shows what the reaper would have stopped, so that the
+        # operator can decide whether to turn it on.
+        self._log(
+            QUARANTINE, quarantined, running=processes(users), stopping=self._stopping(lease)
+        )
+        return Reaped(quarantined, QUARANTINED, users)
 
     def _users_now(self, lease: Lease) -> tuple[User, ...]:
         with self._lock():
@@ -563,16 +624,35 @@ class Store:
 
     def _give_back(self, lease: Lease) -> Lease | None:
         running = self._running_users(lease)
+        spent = self._spent(lease, final=True)
         if not self._reset_runs(lease):
             lease = replace(lease, reaper_pid=None, reaper_started=None)
             if not running:
                 self._delete(lease.resource)
+                self._log(RELEASE_EVENT, lease, drained=False, **spent)
                 return None
         # The scripts, and a reset by another banksman process, must end before the resource is
         # handed on, as for a void lease. The holder gives the instance back as it is, so no
         # hook ends it.
         drained = _drained(replace(lease, users=running), RELEASE, self.system.clock())
+        self._log(RELEASE_EVENT, lease, drained=True, running=processes(running), **spent)
         return self._write(drained)
+
+    def _log(self, event: str, lease: Lease, **details: object) -> None:
+        self._record(Event.of(event, lease, self.system.wall_clock(), **details))
+
+    def _spent(self, lease: Lease, *, final: bool) -> dict[str, float | None]:
+        """Return how long a lease was held, and its longest time without a touch.
+
+        With `final`, the holder ends the lease itself, so the time since the last touch was
+        a quiet time of the run. When the lease becomes void, that time is how long the holder
+        was gone.
+        """
+        if lease.boot_id != self.system.boot_id():
+            return {"held": None, "longest_quiet": lease.longest_quiet}
+        now = self.system.clock()
+        quiet = max(lease.longest_quiet, now - lease.touched) if final else lease.longest_quiet
+        return {"held": now - lease.acquired, "longest_quiet": quiet}
 
     def _reset_runs(self, lease: Lease) -> bool:
         """Whether another banksman process still resets the instance of a held lease."""
@@ -600,7 +680,9 @@ class Store:
                 # Also for the same owner: several agents can work in one worktree, so only the
                 # lease id tells a holding apart.
                 raise Busy(f"{resource} is {current.state}, held by {current.owner}")
-            return self._write(self._new_lease(resource, kind, holder, state, timeouts, expect))
+            lease = self._write(self._new_lease(resource, kind, holder, state, timeouts, expect))
+            self._log(ACQUIRE, lease)
+            return lease
 
     def _new_lease(
         self,
@@ -634,6 +716,7 @@ class Store:
             acquired_at=wall,
             touched_at=wall,
             touched=now,
+            acquired=now,
             boot_deadline=now + timeouts.boot_timeout if state == BOOTING else None,
             hard_deadline=now + timeouts.hard_cap,
             idle_timeout=timeouts.idle_timeout,
@@ -713,7 +796,13 @@ class Store:
         return touched
 
     def _touched(self, lease: Lease, owner_pid: int | None) -> Lease:
-        touched = replace(lease, touched=self.system.clock(), touched_at=self.system.wall_clock())
+        now = self.system.clock()
+        touched = replace(
+            lease,
+            touched=now,
+            touched_at=self.system.wall_clock(),
+            longest_quiet=max(lease.longest_quiet, now - lease.touched),
+        )
         if owner_pid is None:
             return touched
         # A restarted agent runs under a new pid. Recording it keeps the owner rule true.

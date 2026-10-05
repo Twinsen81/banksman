@@ -6,7 +6,7 @@ import sys
 from contextlib import suppress
 
 import pytest
-from helpers import SRC, age_lease, edit_lease, hook, reap_in_child, write_config
+from helpers import SRC, age_lease, edit_lease, hook, reap_in_child, table_rows, write_config
 
 from banksman import SCHEMA_VERSION, __version__
 from banksman.cli import main
@@ -29,24 +29,30 @@ def test_version_flag(capsys):
     assert capsys.readouterr().out.strip() == f"banksman {__version__} (schema {SCHEMA_VERSION})"
 
 
+def leases_shown(capsys, *arguments):
+    """Return the leases that status --json shows."""
+    assert main(["status", "--json", *arguments]) == 0
+    shown = json.loads(capsys.readouterr().out)["resources"]
+    return [each["lease"] for each in shown if each["lease"] is not None]
+
+
 def test_status_json_is_an_empty_pool(capsys):
     assert main(["status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "schema": SCHEMA_VERSION,
-        "leases": [],
-        "unreadable": [],
+        "resources": [],
+        "notes": [],
     }
 
 
 def test_status_table(capsys):
     assert main(["status"]) == 0
-    assert capsys.readouterr().out.strip() == "No leases."
+    assert capsys.readouterr().out.startswith("No resources.")
 
 
 def test_status_lists_the_leases(capsys, state_dir):
     Store(state_dir, Machine()).acquire("phone-1", "device", Holder(OWNER))
-    assert main(["status", "--json"]) == 0
-    (lease,) = json.loads(capsys.readouterr().out)["leases"]
+    (lease,) = leases_shown(capsys)
     assert {key: lease[key] for key in ("resource", "kind", "state", "owner", "owner_pid")} == {
         "resource": "phone-1",
         "kind": "device",
@@ -57,9 +63,9 @@ def test_status_lists_the_leases(capsys, state_dir):
     assert lease["acquired_at"].endswith("Z")
 
     assert main(["status"]) == 0
-    header, row = capsys.readouterr().out.splitlines()
-    assert header.split() == ["RESOURCE", "KIND", "STATE", "HOLDER", "SINCE", "ACCOUNTS"]
-    assert row.split()[:4] == ["phone-1", "device", "ready", "tree-a"]
+    (row,) = table_rows(capsys.readouterr().out)
+    assert row["RESOURCE"] == "phone-1"
+    assert (row["KIND"], row["STATE"], row["HOLDER"]) == ("device", "ready", "tree-a")
 
 
 def test_status_shows_the_holder_and_keeps_the_purpose_out_of_default_json(capsys, state_dir):
@@ -72,11 +78,10 @@ def test_status_shows_the_holder_and_keeps_the_purpose_out_of_default_json(capsy
     )
     Store(state_dir, Machine()).acquire("phone-1", "device", holder)
     assert main(["status"]) == 0
-    row = capsys.readouterr().out.splitlines()[1]
-    assert "codex · #123 · verify the tablet layout" in row
+    (row,) = table_rows(capsys.readouterr().out)
+    assert row["HOLDER"] == "codex · #123 · verify the tablet layout"
 
-    assert main(["status", "--json"]) == 0
-    (lease,) = json.loads(capsys.readouterr().out)["leases"]
+    (lease,) = leases_shown(capsys)
     assert {key: lease[key] for key in ("agent", "issue", "session")} == {
         "agent": "codex",
         "issue": "#123",
@@ -84,8 +89,7 @@ def test_status_shows_the_holder_and_keeps_the_purpose_out_of_default_json(capsy
     }
     assert "purpose" not in lease
 
-    assert main(["status", "--json", "--verbose"]) == 0
-    (lease,) = json.loads(capsys.readouterr().out)["leases"]
+    (lease,) = leases_shown(capsys, "--verbose")
     assert lease["purpose"] == "verify the tablet layout"
 
 
@@ -116,8 +120,7 @@ def test_whoami_uses_the_agents_of_the_configuration(capsys, config_path, tmp_pa
 def test_status_reaps_first(capsys, state_dir):
     Store(state_dir, Machine()).acquire("phone-1", "device", Holder(OWNER))
     age_lease(state_dir, "phone-1", 21 * 60)
-    assert main(["status", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["leases"] == []
+    assert leases_shown(capsys) == []
 
 
 def test_status_removes_terminal_control_sequences(capsys, state_dir):
@@ -152,7 +155,11 @@ def test_status_survives_a_lease_file_with_infinity(capsys, state_dir):
     Store(state_dir, Machine()).acquire("phone-1", "device", Holder(OWNER))
     edit_lease(state_dir, "phone-1", lambda data: data.update(acquired_at=float("inf")))
     assert main(["status"]) == 0
-    assert "unreadable lease file" in capsys.readouterr().out
+    (row,) = table_rows(capsys.readouterr().out)
+    assert (row["STATE"], row["HOLDER"]) == (
+        "unreadable",
+        "lease file: acquired_at is missing or not valid",
+    )
 
 
 def test_reap_with_nothing_to_do(capsys):
@@ -213,7 +220,8 @@ def test_a_failing_on_void_hook_quarantines_the_lease(capsys, state_dir, config_
     assert captured.err == (
         "banksman: cannot take back emu-1: the on_void hook failed with exit status 3\n"
     )
-    assert captured.out.splitlines()[1].split()[:3] == ["emu-1", "emulator", "quarantined"]
+    (row,) = table_rows(captured.out)
+    assert (row["RESOURCE"], row["KIND"], row["STATE"]) == ("emu-1", "emulator", "quarantined")
 
 
 def test_a_configuration_error_stops_the_commands_that_reap(capsys, config_path):
@@ -259,8 +267,7 @@ def test_a_script_enters_and_leaves_a_lease(capsys, state_dir):
     try:
         arguments = ["--resource", "phone-1", "--lease", lease.lease_id, "--pid", str(script.pid)]
         assert main(["enter", *arguments, "--pgid", str(script.pid)]) == 0
-        assert main(["status", "--json"]) == 0
-        (shown,) = json.loads(capsys.readouterr().out)["leases"]
+        (shown,) = leases_shown(capsys)
         assert shown["users"] == [{"pid": script.pid, "pgid": script.pid}]
         # The script still runs, and it is not the process that runs banksman.
         assert main(["leave", *arguments]) == 1
@@ -268,8 +275,7 @@ def test_a_script_enters_and_leaves_a_lease(capsys, state_dir):
         script.kill()
         script.wait()
         assert main(["leave", *arguments]) == 0
-        assert main(["status", "--json"]) == 0
-        assert json.loads(capsys.readouterr().out)["leases"][0]["users"] == []
+        assert leases_shown(capsys)[0]["users"] == []
     finally:
         script.kill()
         script.wait()
@@ -418,8 +424,7 @@ def test_admin_release_clears_a_quarantine(capsys, state_dir, quarantine_dir, co
     assert main(["admin", "release", "--force", "--resource", "emu-1"]) == 0
     assert capsys.readouterr().out == "Released emu-1: its lease was quarantined.\n"
     assert not (quarantine_dir / "emu-1.json").exists()
-    assert main(["status", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["leases"] == []
+    assert leases_shown(capsys) == []
 
 
 def _start(code, *arguments):

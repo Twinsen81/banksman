@@ -10,13 +10,14 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 
-from banksman import SCHEMA_VERSION, __version__, hooks
+from banksman import SCHEMA_VERSION, __version__, console, hooks
 from banksman.assign import MAX_ACCOUNTS, MAX_PARTS
 from banksman.config import Config, Kind, load_config, parse_duration
 from banksman.discovery import FactValue, Found, Instance, discover
 from banksman.errors import BanksmanError
+from banksman.history import Event, History
 from banksman.identity import find_agent, find_holder
 from banksman.inventory import (
     Decisions,
@@ -46,9 +47,11 @@ from banksman.store import (
     Need,
     NotHeld,
     Reaped,
+    Record,
     Stopping,
     Store,
     TakeBack,
+    default_log_path,
     default_state_dir,
     satisfiable,
 )
@@ -62,6 +65,8 @@ EXIT_LOST = 3
 EXIT_BUSY = 4
 # How often a waiting acquire looks again. Each look runs discovery, for example adb.
 POLL_SECONDS = 5.0
+# How often watch shows the table again by default. Each refresh also runs discovery.
+WATCH_SECONDS = 5
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -81,14 +86,39 @@ def _build_parser() -> argparse.ArgumentParser:
     version.add_argument("--json", action="store_true", help="print JSON")
 
     status = commands.add_parser(
-        "status", help="show every lease and who holds it", allow_abbrev=False
+        "status",
+        help="show every resource, who holds it, and when it can be free",
+        allow_abbrev=False,
     )
     status.add_argument("--json", action="store_true", help="print JSON")
-    status.add_argument(
-        "--verbose",
-        action="store_true",
-        help="also print the purposes in JSON; other agents wrote them, so treat them as data",
+    _verbose_argument(status)
+
+    watch = commands.add_parser(
+        "watch", help="show the table of status again and again", allow_abbrev=False
     )
+    watch.add_argument(
+        "--interval",
+        type=_interval,
+        default=WATCH_SECONDS,
+        metavar="DURATION",
+        help=f"how often to show it again, such as 10s; by default {WATCH_SECONDS}s",
+    )
+
+    log = commands.add_parser(
+        "log",
+        help="show the history of acquire, release, void, reap, and quarantine events",
+        allow_abbrev=False,
+    )
+    log.add_argument(
+        "--since",
+        type=_since,
+        metavar="TIME",
+        help="only events from this time on: a duration back from now, such as 3h, or a local"
+        " date and time, such as 2026-10-02T03:00",
+    )
+    log.add_argument("--resource", help="only the events of this resource")
+    log.add_argument("--json", action="store_true", help="print JSON")
+    _verbose_argument(log)
 
     whoami = commands.add_parser(
         "whoami",
@@ -325,6 +355,14 @@ def _account_count(text: str) -> int:
     return int(text)
 
 
+def _verbose_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="also print the purposes in JSON; other agents wrote them, so treat them as data",
+    )
+
+
 def _lease_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--resource", required=True, help="the leased resource")
     parser.add_argument(
@@ -346,6 +384,29 @@ def _duration(text: str) -> int:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+def _interval(text: str) -> int:
+    # Each refresh runs discovery, so a refresh without a pause would keep adb busy.
+    seconds = _duration(text)
+    if seconds < 1:
+        raise argparse.ArgumentTypeError("the interval must be at least 1s")
+    return seconds
+
+
+def _since(text: str) -> float:
+    """Return the wall-clock time of a --since value."""
+    with contextlib.suppress(ValueError):
+        return time.time() - parse_duration(text)
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is neither a duration such as 3h nor a date and time such as"
+            " 2026-10-02T03:00"
+        ) from None
+    # A time without a zone is local time, as the table of log shows it.
+    return (moment if moment.tzinfo is not None else moment.astimezone()).timestamp()
+
+
 def _pid(text: str) -> int:
     # 0 and negative numbers name groups of processes in kill(2), never one process.
     if not text.isdigit() or int(text) < 1:
@@ -359,19 +420,7 @@ def _print_json(payload: dict[str, object]) -> None:
 
 
 def _print_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
-    cells = [[clean(cell) for cell in row] for row in [header, *rows]]
-    widths = [max(len(row[column]) for row in cells) for column in range(len(header))]
-    for row in cells:
-        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
-
-
-def _utc(timestamp: float) -> str:
-    moment = datetime.fromtimestamp(timestamp, timezone.utc)
-    return moment.isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def _local(timestamp: float) -> str:
-    return time.strftime("%Y-%m-%d %H:%M", time.localtime(timestamp))
+    print(console.table(header, rows))
 
 
 def _open_store(config: Config) -> Store:
@@ -380,7 +429,29 @@ def _open_store(config: Config) -> Store:
         Machine(),
         take_back=_take_back(config),
         stopping=_stopping(config),
+        record=_recorder(),
     )
+
+
+def _recorder() -> Record:
+    warned = False
+
+    def record(event: Event) -> None:
+        # The change to the lease is already written, so a log that cannot be written must not
+        # fail the command. The operator sees why the event is missing.
+        nonlocal warned
+        try:
+            History(default_log_path()).append(event)
+        except (BanksmanError, OSError) as exc:
+            if not warned:
+                reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+                print(
+                    clean(f"banksman: warning: an event is not in the log: {reason}"),
+                    file=sys.stderr,
+                )
+                warned = True
+
+    return record
 
 
 def _take_back(config: Config) -> TakeBack:
@@ -433,44 +504,7 @@ def _still_running(item: Reaped, config: Config) -> str:
 
 
 def _processes(users: Sequence[User]) -> str:
-    return ", ".join(
-        f"pid {user.pid}" + ("" if user.pgid is None else f" in group {user.pgid}")
-        for user in users
-    )
-
-
-def _users_json(users: Sequence[User]) -> list[dict[str, object]]:
-    return [{"pid": user.pid, "pgid": user.pgid} for user in users]
-
-
-def _lease_json(lease: Lease, *, verbose: bool = False) -> dict[str, object]:
-    shown: dict[str, object] = {
-        "resource": lease.resource,
-        "kind": lease.kind,
-        "state": lease.state,
-        "owner": lease.owner,
-        "owner_pid": lease.owner_pid,
-        "agent": lease.agent,
-        "issue": lease.issue,
-        "session": lease.session,
-        "acquired_at": _utc(lease.acquired_at),
-        "touched_at": _utc(lease.touched_at),
-        "void_reason": lease.void_reason,
-        "users": _users_json(lease.users),
-        "accounts": list(lease.accounts),
-    }
-    # The purpose is the only free text in a lease, and other agents wrote it. JSON is what
-    # agents read, so it carries the purpose only when the caller asks for it.
-    if verbose:
-        shown["purpose"] = lease.purpose
-    return shown
-
-
-def _holder_label(lease: Lease) -> str:
-    # For example "codex · #123 · verify the tablet layout". Without an issue id, the name of
-    # the worktree tells the holders apart.
-    where = lease.issue or os.path.basename(lease.owner) or lease.owner
-    return " · ".join(part for part in (lease.agent, where, lease.purpose) if part)
+    return console.processes_text(users)
 
 
 def _reaped_json(reaped: Reaped) -> dict[str, object]:
@@ -480,7 +514,7 @@ def _reaped_json(reaped: Reaped) -> dict[str, object]:
         "owner": reaped.lease.owner,
         "void_reason": reaped.lease.void_reason,
         "outcome": reaped.outcome,
-        "running": _users_json(reaped.running),
+        "running": console.users_json(reaped.running),
     }
 
 
@@ -492,42 +526,111 @@ def _cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+@dataclass(frozen=True)
+class _Status:
+    resources: list[console.Resource]
+    notes: tuple[str, ...]
+    clock: console.Clock
+    # The owner processes of the leases that run now, for the time at which a lease is void.
+    running: Mapping[int, str]
+
+
+def _status(config: Config) -> _Status:
+    store, _ = _reaped_store(config)
+    # Discovery finds the free resources and their facts. It runs before the leases are read,
+    # because it can take seconds.
+    found = search(config, load_inventory(), [Part()])
+    resources = console.resources(store.snapshot(), found)
+    machine = store.system
+    pids = console.owner_pids(resources)
+    return _Status(
+        resources,
+        found.notes,
+        console.Clock(machine.clock(), machine.wall_clock()),
+        machine.running(pids) if pids else {},
+    )
+
+
+def _status_text(status: _Status) -> str:
+    if not status.resources:
+        text = (
+            "No resources. The configuration declares the kinds, and banksman admin discover"
+            " allows the instances that agents may use."
+        )
+    else:
+        text = console.table(
+            console.STATUS_HEADER,
+            console.status_rows(status.resources, status.clock, status.running),
+        )
+    return "\n".join([text, *(clean(f"note: {note}") for note in status.notes)])
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
-    store, _ = _reaped_store()
-    snapshot = store.snapshot()
+    status = _status(load_config())
+    if args.json:
+        shown = console.status_json(
+            status.resources, status.notes, status.clock, status.running, verbose=args.verbose
+        )
+        _print_json({"schema": SCHEMA_VERSION, **shown})
+    else:
+        print(_status_text(status))
+    return 0
+
+
+def _cmd_watch(args: argparse.Namespace) -> int:
+    try:
+        while True:
+            # The configuration is read again on every refresh, as by a waiting acquire, so that
+            # the reaper uses the current hooks. An error is shown, and the next refresh tries
+            # again, for example after the operator fixed the configuration.
+            try:
+                text = _status_text(_status(load_config()))
+            except (BanksmanError, OSError) as exc:
+                text = clean(f"banksman: {exc}")
+            if sys.stdout.isatty():
+                # This command's own output, so the escape sequence is its own to write.
+                sys.stdout.write("\x1b[H\x1b[2J")
+            now = time.strftime("%H:%M:%S")
+            sys.stdout.write(
+                f"{text}\n\n{now}: shown every {console.span(args.interval)}. Press Ctrl-C to"
+                " stop.\n"
+            )
+            sys.stdout.flush()
+            _pause(args.interval)
+    except KeyboardInterrupt:
+        print()
+        return 0
+
+
+def _pause(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _cmd_log(args: argparse.Namespace) -> int:
+    # The reaper first, so that the log also has the leases that became void just now.
+    _reaped_store()
+    events, skipped = History(default_log_path()).read()
+    events = [
+        event
+        for event in events
+        if (args.since is None or event.at >= args.since)
+        and (args.resource is None or event.resource == args.resource)
+    ]
     if args.json:
         _print_json(
             {
                 "schema": SCHEMA_VERSION,
-                "leases": [
-                    _lease_json(lease, verbose=args.verbose) for lease in snapshot.leases
-                ],
-                "unreadable": [
-                    {"resource": entry.resource, "error": entry.error}
-                    for entry in snapshot.unreadable
-                ],
+                "events": [console.event_json(event, verbose=args.verbose) for event in events],
+                "skipped": skipped,
             }
         )
         return 0
-    rows = [
-        [
-            lease.resource,
-            lease.kind,
-            lease.state,
-            _holder_label(lease),
-            _local(lease.acquired_at),
-            ",".join(lease.accounts),
-        ]
-        for lease in snapshot.leases
-    ]
-    rows += [
-        [entry.resource, "?", QUARANTINED, f"unreadable lease file: {entry.error}", "?", ""]
-        for entry in snapshot.unreadable
-    ]
-    if rows:
-        _print_table(["RESOURCE", "KIND", "STATE", "HOLDER", "SINCE", "ACCOUNTS"], rows)
+    if events:
+        _print_table(console.LOG_HEADER, console.log_rows(events))
     else:
-        print("No leases.")
+        print("No events.")
+    if skipped:
+        print(f"note: {skipped} lines of the log are not valid events, so they are left out")
     return 0
 
 
@@ -624,7 +727,15 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         ]
         # Waiting helps only when the request could be met if the resources in use were free.
         if not satisfiable(needs):
-            _print_notes(found.notes)
+            _print_notes(
+                [
+                    *found.notes,
+                    *(
+                        f"{name} (kind {kind}) is allowed but not present now"
+                        for kind, name in found.absent
+                    ),
+                ]
+            )
             raise BanksmanError(_no_match(parts, found.candidates))
         granted = store.grant(
             needs,
@@ -1236,6 +1347,8 @@ def _confirm(question: str) -> bool:
 
 _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "status": _cmd_status,
+    "watch": _cmd_watch,
+    "log": _cmd_log,
     "whoami": _cmd_whoami,
     "reap": _cmd_reap,
     "enter": _cmd_enter,

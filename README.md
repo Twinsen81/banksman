@@ -6,8 +6,9 @@ one forever.
 
 > **Status: pre-alpha, not usable yet.** This repository has the design, the lease core
 > (lease files, void triggers, and the reaper), resource kinds as configuration, fencing,
-> discovery with the allowlist, holder identity, requests by properties, and joint acquire
-> with accounts. The console and build slots are not written yet. The design is in
+> discovery with the allowlist, holder identity, requests by properties, joint acquire with
+> accounts, and the console (`status`, `watch`, and `log`). `explain`, the queue of the
+> callers that wait, and build slots are not written yet. The design is in
 > [docs/DESIGN.md](docs/DESIGN.md).
 
 A *banksman* is the person on a building site who directs crane lifts and tells each

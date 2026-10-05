@@ -142,6 +142,9 @@ class Lease:
     # Awake time on the boot that boot_id names. The rules that make a lease void use only
     # these, so a machine that sleeps does not age its leases.
     touched: float
+    # When the lease was granted. With `longest_quiet`, it is the data for tuning the hard cap and
+    # the idle timeout.
+    acquired: float
     boot_deadline: float | None
     hard_deadline: float
     idle_timeout: float | None
@@ -171,6 +174,8 @@ class Lease:
     # lease in any state lists it: also while the lease drains, the scripts of its holder can
     # still use the account.
     accounts: tuple[str, ...] = ()
+    # The longest time between two touches, in seconds of awake time.
+    longest_quiet: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -191,6 +196,7 @@ class Lease:
             "acquired_at": self.acquired_at,
             "touched_at": self.touched_at,
             "awake": {
+                "acquired": self.acquired,
                 "touched": self.touched,
                 "boot_deadline": self.boot_deadline,
                 "hard_deadline": self.hard_deadline,
@@ -200,6 +206,7 @@ class Lease:
             "idle_timeout": self.idle_timeout,
             "owner_grace": self.owner_grace,
             "drain_timeout": self.drain_timeout,
+            "longest_quiet": self.longest_quiet,
             "users": [user.to_json() for user in self.users],
             "accounts": list(self.accounts),
             "void_reason": self.void_reason,
@@ -228,17 +235,18 @@ class Lease:
             resource=_get(data, "resource", _is_resource),
             kind=_get(data, "kind", _is_kind),
             state=_get(data, "state", lambda value: isinstance(value, str) and value in STATES),
-            owner=_get(data, "owner", _is_owner),
+            owner=_get(data, "owner", is_owner),
             owner_pid=_get(data, "owner_pid", _optional(_is_pid)),
             owner_started=_get(data, "owner_started", _optional(_is_text)),
             issue=_get(data, "issue", _optional(_is_issue)),
             agent=_get(data, "agent", _optional(_is_program_name)),
             session=_get(data, "session", _optional(_is_session)),
-            purpose=_get(data, "purpose", _optional(_is_purpose)),
+            purpose=_get(data, "purpose", _optional(is_purpose)),
             boot_id=_get(data, "boot_id", _is_text),
-            acquired_at=_get(data, "acquired_at", _is_wall_time),
-            touched_at=_get(data, "touched_at", _is_wall_time),
+            acquired_at=_get(data, "acquired_at", is_wall_time),
+            touched_at=_get(data, "touched_at", is_wall_time),
             touched=_get(awake, "touched", _is_number),
+            acquired=_get(awake, "acquired", _is_number),
             boot_deadline=_get(awake, "boot_deadline", _optional(_is_number)),
             hard_deadline=_get(awake, "hard_deadline", _is_number),
             drain_deadline=_get(awake, "drain_deadline", _optional(_is_number)),
@@ -246,6 +254,7 @@ class Lease:
             idle_timeout=_get(data, "idle_timeout", _optional(_is_number)),
             owner_grace=_get(data, "owner_grace", _is_number),
             drain_timeout=_get(data, "drain_timeout", _is_number),
+            longest_quiet=_get(data, "longest_quiet", _is_seconds),
             users=tuple(User.from_json(user) for user in users),
             accounts=tuple(accounts),
             void_reason=_get(data, "void_reason", _optional(_is_void_reason)),
@@ -279,7 +288,7 @@ def check_names(resource: str, kind: str, holder: Holder) -> None:
     check_resource(resource)
     if not _is_kind(kind):
         raise BanksmanError(f"not a valid kind name: {kind!r}")
-    if not _is_owner(holder.owner):
+    if not is_owner(holder.owner):
         raise BanksmanError(f"not a valid owner: {holder.owner!r}")
     if holder.issue is not None and not _is_issue(holder.issue):
         raise BanksmanError(
@@ -290,7 +299,7 @@ def check_names(resource: str, kind: str, holder: Holder) -> None:
         raise BanksmanError(f"not a valid agent program name: {holder.agent!r}")
     if holder.session is not None and not _is_session(holder.session):
         raise BanksmanError(f"not a valid session id: {holder.session!r}")
-    if holder.purpose is not None and not _is_purpose(holder.purpose):
+    if holder.purpose is not None and not is_purpose(holder.purpose):
         raise BanksmanError(
             f"a purpose has 1 to {MAX_PURPOSE_LENGTH} characters and no control characters"
         )
@@ -325,6 +334,35 @@ def owner_runs(lease: Lease, running: Mapping[int, str]) -> bool:
     return lease.owner_pid is not None and running.get(lease.owner_pid) == lease.owner_started
 
 
+@dataclass(frozen=True)
+class FreeBy:
+    """When a held lease can end, in awake time.
+
+    banksman cannot know when a holder gives a resource back, so only `latest` is a promise.
+    """
+
+    # The holder's own estimate, from --expect.
+    expected: float | None
+    # The hard cap, which the reaper enforces.
+    latest: float
+    # When the lease becomes void if nothing touches it again.
+    abandoned: float
+
+
+def free_by(lease: Lease, running: Mapping[int, str]) -> FreeBy | None:
+    """Return when a held lease can end, or None for a lease that is not held."""
+    if lease.state not in HELD:
+        return None
+    ends = [lease.hard_deadline]
+    if lease.state == BOOTING and lease.boot_deadline is not None:
+        ends.append(lease.boot_deadline)
+    if lease.idle_timeout is not None:
+        ends.append(lease.touched + lease.idle_timeout)
+    if lease.owner_pid is not None and not owner_runs(lease, running):
+        ends.append(lease.touched + lease.owner_grace)
+    return FreeBy(lease.expected, lease.hard_deadline, min(ends))
+
+
 def _get(data: Mapping[str, object], key: str, check: Callable[[object], bool]) -> Any:
     value = data.get(key)
     if not check(value):
@@ -345,7 +383,11 @@ def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def _is_wall_time(value: object) -> bool:
+def _is_seconds(value: object) -> bool:
+    return _is_number(value) and value >= 0  # type: ignore[operator]
+
+
+def is_wall_time(value: object) -> bool:
     return _is_number(value) and 0 <= value <= _MAX_WALL_TIME  # type: ignore[operator]
 
 
@@ -390,7 +432,7 @@ def _is_session(value: object) -> bool:
     return isinstance(value, str) and SESSION.fullmatch(value) is not None
 
 
-def _is_purpose(value: object) -> bool:
+def is_purpose(value: object) -> bool:
     return (
         isinstance(value, str)
         and 0 < len(value) <= MAX_PURPOSE_LENGTH
@@ -398,7 +440,7 @@ def _is_purpose(value: object) -> bool:
     )
 
 
-def _is_owner(value: object) -> bool:
+def is_owner(value: object) -> bool:
     return (
         isinstance(value, str)
         and 0 < len(value) <= _MAX_OWNER_LENGTH

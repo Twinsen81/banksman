@@ -1,11 +1,12 @@
 # banksman design
 
 **Status:** the project scaffold, the lease core, kinds as configuration, fencing, discovery,
-holder identity, requests by properties, and joint acquire with accounts exist. Sections 3 to
-9 are implemented, with `banksman acquire`, `touch`, `release`, `reap`, a `status` that
-lists the leases and their holders, `banksman whoami`, the commands that scripts run
-(`enter`, `check`, and `leave`), `banksman admin discover`, and
-`banksman admin release --force`. The console and build slots are not implemented yet.
+holder identity, requests by properties, joint acquire with accounts, and the console exist.
+Sections 3 to 9 are implemented, with `banksman acquire`, `touch`, `release`, `reap`,
+`banksman whoami`, the commands that scripts run (`enter`, `check`, and `leave`),
+`banksman admin discover`, and `banksman admin release --force`. Of section 10, `status`,
+`watch`, and `log` are implemented. `explain`, the queue of the callers that wait, and build
+slots are not implemented yet.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
 
@@ -160,7 +161,8 @@ minutes, and its lease can become void in the middle.
   stays in `status` until a person runs `banksman admin release --force`, also when the
   script ends later. That command refuses while a banksman process takes the lease back or
   resets its instance, because that process could act on the instance of the next holder. The command that
-  quarantines the lease names the processes that still run, on standard error. The reason:
+  quarantines the lease names the processes that still run, on standard error, and the log
+  records them, with whether stopping was on for the kind (section 10). The reason:
   banksman must never stop a process that the user did not expect, whatever agent the user
   runs. A blocked device costs time; a stopped process costs trust.
 - **A release waits for the scripts too.** When the holder releases a lease while its
@@ -598,21 +600,56 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
 
 ## 10. Status, queries, and history
 
-- `banksman status` prints one table with every resource, free ones included: resource,
-  kind, form and API level, state, holder, since, last use, free by, and the callers that
-  wait. `banksman watch` refreshes the same table.
-- `banksman status --json` carries the same data for agents and other tools.
-- `banksman explain --where ...` answers the question "can I get one now?". For each
-  matching resource it says free, held by whom and until when, not permitted, not present,
-  or quarantined, and it gives the caller's place in the queue. An agent can then decide to
-  wait or to do something else.
+- `banksman status` prints one table with every resource that agents may use, free ones
+  included, and every resource that has a lease file: resource, kind, form and API level,
+  state, since, last use, the three "free by" values, the accounts of the lease, and the
+  holder. The state is `free`, `booting`, `ready`, `draining`, `quarantined`, `absent` for an
+  allowed instance that discovery does not find now, or `unreadable` for a lease file that
+  cannot be read. An instance that discovery finds but that the inventory does not allow is
+  never shown, also not to agents, because it can be personal. `status` runs discovery, so
+  it takes as long as one look of `acquire`. Under the table, it shows why the discovery of a
+  kind failed, and how many other notes the discovery has. Those notes can name an instance
+  that agents may not use, such as a personal phone that is not authorized, so the commands
+  for agents, `status` and `acquire`, never show their text; `banksman admin discover` does.
+- `banksman watch` shows the same table again every 5 seconds, or at `--interval`. Each
+  refresh reaps, reads the configuration again, and runs discovery. An error is shown in
+  place of the table, and the next refresh tries again.
+- `banksman status --json` carries the same data for agents and other tools: for each
+  resource its kind, its state, whether it is present now, the facts `form` and `api`, and
+  its lease. The purpose only with `--verbose` (section 9).
 - **"Free by"** cannot be known, so it shows three labeled values:
   1. expected: the holder's `--expect`, only a hint, or unknown;
   2. at the latest: the hard cap, which the reaper enforces;
-  3. if abandoned: the last touch plus the idle timeout.
-- `banksman log` keeps an append-only history of acquire, release, void, reap, and
-  quarantine events, with the holder. It answers "who held this device at 3 a.m.?", and it
-  gives the data for tuning the idle timeout and the hard cap.
+  3. if abandoned: when the lease becomes void if nothing touches it again. That is the last
+     touch plus the idle timeout, or plus the owner grace when the owner process has ended,
+     and never later than the hard cap.
+
+  The table shows them as times of day. The deadlines count awake time (section 3), so a
+  time of day moves later when the machine sleeps. The JSON gives each value as a UTC time
+  and as seconds from now (`in`), which is negative for an expected time that has passed. A
+  draining lease has no "free by" values: it is free when its scripts end, and the JSON gives
+  its drain deadline instead.
+- `banksman log` shows the history of acquire, release, void, reap, quarantine, and forced
+  release events, with the holder. With `--since` and `--resource`, it answers "who held this
+  device at 3 a.m.?". A release and a void record how long the lease was held and the longest
+  time between two touches, both in awake time. They are the data for tuning the hard cap and
+  the idle timeout. A quarantine records its problem, or the scripts that still ran at the
+  drain deadline and whether stopping was on for the kind, so that an operator can see what
+  the reaper would have stopped before turning `stop = true` on (section 4).
+- **The log file** is `~/.local/state/banksman/log.jsonl`, with the home directory from the
+  user database. It is outside `/tmp`, as the quarantines are, because the history must
+  outlive restarts and cleaners of temporary files. It has one JSON object for each event,
+  each with the `schema` number, and banksman adds to it only under the lock of the lease
+  store. At 10 MB, banksman starts a new file and keeps the earlier one as `log.jsonl.1`. When
+  the log cannot be written, the command still does its work and prints a warning: the change
+  to the lease is already written. `log` leaves out a line that is not a valid event, and says
+  how many it left out. `BANKSMAN_LOG` changes the path for tests; when only
+  `BANKSMAN_STATE_DIR` is set, the log is next to that directory.
+- Not implemented yet: `banksman explain --where ...` answers the question "can I get one
+  now?". For each matching resource it says free, held by whom and until when, not
+  permitted, not present, or quarantined, and it gives the caller's place in the queue. An
+  agent can then decide to wait or to do something else. The queue of the callers that wait
+  comes with it, and `status` then also shows the callers that wait for each resource.
 
 ## 11. Build slots
 
@@ -629,8 +666,7 @@ kind in the same pool.
 
 ## 12. Command line (sketch)
 
-`watch`, `explain`, `log`, and `acquire --kind build --user-pid` do not exist yet. The rest
-exists.
+`explain` and `acquire --kind build --user-pid` do not exist yet. The rest exists.
 
 ```
 banksman acquire [--as <part>] [--where <attr><op><value> ...] [--accounts <n>] ...
@@ -645,9 +681,9 @@ banksman release --lease <id> [--resource <name>]                  # the holding
 banksman release --all [--owner-pid <pid>]                         # the leases of this agent
 banksman status  [--json] [--verbose]
 banksman whoami  [--json]
-banksman watch
+banksman watch   [--interval <duration>]
 banksman explain --where <attr><op><value> ...
-banksman log     [--since <time>]
+banksman log     [--since <time>] [--resource <name>] [--json] [--verbose]
 banksman reap
 banksman version [--json]
 
@@ -669,8 +705,8 @@ permission rules can refuse all of them with one pattern, including ones added l
 - Lease files and every JSON document carry a `schema` number. A caller refuses a schema
   it does not know, instead of guessing.
 - The surfaces treated as public API are the CLI (commands, flags, exit codes, `KEY=value`
-  output), the JSON output, the lease file format, the configuration files, and the hook
-  contract.
+  output), the JSON output, the lease file format, the log file format, the configuration
+  files, and the hook contract.
 - There is no library API. Every client, a project's scripts and other tools alike, calls
   the command. So a machine has exactly one lease implementation, and two versions of the
   lease logic never write the same lease files.
@@ -707,10 +743,11 @@ Done:
   `release`; and the `on_acquire` hook.
 - Joint acquire: several resources in one call, one holding for each call, and accounts
   leased with their device.
+- The console: `status` with every resource and when it can be free, `watch`, and the `log`.
 
 Next:
 
-- `status`, `watch`, `explain`, and `log`, and a queue for the callers that wait.
+- `explain`, and a queue for the callers that wait.
 - Keeping a lease while an agent waits for a person, and getting the same resource back
   after a lease ends.
 - Build slots through a Gradle init script.
@@ -731,7 +768,8 @@ Next:
   Codex background server keeps running after its session ends. `banksman whoami` shows
   what banksman finds in each setup.
 - Is the idle timeout longer than the longest silent period of a legitimate run, for
-  example a cold build that also waits for a build slot?
+  example a cold build that also waits for a build slot? The log records the longest time
+  between two touches of each lease that its holder released (section 10).
 - Some agents run their shell commands in a sandbox. On macOS, a sandboxed command cannot
   start `ps`, because `ps` is a setuid program, and banksman needs `ps` to check owner
   processes. So banksman must run outside the agent's sandbox. Which setting does each agent

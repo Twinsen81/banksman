@@ -146,7 +146,7 @@ def test_a_discover_hook_prints_the_document():
 )
 def test_a_discover_hook_that_fails_gives_a_note(code, note):
     found = discovery.discover(Kind("lab", discover=tuple(hook(code))), Config())
-    assert found == Found("lab", (), (note,))
+    assert found == Found("lab", (), (note,), failure=note)
 
 
 def test_a_preset_returns_the_same_document(monkeypatch):
@@ -168,7 +168,9 @@ def test_a_preset_that_fails_gives_a_note(monkeypatch):
 
     monkeypatch.setattr(android, "devices", fails)
     found = discovery.discover(Kind("device", preset="android-device"), Config())
-    assert found == Found("device", (), ("cannot find the home directory",))
+    assert found == Found(
+        "device", (), ("cannot find the home directory",), failure="cannot find the home directory"
+    )
 
 
 def test_the_output_of_a_discover_hook_has_a_limit():

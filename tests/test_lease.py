@@ -11,6 +11,7 @@ from banksman.lease import (
     HARD_CAP,
     IDLE,
     OWNER_GONE,
+    QUARANTINED,
     READY,
     REBOOTED,
     Holder,
@@ -18,6 +19,7 @@ from banksman.lease import (
     LeaseFormatError,
     User,
     check_names,
+    free_by,
     void_reason,
 )
 
@@ -35,6 +37,7 @@ LEASE = Lease(
     acquired_at=1_790_000_000.0,
     touched_at=1_790_000_000.0,
     touched=START,
+    acquired=START,
     boot_deadline=None,
     hard_deadline=START + 3 * 60 * 60,
     idle_timeout=20 * 60,
@@ -241,3 +244,33 @@ def test_holder_fields_that_are_not_valid_are_refused(holder):
     with pytest.raises(BanksmanError):
         check_names("phone-1", "device", holder)
 
+
+def test_a_held_lease_is_free_at_the_latest_at_its_hard_cap():
+    ends = free_by(replace(LEASE, expected=START + 600), {})
+    assert (ends.expected, ends.latest, ends.abandoned) == (
+        START + 600,
+        START + 3 * 60 * 60,
+        START + 20 * 60,
+    )
+
+
+def test_an_abandoned_lease_ends_at_its_idle_timeout_or_its_hard_cap():
+    assert free_by(LEASE, {}).abandoned == START + 20 * 60
+    assert free_by(replace(LEASE, idle_timeout=None), {}).abandoned == START + 3 * 60 * 60
+
+
+def test_a_lease_whose_owner_has_ended_is_abandoned_after_the_grace_period():
+    assert free_by(OWNED, {42: "start-42"}).abandoned == START + 20 * 60
+    assert free_by(OWNED, {}).abandoned == START + 5 * 60
+    # A pid that the system gave to a new process does not keep the owner alive.
+    assert free_by(OWNED, {42: "start-other"}).abandoned == START + 5 * 60
+
+
+def test_a_booting_lease_is_abandoned_at_its_boot_deadline():
+    booting = replace(LEASE, state=BOOTING, boot_deadline=START + 60)
+    assert free_by(booting, {}).abandoned == START + 60
+
+
+@pytest.mark.parametrize("state", [DRAINING, QUARANTINED])
+def test_a_lease_that_is_not_held_has_no_free_by_values(state):
+    assert free_by(replace(LEASE, state=state, void_reason=IDLE), {}) is None

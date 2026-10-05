@@ -147,3 +147,26 @@ def reap_in_child(state_dir: Path) -> list:
         timeout=60,
     )
     return json.loads(result.stdout)["reaped"]
+
+
+def table_rows(text: str) -> list[dict[str, str]]:
+    """Return the rows of a table that banksman printed, by the names in its header.
+
+    Every column starts where its name starts in the header, so a cell can have spaces.
+    """
+    header, *lines = text.splitlines()
+    names, starts, position = [], [], 0
+    for name in header.split("  "):
+        if not name.strip():
+            position += len(name) + 2
+            continue
+        start = header.index(name.strip(), position)
+        names.append(name.strip())
+        starts.append(start)
+        position = start + len(name.strip())
+    ends = [*starts[1:], None]
+    return [
+        {name: line[start:end].strip() for name, start, end in zip(names, starts, ends)}
+        for line in lines
+        if line.strip()
+    ]
