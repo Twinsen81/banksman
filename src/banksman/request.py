@@ -78,8 +78,10 @@ class Search:
     # For each part, the matching resources, free or held, in the order in which banksman
     # chooses them.
     candidates: tuple[tuple[Candidate, ...], ...]
-    # What discovery reported, and allowed instances that are not present now.
+    # What discovery reported.
     notes: tuple[str, ...] = ()
+    # The allowed instances that discovery does not find now, as (kind, name).
+    absent: tuple[tuple[str, str], ...] = ()
 
 
 def parse_clause(text: str) -> Clause:
@@ -132,6 +134,7 @@ def search(
     declared = {name: kind.name for kind in config.kinds.values() for name in kind.instances()}
     found_facts: dict[str, set[str]] = {}
     notes: list[str] = []
+    absent: list[tuple[str, str]] = []
     resources: list[Candidate] = []
     for kind in config.kinds.values():
         if kind.name not in wanted:
@@ -166,11 +169,7 @@ def search(
             resources.append(Candidate(instance.name, kind.name, kind.rank, facts, tags, accounts))
         present = {instance.name for instance in found.instances}
         allowed = inventory.kinds[kind.name].allowed if kind.name in inventory.kinds else ()
-        notes.extend(
-            f"{name} (kind {kind.name}) is allowed but not present now"
-            for name in allowed
-            if name not in present
-        )
+        absent.extend((kind.name, name) for name in allowed if name not in present)
     candidates = []
     for part, kinds in zip(parts, kinds_of):
         names = {kind.name for kind in kinds}
@@ -190,7 +189,7 @@ def search(
         # holder must start, which saves the time and the memory of a start.
         matching.sort(key=lambda candidate: (candidate.rank, candidate.cold, candidate.resource))
         candidates.append(tuple(matching))
-    return Search(tuple(candidates), tuple(notes))
+    return Search(tuple(candidates), tuple(notes), tuple(absent))
 
 
 def _kinds(config: Config, part: Part) -> list[Kind]:

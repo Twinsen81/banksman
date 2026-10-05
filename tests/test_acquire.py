@@ -4,7 +4,7 @@ import json
 import os
 
 import pytest
-from helpers import age_lease, hook, write_config
+from helpers import age_lease, hook, table_rows, write_config
 
 from banksman import cli
 from banksman.cli import main
@@ -430,10 +430,11 @@ def test_status_shows_the_accounts_of_a_lease(capsys, config_path):
     configure_paired(config_path)
     acquire(capsys, "--where", "form=phone", "--accounts", "1")
     assert main(["status"]) == 0
-    assert capsys.readouterr().out.splitlines()[1].endswith("qa@example.test")
+    rows = {row["RESOURCE"]: row for row in table_rows(capsys.readouterr().out)}
+    assert rows["R5CR0001"]["ACCOUNTS"] == "qa@example.test"
     assert main(["status", "--json"]) == 0
-    (lease,) = json.loads(capsys.readouterr().out)["leases"]
-    assert lease["accounts"] == ["qa@example.test"]
+    shown = {each["resource"]: each for each in json.loads(capsys.readouterr().out)["resources"]}
+    assert shown["R5CR0001"]["lease"]["accounts"] == ["qa@example.test"]
 
 
 @pytest.mark.parametrize(

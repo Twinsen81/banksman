@@ -3,7 +3,7 @@ from helpers import FakeSystem
 
 from banksman.config import CONFIG_ENV
 from banksman.inventory import INVENTORY_ENV
-from banksman.store import QUARANTINE_DIR_ENV, STATE_DIR_ENV, Store
+from banksman.store import LOG_ENV, QUARANTINE_DIR_ENV, STATE_DIR_ENV, Store
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +19,14 @@ def quarantine_dir(tmp_path, monkeypatch):
     # No test may write quarantines into the real home directory.
     path = tmp_path / "home" / ".local" / "state" / "banksman" / "quarantine"
     monkeypatch.setenv(QUARANTINE_DIR_ENV, str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
+def log_path(tmp_path, monkeypatch):
+    # No test may write into the real log.
+    path = tmp_path / "home" / ".local" / "state" / "banksman" / "log.jsonl"
+    monkeypatch.setenv(LOG_ENV, str(path))
     return path
 
 

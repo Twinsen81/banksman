@@ -96,6 +96,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ACCOUNTS`. No request gets an account while a lease in any state lists it, so two runs
   never use one account on two devices at the same time. `status` shows the accounts of each
   lease. Lease files carry the accounts and the holding, so their schema is now 4.
+- The console. `banksman status` shows every resource that agents may use, free ones
+  included, with its form and API level, its state, since when it is held, its last use, when
+  it can be free (expected, at the latest, and if abandoned), its accounts, and its holder. It
+  never shows a discovered instance that the inventory does not allow. `status --json`
+  carries the same data in a new shape, a list `resources` and the `notes` of discovery.
+  `banksman watch` shows the table again every few seconds.
+- `banksman log` shows the history of acquire, release, void, reap, quarantine, and forced
+  release events, kept in `~/.local/state/banksman/log.jsonl`, with `--since` and
+  `--resource`. A release and a void record how long the lease was held and the longest time
+  between two touches; a quarantine records the scripts that still ran and whether stopping
+  was on for the kind. Lease files carry the time of the grant and the longest time between
+  two touches, so their schema is now 5.
 - Design document ([docs/DESIGN.md](docs/DESIGN.md)), recorded decisions
   ([DECISIONS.md](DECISIONS.md)), security policy and threat model
   ([SECURITY.md](SECURITY.md)), and contribution guide.

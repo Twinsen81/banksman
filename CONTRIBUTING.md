@@ -26,7 +26,8 @@ that already run on the machine.
 ## Project layout
 
 - `src/banksman/`: the package. `cli.py` is the entry point, `store.py` keeps the lease
-  files, `config.py` reads the configuration file, `fencing.py` has the rules for the
+  files, `history.py` keeps the log, `console.py` builds what `status` and `watch` show,
+  `config.py` reads the configuration file, `fencing.py` has the rules for the
   scripts that use a resource and for the signals that the reaper may send, `identity.py`
   finds the holder of a lease, `discovery.py` checks what discovery finds, `inventory.py`
   reads and writes the allowlist, `hooks.py` is the only module that runs hook programs

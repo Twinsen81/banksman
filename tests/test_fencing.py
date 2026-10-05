@@ -40,6 +40,7 @@ LEASE = Lease(
     acquired_at=1_790_000_000.0,
     touched_at=1_790_000_000.0,
     touched=1000.0,
+    acquired=1000.0,
     boot_deadline=None,
     hard_deadline=1000.0 + 3 * 60 * 60,
     idle_timeout=20 * 60,

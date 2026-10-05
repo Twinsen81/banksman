@@ -164,7 +164,7 @@ def test_an_allowed_instance_that_is_not_present_is_reported_not_offered():
     part = Part((parse_clause("kind=emulator"),))
     result = search(CONFIG, INVENTORY, [part], discover=FakeDiscovery())
     assert "qa_gone" not in [candidate.resource for candidate in result.candidates[0]]
-    assert "qa_gone (kind emulator) is allowed but not present now" in result.notes
+    assert ("emulator", "qa_gone") in result.absent
 
 
 def test_the_notes_of_discovery_name_their_kind():
