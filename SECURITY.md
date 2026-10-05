@@ -78,7 +78,9 @@ another kind or like one with an allowed account. A request grants only what the
 configuration declares or the inventory allows, also when it names a resource, and an
 account only when the inventory allows it. `status` shows only the resources that the configuration
 declares or the inventory allows, and the resources that have a lease, so it never shows an
-instance that the operator did not allow, which can be personal.
+instance that the operator did not allow, which can be personal. A note of discovery can name
+such an instance, so `status` and `acquire` show only why a discovery failed and how many other
+notes it has; only `banksman admin discover` shows the notes.
 
 **A grant is safe to read in a shell.** The `KEY=value` lines of `acquire` carry only the
 resource name, the kind, the lease id, the state, a serial, and the granted accounts, and each

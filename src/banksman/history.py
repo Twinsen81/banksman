@@ -158,12 +158,12 @@ class Event:
             raise ValueError("accounts is not valid")
         return cls(
             at=_get(data, "at", is_wall_time),
-            event=_get(data, "event", lambda value: value in EVENTS),
+            event=_get(data, "event", _one_of(EVENTS)),
             resource=_get(data, "resource", _is_name),
             kind=_get(data, "kind", _optional(_matches(KIND_NAME))),
             lease_id=_get(data, "lease_id", _optional(_is_name)),
             holding=_get(data, "holding", _optional(_is_name)),
-            state=_get(data, "state", _optional(lambda value: value in STATES)),
+            state=_get(data, "state", _optional(_one_of(STATES))),
             owner=_get(data, "owner", _optional(is_owner)),
             owner_pid=_get(data, "owner_pid", _optional(_is_pid)),
             agent=_get(data, "agent", _optional(_matches(PROGRAM_NAME))),
@@ -171,7 +171,7 @@ class Event:
             session=_get(data, "session", _optional(_matches(SESSION))),
             purpose=_get(data, "purpose", _optional(is_purpose)),
             accounts=tuple(accounts),
-            reason=_get(data, "reason", _optional(lambda value: value in VOID_REASONS)),
+            reason=_get(data, "reason", _optional(_one_of(VOID_REASONS))),
             held=_get(data, "held", _optional(_is_seconds)),
             longest_quiet=_get(data, "longest_quiet", _optional(_is_seconds)),
             drained=_get(data, "drained", _optional(lambda value: isinstance(value, bool))),
@@ -281,6 +281,11 @@ def _get(data: dict[str, Any], key: str, check: Any) -> Any:
 
 def _optional(check: Any) -> Any:
     return lambda value: value is None or check(value)
+
+
+def _one_of(names: Any) -> Any:
+    # A list or an object in a line would fail the membership test of a dict with TypeError.
+    return lambda value: isinstance(value, str) and value in names
 
 
 def _matches(pattern: re.Pattern[str]) -> Any:

@@ -145,6 +145,26 @@ def test_status_shows_the_notes_of_discovery(capsys, config_path):
     ]
 
 
+def test_status_does_not_show_a_note_that_can_name_a_personal_device(capsys, config_path):
+    found = {
+        "schema": 1,
+        "instances": [{"name": "qa_phone", "facts": {"form": "phone"}}],
+        "notes": ["R5CR_PERSONAL is unauthorized, so it is not offered"],
+    }
+    write_config(
+        config_path,
+        f"[kinds.device]\ndiscover = {json.dumps(hook(PRINT_ARGUMENT, json.dumps(found)))}\n",
+    )
+    save_inventory(Inventory(kinds={"device": Decisions(allowed=("qa_phone",))}))
+    expected = "kind device: discovery has 1 other note; banksman admin discover shows it"
+    assert main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "R5CR_PERSONAL" not in out
+    assert out.splitlines()[-1] == f"note: {expected}"
+    assert main(["status", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["notes"] == [expected]
+
+
 def test_watch_shows_the_table_until_it_is_stopped(capsys, config_path, monkeypatch):
     configure(config_path)
     pauses = []

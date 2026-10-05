@@ -219,6 +219,9 @@ def test_the_log_starts_again_and_keeps_the_earlier_file(tmp_path):
         {"resource": "../../etc/passwd"},
         {"running": [{"pid": 0, "pgid": None}]},
         {"held": float("nan")},
+        {"reason": []},
+        {"state": {}},
+        {"event": ["acquire"]},
     ],
 )
 def test_a_line_that_is_not_a_valid_event_is_left_out(tmp_path, change):

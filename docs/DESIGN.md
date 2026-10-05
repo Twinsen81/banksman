@@ -607,7 +607,10 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   allowed instance that discovery does not find now, or `unreadable` for a lease file that
   cannot be read. An instance that discovery finds but that the inventory does not allow is
   never shown, also not to agents, because it can be personal. `status` runs discovery, so
-  it takes as long as one look of `acquire`.
+  it takes as long as one look of `acquire`. Under the table, it shows why the discovery of a
+  kind failed, and how many other notes the discovery has. Those notes can name an instance
+  that agents may not use, such as a personal phone that is not authorized, so the commands
+  for agents, `status` and `acquire`, never show their text; `banksman admin discover` does.
 - `banksman watch` shows the same table again every 5 seconds, or at `--interval`. Each
   refresh reaps, reads the configuration again, and runs discovery. An error is shown in
   place of the table, and the next refresh tries again.

@@ -99,8 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The console. `banksman status` shows every resource that agents may use, free ones
   included, with its form and API level, its state, since when it is held, its last use, when
   it can be free (expected, at the latest, and if abandoned), its accounts, and its holder. It
-  never shows a discovered instance that the inventory does not allow. `status --json`
-  carries the same data in a new shape, a list `resources` and the `notes` of discovery.
+  never shows a discovered instance that the inventory does not allow, and it shows the notes
+  of discovery only as a count, because they can name such an instance; `acquire` does the
+  same. `status --json` carries the same data in a new shape, a list `resources` and `notes`.
   `banksman watch` shows the table again every few seconds.
 - `banksman log` shows the history of acquire, release, void, reap, quarantine, and forced
   release events, kept in `~/.local/state/banksman/log.jsonl`, with `--since` and

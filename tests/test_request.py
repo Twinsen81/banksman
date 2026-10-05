@@ -1,7 +1,9 @@
+import sys
+
 import pytest
 
 from banksman.config import ANDROID_DEVICE, ANDROID_EMULATOR, Config, Kind
-from banksman.discovery import parse
+from banksman.discovery import discover, parse
 from banksman.errors import BanksmanError
 from banksman.inventory import Decisions, Inventory
 from banksman.request import Clause, Part, matches, parse_clause, search
@@ -167,9 +169,20 @@ def test_an_allowed_instance_that_is_not_present_is_reported_not_offered():
     assert ("emulator", "qa_gone") in result.absent
 
 
-def test_the_notes_of_discovery_name_their_kind():
+def test_agents_see_how_many_notes_discovery_has_but_not_the_notes():
+    # A note can name a device that agents may not use, such as a personal phone.
     result = search(CONFIG, INVENTORY, [Part()], discover=FakeDiscovery())
-    assert "kind device: 0A1B2C3D is unauthorized, so it is not offered" in result.notes
+    assert result.notes == (
+        "kind device: discovery has 1 other note; banksman admin discover shows it",
+    )
+
+
+def test_agents_see_why_a_discovery_failed():
+    def failing(kind, config):
+        return discover(Kind(kind.name, discover=(sys.executable, "-c", "exit(3)")), config)
+
+    result = search(CONFIG, INVENTORY, [Part()], discover=failing)
+    assert "kind device: the discover hook failed with exit status 3" in result.notes
 
 
 def test_without_an_inventory_no_discovered_instance_matches():

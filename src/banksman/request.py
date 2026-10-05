@@ -78,7 +78,7 @@ class Search:
     # For each part, the matching resources, free or held, in the order in which banksman
     # chooses them.
     candidates: tuple[tuple[Candidate, ...], ...]
-    # What discovery reported.
+    # What agents may see of the notes of discovery.
     notes: tuple[str, ...] = ()
     # The allowed instances that discovery does not find now, as (kind, name).
     absent: tuple[tuple[str, str], ...] = ()
@@ -148,7 +148,7 @@ def search(
             )
             continue
         found = discover(kind, config)
-        notes.extend(f"kind {kind.name}: {note}" for note in found.notes)
+        notes.extend(_shown_notes(found))
         for instance in found.instances:
             found_facts[kind.name].update(instance.facts)
             # A name has one lease file, so a name that another kind declares is not this kind's.
@@ -190,6 +190,24 @@ def search(
         matching.sort(key=lambda candidate: (candidate.rank, candidate.cold, candidate.resource))
         candidates.append(tuple(matching))
     return Search(tuple(candidates), tuple(notes), tuple(absent))
+
+
+def _shown_notes(found: Found) -> list[str]:
+    """Return what agents may see of the notes of a discovery.
+
+    A note of a hook or a preset can name an instance that the inventory does not allow, such as
+    a personal phone that is not authorized. So agents see only why the discovery failed, and how
+    many other notes it has. The operator sees them with banksman admin discover.
+    """
+    shown = [] if found.failure is None else [f"kind {found.kind}: {found.failure}"]
+    hidden = len(found.notes) - len(shown)
+    if hidden:
+        notes = "1 other note" if hidden == 1 else f"{hidden} other notes"
+        them = "it" if hidden == 1 else "them"
+        shown.append(
+            f"kind {found.kind}: discovery has {notes}; banksman admin discover shows {them}"
+        )
+    return shown
 
 
 def _kinds(config: Config, part: Part) -> list[Kind]:
