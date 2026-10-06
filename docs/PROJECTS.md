@@ -78,7 +78,7 @@ project, and source it from the scripts that use a device. It is POSIX `sh`.
 |---|---|---|
 | `banksman_acquire [OPTION ...]` | Runs `banksman acquire` with the options, and sets `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_LEASE`, and `BANKSMAN_SERIAL` and `BANKSMAN_ACCOUNTS` when the grant has them. Returns the status of `acquire`, for example 4 when every matching resource is in use. | Returns 0, and sets nothing. |
 | `banksman_run COMMAND [ARGUMENT ...]` | Runs the command with `banksman run` under the lease. Returns the status of the command, or 3 when the lease was lost. | Runs the command as it is. |
-| `banksman_release` | Gives back the lease that `banksman_acquire` got in this script. | Does nothing. |
+| `banksman_release` | Gives back the new lease that `banksman_acquire` got in this script. A lease that `acquire` kept stays with the caller. | Does nothing. |
 
 ```sh
 #!/bin/sh
@@ -97,9 +97,12 @@ error, gives the lease back in a trap: `trap banksman_release EXIT`.
 
 A script that is given a lease keeps it. When `BANKSMAN_LEASE` is set when the script starts,
 for example because an agent runs `BANKSMAN_LEASE=<id> ./scripts/ui-tests.sh`,
-`banksman_acquire` passes it with `--lease`, and `banksman_release` does not give it back: the
-lease stays with the caller, who releases it. Inside `banksman run`, `BANKSMAN_LEASE` names
-the lease of the run, so a script that the run starts uses that lease in the same way.
+`banksman_acquire` passes it with `--lease`. When `acquire` keeps a lease of the caller's
+holding (`KEPT=true`), also one with another id than the one that the caller gave,
+`banksman_release` does not give it back: the lease stays with the caller, who releases it. A
+new lease, also one that joins the caller's holding, the script gives back. Inside
+`banksman run`, `BANKSMAN_LEASE` names the lease of the run, so a script that the run starts
+uses that lease in the same way, and the lease keeps the run as its owner process.
 
 The helper reads only a grant with one part. A script that needs several resources at the same
 time calls `banksman acquire` with `--as` itself.
@@ -112,8 +115,9 @@ the tests of the project, and put it on `PATH` as `banksman`:
 
 - It appends each call to the file that `BANKSMAN_STUB_LOG` names, one line for each call.
 - `acquire` grants the resource `stub-0` with the lease `stub-lease` and the serial
-  `stub-serial`. With `BANKSMAN_STUB_STATUS` set, for example to 4 for a busy machine, it
-  prints nothing and exits with that status.
+  `stub-serial`. With `--lease`, it keeps that lease (`KEPT=true`). With
+  `BANKSMAN_STUB_STATUS` set, for example to 4 for a busy machine, it prints nothing and exits
+  with that status.
 - `run` runs the command after `--`, with the environment that `banksman run --lease` gives
   it: `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, and `BANKSMAN_LEASE`, and no `BANKSMAN_SERIAL`.
   Every other command does nothing.

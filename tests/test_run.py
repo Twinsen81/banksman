@@ -444,7 +444,7 @@ def test_a_command_whose_input_is_not_the_terminal_does_not_get_it(state_dir):
     )
     pid, terminal = at_terminal(lease_on(state_dir), code, input_from_terminal=False)
     try:
-        assert "foreground False" in _read_until(terminal, "foreground ")
+        assert "foreground False" in _read_until(terminal, "foreground False", timeout=10)
         _read_until(terminal, "never printed", timeout=5)
         _, status = os.waitpid(pid, 0)
         assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
@@ -515,14 +515,22 @@ def _end_terminal_test(pid, terminal):
     # The terminal closes first: on macOS, a process that ends waits until what it wrote to its
     # terminal is read.
     os.close(terminal)
+    _UNREAD.pop(terminal, None)
     with suppress(ChildProcessError):
         os.waitpid(pid, 0)
 
 
+# What a read got after the text that it waited for. One read of the terminal can bring, for
+# example, the message of a stopped job and the next prompt, and the next wait needs the prompt.
+_UNREAD: dict[int, bytes] = {}
+
+
 def _read_until(terminal, text, timeout=30.0):
-    seen = b""
+    """Return what the terminal shows up to and including the text, or all that it showed."""
+    seen = _UNREAD.pop(terminal, b"")
+    needle = text.encode()
     give_up = time.monotonic() + timeout
-    while text.encode() not in seen and time.monotonic() < give_up:
+    while needle not in seen and time.monotonic() < give_up:
         if select.select([terminal], [], [], 0.1)[0]:
             try:
                 data = os.read(terminal, 4096)
@@ -531,7 +539,10 @@ def _read_until(terminal, text, timeout=30.0):
             if not data:
                 break
             seen += data
-    return seen.decode(errors="replace")
+    before, found, after = seen.partition(needle)
+    if found:
+        _UNREAD[terminal] = after
+    return (before + found).decode(errors="replace")
 
 
 def _clean_up(process, command):

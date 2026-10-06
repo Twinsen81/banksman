@@ -84,7 +84,8 @@ such an instance, so `status` and `acquire` show only why a discovery failed and
 notes it has; only `banksman admin discover` shows the notes.
 
 **A grant is safe to read in a shell.** The `KEY=value` lines of `acquire` carry only the
-resource name, the kind, the lease id, the state, a serial, and the granted accounts, and each
+resource name, the kind, the lease id, the state, whether the lease was kept, a serial, and
+the granted accounts, and each
 value has only the characters of a resource name; several accounts are separated by commas.
 The name of a part, which is the prefix of its keys, has only lowercase letters, digits, and
 `_`. A serial with other characters is not printed, and no other fact is printed.

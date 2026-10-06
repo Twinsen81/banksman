@@ -54,7 +54,11 @@ def run_script(project_script, path, **variables):
 
 @pytest.fixture
 def with_banksman(tmp_path, config_path):
-    write_config(config_path, "[holder]\nagents = []\n[kinds.sdk]\ncount = 1\n")
+    write_config(
+        config_path,
+        "[holder]\nagents = []\n"
+        "[kinds.sdk]\ncount = 1\n[kinds.phone]\ncount = 1\n[kinds.tablet]\ncount = 1\n",
+    )
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     wrapper = bin_dir / "banksman"
@@ -81,6 +85,52 @@ def test_a_lease_that_the_caller_gives_stays_with_the_caller(
     assert result.returncode == 5, result.stderr
     assert result.stdout == "resource=sdk-0 serial=\nin: sdk-0\n"
     assert (state_dir / "sdk-0.json").exists()
+
+
+def test_a_lease_that_acquire_keeps_stays_with_the_caller(tmp_path, with_banksman, state_dir):
+    # The caller holds a phone and a tablet, and gives the id of the phone to a script that
+    # needs the tablet. acquire keeps the tablet of the holding, which has an id of its own.
+    banksman = with_banksman.split(":")[0] + "/banksman"
+    grant = subprocess.run(
+        [banksman, "acquire", "--as", "phone", "--where", "kind=phone"]
+        + ["--as", "tablet", "--where", "kind=tablet"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    values = dict(line.split("=", 1) for line in grant.stdout.splitlines())
+    script = tmp_path / "tablet.sh"
+    script.write_text(
+        '. "$HELPER"\nbanksman_acquire --where kind=tablet || exit\nbanksman_release\n'
+    )
+    result = run_script(("/bin/sh", script), with_banksman, BANKSMAN_LEASE=values["PHONE_LEASE"])
+    assert result.returncode == 0, result.stderr
+    assert (state_dir / "tablet-0.json").exists()
+
+
+def test_a_script_inside_banksman_run_leaves_the_lease_with_the_run(
+    tmp_path, with_banksman, state_dir
+):
+    script = tmp_path / "inside.sh"
+    script.write_text(
+        '. "$HELPER"\n'
+        'banksman_acquire --where kind=sdk --owner-pid "$$" || exit\n'
+        'sed -n \'s/.*"owner_pid": \\([0-9]*\\).*/owner \\1/p\' "$BANKSMAN_STATE_DIR/sdk-0.json"\n'
+        # The parent of the script is the leader of its group, and banksman run started that.
+        'echo "run $(ps -o ppid= -p "$PPID" | tr -d " ")"\n'
+    )
+    banksman = with_banksman.split(":")[0] + "/banksman"
+    result = subprocess.run(
+        [banksman, "run", "--where", "kind=sdk", "--", "/bin/sh", str(script)],
+        env={**os.environ, "PATH": with_banksman, "HELPER": str(HELPER)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    owner, run = result.stdout.split()[1::2]
+    assert owner == run
+    assert not (state_dir / "sdk-0.json").exists()
 
 
 def test_without_banksman_the_script_works_as_before(project_script):

@@ -350,7 +350,8 @@ When several resources match, banksman chooses in a fixed order:
 
 1. A resource of the caller's holding, if the caller passes the lease id with `--lease` and
    the resource still matches. The lease is touched, and it records the caller's agent
-   process as its owner process.
+   process as its owner process, unless its owner process still runs and started the
+   caller, as `banksman run` does for a script that it runs (section 9).
 2. A kind with a lower `rank` (section 5). So a request that does not name a kind gets an
    emulator before a physical device.
 3. An instance that runs before one that does not run, which saves the time and the memory
@@ -362,8 +363,10 @@ several agents can work in one worktree at the same time, so only the lease id t
 holdings apart (section 9).
 
 - **The grant.** `acquire` prints `KEY=value` lines: `RESOURCE`, `KIND`, `LEASE` (the lease
-  id that the scripts pass back), `STATE`, `SERIAL` when discovery knows it, and `ACCOUNTS`
-  when the request asks for accounts (section 7). Each value has only the characters of a
+  id that the scripts pass back), `STATE`, `KEPT` (`true` for a lease of the caller's holding
+  that `--lease` kept, otherwise `false`), `SERIAL` when discovery knows it, and `ACCOUNTS`
+  when the request asks for accounts (section 7). A kept lease can have another id than the
+  one that the caller passed, because each lease of a holding has its own id. Each value has only the characters of a
   resource name, so that a shell script can use it as it is: a serial with other characters
   is not printed. With `--json`, it prints a list `parts` with the same values for each part
   of the request.
@@ -416,12 +419,14 @@ holdings apart (section 9).
   PHONE_KIND=device
   PHONE_LEASE=4f1c2b0e9d7a4c55a0f3e6b1c2d3e4f5
   PHONE_STATE=ready
+  PHONE_KEPT=false
   PHONE_SERIAL=R5CR1234ABC
   PHONE_ACCOUNTS=qa@example.test
   TABLET_RESOURCE=qa_tablet
   TABLET_KIND=emulator
   TABLET_LEASE=9e8d7c6b5a4f4e3d2c1b0a9f8e7d6c5b
   TABLET_STATE=ready
+  TABLET_KEPT=false
   ```
 
   A part name has lowercase letters, digits, and `_`, and becomes the prefix of the keys of
@@ -591,7 +596,10 @@ holding, and `acquire --lease`, `touch`, and `release` take it. Liveness stays w
 agent, through its own agent process.
 
 - `touch` records the caller's agent process as the owner process of every lease of the
-  holding, so a lease survives a restart of the agent.
+  holding, so a lease survives a restart of the agent. A lease whose owner process still runs
+  and started the caller keeps that owner, also for `acquire --lease`: the caller works within
+  the life of that process. So a script that `banksman run --where` runs cannot move the lease
+  of the run to the agent, and the lease still ends with the run.
 - `release --all` gives back only the leases whose owner process is the caller's agent
   process, so it acts for one agent. After a restart of the agent, it finds a lease only
   after a touch has recorded the new agent process; until then, the lease ends by its

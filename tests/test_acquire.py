@@ -78,6 +78,7 @@ def test_acquire_prints_the_lease_as_key_value_lines(capsys, config_path):
         "KIND": "emulator",
         "LEASE": lease.lease_id,
         "STATE": "ready",
+        "KEPT": "false",
         "SERIAL": "emulator-5554",
     }
     assert (lease.purpose, lease.owner_pid) == ("verify the layout", None)
@@ -145,7 +146,7 @@ def test_a_held_resource_is_not_granted_again_without_its_lease_id(capsys, confi
     assert err == "banksman: every matching resource is in use: build-0\n"
     # The caller that passes its lease id keeps its lease.
     status, again, _ = acquire(capsys, "--where", "kind=build", "--lease", first["LEASE"])
-    assert (status, again["LEASE"]) == (0, first["LEASE"])
+    assert (status, again["LEASE"], again["KEPT"]) == (0, first["LEASE"], "true")
 
 
 def test_a_kept_lease_records_the_new_owner_process_and_the_new_expected_time(
@@ -436,6 +437,7 @@ def test_an_account_is_leased_with_its_device(capsys, config_path):
         "KIND": "device",
         "LEASE": leases()["R5CR0001"].lease_id,
         "STATE": "ready",
+        "KEPT": "false",
         "SERIAL": "R5CR0001",
         "ACCOUNTS": "qa@example.test",
     }
@@ -501,15 +503,18 @@ def test_a_joint_acquire_prints_each_part_under_its_name(capsys, config_path):
         "PHONE_KIND": "emulator",
         "PHONE_LEASE": held["qa_phone"].lease_id,
         "PHONE_STATE": "ready",
+        "PHONE_KEPT": "false",
         "PHONE_SERIAL": "emulator-5554",
         "TABLET_RESOURCE": "qa_tablet",
         "TABLET_KIND": "emulator",
         "TABLET_LEASE": held["qa_tablet"].lease_id,
         "TABLET_STATE": "ready",
+        "TABLET_KEPT": "false",
         "BUILD_RESOURCE": "build-0",
         "BUILD_KIND": "build",
         "BUILD_LEASE": held["build-0"].lease_id,
         "BUILD_STATE": "ready",
+        "BUILD_KEPT": "false",
     }
     # Each lease has its own token for its scripts, and the three form one holding.
     assert len({lease.lease_id for lease in held.values()}) == 3

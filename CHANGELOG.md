@@ -133,6 +133,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BANKSMAN_LEASE` in its environment, and `BANKSMAN_SERIAL` and `BANKSMAN_ACCOUNTS` when the
   grant has them. Neither the command nor a hook inherits these variables from the
   environment of banksman.
+- `acquire` prints `KEPT` for each part: `true` for a lease of the caller's holding that
+  `--lease` kept, which can have another id than the one that the caller passed. A lease whose
+  owner process still runs and started the caller keeps that owner when the caller keeps or
+  touches it, so a script inside `banksman run --where` cannot move the lease of the run to
+  the agent.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

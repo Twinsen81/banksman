@@ -188,6 +188,25 @@ def test_touch_records_the_new_process_of_a_restarted_owner(store, system):
     assert reaped(store) == []
 
 
+def test_a_lease_keeps_an_owner_process_that_started_the_caller(store, system):
+    # banksman run (100) took the lease for its command, and a script that it runs keeps the
+    # lease; the agent of the script (200) runs longer than banksman run.
+    system.processes = {100: "start-100", 200: "start-200"}
+    system.parents[100] = 200
+    system.parents[os.getpid()] = 100
+    first = store.acquire("phone-1", "device", Holder(OWNER, owner_pid=100))
+    lease = store.touch("phone-1", first.lease_id, owner_pid=200)
+    assert (lease.owner_pid, lease.owner_started) == (100, "start-100")
+    kept = grant_one(
+        store, [Choice("phone-1", "device")], Holder(OWNER, owner_pid=200), keep=first.lease_id
+    )
+    assert (kept.kept, kept.lease.owner_pid) == (True, 100)
+    # When that owner has ended, the caller's agent becomes the owner.
+    system.end(100)
+    lease = store.touch("phone-1", first.lease_id, owner_pid=200)
+    assert lease.owner_pid == 200
+
+
 def test_a_lease_records_its_holder_and_the_expected_hold_time(store, system, state_dir):
     system.processes = {100: "start-100"}
     holder = Holder(

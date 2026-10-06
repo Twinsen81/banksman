@@ -1199,6 +1199,7 @@ def _print_grant(
             ("KIND", leases[0].kind),
             ("LEASE", leases[0].lease_id),
             ("STATE", leases[0].state),
+            ("KEPT", _flag(granted[0].kept)),
         ]
         lines += [("SERIAL", serials[0])] if serials[0] is not None else []
         lines += [("ACCOUNTS", ",".join(granted[0].accounts))] if parts[0].accounts else []
@@ -1211,11 +1212,16 @@ def _print_grant(
                 (f"{prefix}KIND", lease.kind),
                 (f"{prefix}LEASE", lease.lease_id),
                 (f"{prefix}STATE", lease.state),
+                (f"{prefix}KEPT", _flag(grant.kept)),
             ]
             lines += [(f"{prefix}SERIAL", serial)] if serial is not None else []
             lines += [(f"{prefix}ACCOUNTS", ",".join(grant.accounts))] if part.accounts else []
     for key, value in lines:
         print(f"{key}={value}")
+
+
+def _flag(value: bool) -> str:
+    return "true" if value else "false"
 
 
 def _serial(facts: Mapping[str, FactValue]) -> str | None:
