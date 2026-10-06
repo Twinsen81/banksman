@@ -1,21 +1,17 @@
-// banksman build slots for Gradle.
+// banksman build slots for Gradle: the build-slot part.
 //
 // Every Gradle build of this user holds one build slot of banksman while it runs, so that
-// parallel builds do not use up the memory of the machine. Save this file in
-// ~/.gradle/init.d/:
+// parallel builds do not use up the memory of the machine. This part takes and gives back the
+// slot. The init script that `banksman admin gradle-init` prints applies it only on Gradle 7.4
+// and later. Save it outside init.d, where the init script finds it:
 //
-//     banksman admin gradle-init > ~/.gradle/init.d/banksman-build-slot.gradle
+//     mkdir -p ~/.gradle/banksman
+//     banksman admin gradle-init --build-slot > ~/.gradle/banksman/build-slot.gradle
 //
-// and declare the kind in ~/.config/banksman/config.toml:
-//
-//     [kinds.build]
-//     count = 5
-//     owner_grace = "0s"
-//     idle_timeout = "off"
+// The comment at the top of the init script describes the whole setup.
 //
 // A build waits for a free slot for 30 minutes, or for the Gradle property
 // banksman.buildSlotWait, such as 45m. Without banksman on the PATH, this script does nothing.
-// It uses Gradle APIs from version 6.2 on.
 
 import java.lang.management.ManagementFactory
 import javax.inject.Inject

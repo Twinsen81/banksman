@@ -1,0 +1,43 @@
+// banksman build slots for Gradle: the init script.
+//
+// Every Gradle build of this user holds one build slot of banksman while it runs, so that
+// parallel builds do not use up the memory of the machine. The setup has two files: this init
+// script, and the build-slot part that it applies. Save them with:
+//
+//     banksman admin gradle-init > ~/.gradle/init.d/banksman-build-slot.gradle
+//     mkdir -p ~/.gradle/banksman
+//     banksman admin gradle-init --build-slot > ~/.gradle/banksman/build-slot.gradle
+//
+// and declare the kind in ~/.config/banksman/config.toml:
+//
+//     [kinds.build]
+//     count = 5
+//     owner_grace = "0s"
+//     idle_timeout = "off"
+//
+// After an upgrade of banksman, save both files again.
+//
+// This script applies the build-slot part only on Gradle 7.4 and later. On an older Gradle, a
+// build runs as it does without banksman. The build-slot part uses APIs that Gradle 6.2 added,
+// and Gradle compiles a whole script before it runs any of it, so this script uses only APIs
+// that older versions also have. Gradle 6.5 to 7.3 also refuse to read a value source or a
+// Gradle property while they configure a build, unless the script calls
+// forUseAtConfigurationTime(), which Gradle 9 removed. The build-slot part is outside init.d,
+// because Gradle applies every file in init.d.
+
+import org.gradle.api.GradleException
+import org.gradle.util.GradleVersion
+
+def buildSlot = new File(gradle.gradleUserHomeDir, "banksman/build-slot.gradle")
+if (GradleVersion.current().baseVersion < GradleVersion.version("7.4")) {
+    logger.info("banksman: Gradle ${GradleVersion.current().version} is older than 7.4, so this"
+        + " build holds no build slot")
+} else if (!buildSlot.isFile()) {
+    // A build that ignored the slots would use the memory that they protect.
+    throw new GradleException(
+        "banksman: ${buildSlot} does not exist, so this build cannot hold a build slot. Save it"
+        + " with: mkdir -p ${buildSlot.parentFile} && banksman admin gradle-init --build-slot"
+        + " > ${buildSlot}. Or remove ${buildscript.sourceFile} to build without build slots.")
+} else {
+    apply from: buildSlot
+}

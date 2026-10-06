@@ -661,8 +661,16 @@ kind in the same pool, and a Gradle init script makes every Gradle build of the 
 while it runs. So a build that an agent starts directly is covered too, not only the
 project's own build script.
 
-- **Setup.** `banksman admin gradle-init` prints the init script. The operator saves it in
-  `~/.gradle/init.d/`, and declares the kind `build` in the configuration:
+- **Setup.** The setup has two files. `banksman admin gradle-init` prints the init script,
+  and `banksman admin gradle-init --build-slot` prints the build-slot part, which the init
+  script applies and which takes and gives back the slot. The operator saves both files, and
+  declares the kind `build` in the configuration:
+
+  ```sh
+  banksman admin gradle-init > ~/.gradle/init.d/banksman-build-slot.gradle
+  mkdir -p ~/.gradle/banksman
+  banksman admin gradle-init --build-slot > ~/.gradle/banksman/build-slot.gradle
+  ```
 
   ```toml
   [kinds.build]
@@ -671,11 +679,22 @@ project's own build script.
   idle_timeout = "off"
   ```
 
-  banksman does not write the file itself, because `~/.gradle` belongs to Gradle and to the
-  operator. The script uses Gradle APIs from version 6.2 on. With an older Gradle it does not
-  compile, and then every build fails. Without `banksman` on the `PATH` of the build, the
-  script does nothing. It looks only in absolute directories of the `PATH`, so a file in a
-  project cannot stand in for `banksman`.
+  banksman does not write the files itself, because `~/.gradle` belongs to Gradle and to the
+  operator. After an upgrade of banksman, the operator saves both files again. The build-slot
+  part is outside `init.d`, because Gradle applies every file in `init.d`. When the build-slot
+  part is missing, every build fails with a message that gives the command that saves it.
+  Without `banksman` on the `PATH` of the build, the build-slot part does nothing. It looks
+  only in absolute directories of the `PATH`, so a file in a project cannot stand in for
+  `banksman`.
+- **Gradle versions.** The init script applies to every build of the user, also in projects
+  on an old Gradle that have nothing to do with banksman, so it must work on every version.
+  It applies the build-slot part only on Gradle 7.4 and later. On an older Gradle, the build
+  runs as it does without banksman, and the init script logs one line at the info level, so
+  the console of a normal build does not change. Gradle compiles a whole script before it
+  runs any of it, and the build-slot part uses APIs that Gradle 6.2 added, so the init script
+  uses only APIs that old versions also have. Gradle 6.5 to 7.3 also refuse to read a value
+  source or a Gradle property while they configure a build, unless the script calls
+  `forUseAtConfigurationTime()`, which Gradle 9 removed.
 - **The owner process is the process that runs the build:** the Gradle daemon, or the client
   with `--no-daemon`. The daemon does not know the process of its client, so the client
   cannot be the owner. A daemon runs one build at a time, so its slot is the slot of the
@@ -685,22 +704,25 @@ project's own build script.
   build must not hold a slot forever, and banksman does not stop it. Until such a build ends,
   one more build than the slots can run. The holder is the worktree of the directory where the
   build started, and the purpose is `gradle` and the requested tasks.
-- **When the build starts**, the script runs `banksman release --all --owner-pid <pid>`, and
-  then `banksman acquire --where kind=build --owner-pid <pid> --wait 30m`. It does this in a
-  Gradle `ValueSource`: an init script does not run when Gradle reuses the configuration
-  cache, but Gradle runs the value sources of the init script again before it reuses an
-  entry, before any task. The value never changes, so it never makes an entry stale. When an
-  entry is stale, Gradle runs the value source twice in one build, and the two runs share no
-  memory, so the script keeps no lease id: it first gives back any slot that its process
-  still holds.
-- **When the build ends**, also when it fails, a Gradle build service of the script runs
-  `banksman release --all --owner-pid <pid>`. A release that fails does not fail the build:
-  the next build of the same daemon gives the slot back, and the end of the daemon frees it.
-  The same is true for a build that runs no task while Gradle reuses the configuration cache,
-  for example with `--dry-run`: Gradle creates the build service then only after a task, so
-  the slot stays held until the next build of the daemon, the end of the daemon, or the hard
-  cap. Gradle's only hook at the end of a build without tasks, `FlowAction`, is incubating
-  and needs Gradle 8.1, and a change in Gradle would then fail every build of the user.
+- **When the build starts**, the build-slot part runs
+  `banksman release --all --owner-pid <pid>`, and then
+  `banksman acquire --where kind=build --owner-pid <pid> --wait 30m`. It does this in a
+  Gradle `ValueSource`: an init script, and a script that it applies, do not run when Gradle
+  reuses the configuration cache, but Gradle runs their value sources again before it reuses
+  an entry, before any task. The value never changes, so it never makes an entry stale. A
+  change of the build-slot part, for example after an upgrade, does. When an entry is stale,
+  Gradle runs the value source twice in one build, and the two runs share no memory, so the
+  build-slot part keeps no lease id: it first gives back any slot that its process still
+  holds.
+- **When the build ends**, also when it fails, a Gradle build service of the build-slot part
+  runs `banksman release --all --owner-pid <pid>`. A release that fails does not fail the
+  build: the next build of the same daemon gives the slot back, and the end of the daemon
+  frees it. The same is true for a build that runs no task while Gradle reuses the
+  configuration cache, for example with `--dry-run`: Gradle creates the build service then
+  only after a task, so the slot stays held until the next build of the daemon, the end of
+  the daemon, or the hard cap. Gradle's only hook at the end of a build without tasks,
+  `FlowAction`, is incubating and needs Gradle 8.1, and a change in Gradle would then fail
+  every build of the user.
 - **Waiting.** A build waits for a free slot for 30 minutes, or for the Gradle property
   `banksman.buildSlotWait`, such as `45m`, for example in `~/.gradle/gradle.properties`. While
   it waits, its console shows the line that `acquire` prints when it starts to wait
@@ -744,7 +766,7 @@ banksman version [--json]
 
 banksman admin discover [--kind <kind>] [--all] [--json] [--yes]
 banksman admin release --force --resource <name>
-banksman admin gradle-init                                         # the init script for build slots
+banksman admin gradle-init [--build-slot]                          # the scripts for build slots
 ```
 
 Commands that grant a resource print `KEY=value` lines, for example `RESOURCE=`, `SERIAL=`,
