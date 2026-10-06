@@ -121,6 +121,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   older than 7.4, a build runs as it does without banksman.
 - `acquire --wait` says on standard error when it starts to wait, and stops waiting when its
   owner process ends.
+- `banksman run --lease <id> --resource <name> -- <command>` runs a command under a lease, in
+  a process group of its own that is registered with the lease before the command starts. It
+  checks the lease while the command runs, stops the group when the lease is lost (SIGTERM,
+  then SIGKILL), and leaves the lease only after the group has ended. It exits with the
+  status of the command, or with 3 when the lease was lost, also when the command failed after
+  that. When it ends first, the command ends too. When its input is the terminal, the command
+  gets the terminal, so it can read input, and Ctrl-C and Ctrl-Z work as for any command. With `--where` instead of `--lease`, it leases a resource for
+  the command and gives it back after the command, so a counted kind with `count = 1` is a
+  mutex for one command at a time. The command gets `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, and
+  `BANKSMAN_LEASE` in its environment, and `BANKSMAN_SERIAL` and `BANKSMAN_ACCOUNTS` when the
+  grant has them. Neither the command nor a hook inherits these variables from the
+  environment of banksman.
+- [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
+  a project copies into its repository and that does nothing without banksman, a stub of
+  `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex
+  that refuse `banksman admin`, and a text for the instructions of agents. Section 14 of the
+  design has an example configuration for an Android project.
 - Design document ([docs/DESIGN.md](docs/DESIGN.md)), recorded decisions
   ([DECISIONS.md](DECISIONS.md)), security policy and threat model
   ([SECURITY.md](SECURITY.md)), and contribution guide.

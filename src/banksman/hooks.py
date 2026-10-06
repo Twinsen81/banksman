@@ -22,9 +22,16 @@ HOOK_TIMEOUT_SECONDS = 60.0
 MAX_OUTPUT = 1024 * 1024
 _KILL_WAIT_SECONDS = 5.0
 _MAX_REASON = 4096
-# The variables that banksman sets for a hook. A value from banksman's own environment, for
-# example when a hook runs banksman, must not reach the next hook.
-_VARIABLES = ("BANKSMAN_RESOURCE", "BANKSMAN_KIND")
+# The variables that banksman sets for the programs that it runs: hooks, and the commands of
+# `banksman run`. A value from banksman's own environment, for example when such a program runs
+# banksman, must not reach the next program.
+VARIABLES = (
+    "BANKSMAN_RESOURCE",
+    "BANKSMAN_KIND",
+    "BANKSMAN_LEASE",
+    "BANKSMAN_SERIAL",
+    "BANKSMAN_ACCOUNTS",
+)
 
 
 def take_back(
@@ -73,7 +80,7 @@ def run(command: Sequence[str], lease: Lease, *, timeout: float) -> str | None:
 def _run(
     command: Sequence[str], variables: Mapping[str, str], timeout: float, *, capture: bool = False
 ) -> tuple[str | None, bytes]:
-    env = {key: value for key, value in os.environ.items() if key not in _VARIABLES}
+    env = {key: value for key, value in os.environ.items() if key not in VARIABLES}
     env.update(variables)
     with contextlib.ExitStack() as stack:
         # The output goes to a file, not a pipe: a program that the hook leaves running would

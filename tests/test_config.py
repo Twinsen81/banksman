@@ -319,3 +319,14 @@ def test_a_fifo_is_refused_without_waiting_for_a_writer(config_path):
     os.mkfifo(config_path, 0o600)
     with pytest.raises(ConfigError, match="not a regular file"):
         load_config()
+
+
+def test_the_example_configuration_of_the_design_loads(config_path):
+    design = (Path(__file__).resolve().parents[1] / "docs" / "DESIGN.md").read_text()
+    section = design[design.index("## 14. Using banksman from a project") :]
+    example = section[section.index("```toml\n") + len("```toml\n") : section.index("```\n", 1)]
+    loaded = load_config(write_config(config_path, example))
+    assert sorted(loaded.kinds) == ["build", "device", "emulator", "port", "sdk"]
+    assert loaded.kinds["emulator"].preselect == ("e2e_*",)
+    assert loaded.kinds["sdk"].instances() == ("sdk-0",)
+    assert loaded.account_preselect == ("*@example.test",)
