@@ -68,8 +68,10 @@ EXIT_BUSY = 4
 POLL_SECONDS = 5.0
 # How often watch shows the table again by default. Each refresh also runs discovery.
 WATCH_SECONDS = 5
-# The Gradle init script that takes a build slot for every build, in this package.
-GRADLE_INIT_SCRIPT = "build-slot.gradle"
+# The Gradle scripts in this package: the init script, and the build-slot part that it applies
+# on Gradle 7.4 and later to take a build slot for every build.
+GRADLE_INIT_SCRIPT = "gradle-init.gradle"
+GRADLE_BUILD_SLOT_SCRIPT = "build-slot.gradle"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -294,11 +296,17 @@ def _build_parser() -> argparse.ArgumentParser:
     discover_command.add_argument(
         "--json", action="store_true", help="print JSON; without --yes, write nothing"
     )
-    admin_commands.add_parser(
+    gradle_init_command = admin_commands.add_parser(
         "gradle-init",
         help="print the Gradle init script that makes every build hold a build slot; save it"
         " in ~/.gradle/init.d/",
         allow_abbrev=False,
+    )
+    gradle_init_command.add_argument(
+        "--build-slot",
+        action="store_true",
+        help="print the build-slot part that the init script applies; save it as"
+        " ~/.gradle/banksman/build-slot.gradle",
     )
     return parser
 
@@ -1058,8 +1066,9 @@ def _cmd_admin_release(args: argparse.Namespace) -> int:
 
 
 def _cmd_admin_gradle_init(args: argparse.Namespace) -> int:
-    # banksman does not write the file itself: ~/.gradle belongs to Gradle and to the operator.
-    script = resources.files("banksman").joinpath(GRADLE_INIT_SCRIPT)
+    # banksman does not write the files itself: ~/.gradle belongs to Gradle and to the operator.
+    name = GRADLE_BUILD_SLOT_SCRIPT if args.build_slot else GRADLE_INIT_SCRIPT
+    script = resources.files("banksman").joinpath(name)
     sys.stdout.write(script.read_text(encoding="utf-8"))
     return 0
 
