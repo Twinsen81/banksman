@@ -1,0 +1,172 @@
+// banksman build slots for Gradle.
+//
+// Every Gradle build of this user holds one build slot of banksman while it runs, so that
+// parallel builds do not use up the memory of the machine. Save this file in
+// ~/.gradle/init.d/:
+//
+//     banksman admin gradle-init > ~/.gradle/init.d/banksman-build-slot.gradle
+//
+// and declare the kind in ~/.config/banksman/config.toml:
+//
+//     [kinds.build]
+//     count = 5
+//     owner_grace = "0s"
+//     idle_timeout = "off"
+//
+// A build waits for a free slot for 30 minutes, or for the Gradle property
+// banksman.buildSlotWait, such as 45m. Without banksman on the PATH, this script does nothing.
+// It uses Gradle APIs from version 6.2 on.
+
+import java.lang.management.ManagementFactory
+import javax.inject.Inject
+import org.gradle.api.GradleException
+import org.gradle.api.Plugin
+import org.gradle.api.invocation.Gradle
+import org.gradle.api.logging.Logging
+import org.gradle.api.provider.Property
+import org.gradle.api.provider.ProviderFactory
+import org.gradle.api.provider.ValueSource
+import org.gradle.api.provider.ValueSourceParameters
+import org.gradle.api.services.BuildService
+import org.gradle.api.services.BuildServiceParameters
+import org.gradle.build.event.BuildEventsListenerRegistry
+import org.gradle.tooling.events.FinishEvent
+import org.gradle.tooling.events.OperationCompletionListener
+
+class BanksmanBuildSlotCommand {
+    static final def LOGGER = Logging.getLogger("banksman")
+
+    // The daemon takes the environment of each client, so this is the PATH of the client that
+    // started the build. Only absolute directories count, so that a file in the project cannot
+    // stand in for banksman.
+    static String program() {
+        for (directory in (System.getenv("PATH") ?: "").split(File.pathSeparator)) {
+            def file = new File(directory, "banksman")
+            if (new File(directory).isAbsolute() && file.isFile() && file.canExecute()) {
+                return file.absolutePath
+            }
+        }
+        return null
+    }
+
+    // The process that runs the build: the daemon, or the client with --no-daemon. The daemon
+    // does not know the process of its client. The name "pid@host" exists on every Java
+    // version that Gradle runs on.
+    static String owner() {
+        return ManagementFactory.runtimeMXBean.name.split("@")[0]
+    }
+
+    // Returns the exit status and the messages of banksman. The messages also go to the
+    // console, so that a build that waits for a slot says why.
+    static List run(String program, String directory, List<String> arguments) {
+        def process = new ProcessBuilder([program] + arguments).directory(new File(directory)).start()
+        process.outputStream.close()
+        def messages = Collections.synchronizedList([])
+        def errors = Thread.start {
+            process.errorStream.eachLine("utf-8") { line ->
+                messages << line.replaceFirst("^banksman: ", "")
+                LOGGER.lifecycle(line)
+            }
+        }
+        process.inputStream.eachLine("utf-8") { line -> LOGGER.info(line) }
+        errors.join()
+        return [process.waitFor(), messages]
+    }
+
+    static void releaseAll(String program, String directory) {
+        run(program, directory, ["release", "--all", "--owner-pid", owner()])
+    }
+}
+
+abstract class BanksmanBuildSlotAcquire implements ValueSource<String, Params> {
+    interface Params extends ValueSourceParameters {
+        Property<String> getDirectory()
+        Property<String> getPurpose()
+        Property<String> getWait()
+    }
+
+    // Gradle runs this when the build starts, also before it reuses a configuration cache
+    // entry, when the init script does not run. The value never changes, so that it never
+    // makes an entry stale.
+    String obtain() {
+        def program = BanksmanBuildSlotCommand.program()
+        if (program == null) {
+            return ""
+        }
+        def directory = parameters.directory.get()
+        def wait = parameters.wait.get()
+        // When an entry is stale, Gradle runs this twice in one build, and the two runs share no
+        // memory. So a slot that this process still holds is given back first.
+        BanksmanBuildSlotCommand.releaseAll(program, directory)
+        def (status, messages) = BanksmanBuildSlotCommand.run(program, directory, [
+            "acquire", "--where", "kind=build", "--owner-pid", BanksmanBuildSlotCommand.owner(),
+            "--for", parameters.purpose.get(), "--wait", wait,
+        ])
+        if (status == 4) {
+            throw new GradleException(
+                "banksman: no build slot became free in ${wait}. This is a limit of the machine,"
+                + " not a failure of the build: try again later. banksman status shows who holds"
+                + " the build slots.")
+        }
+        if (status != 0) {
+            // A build that ignored the slots would use the memory that they protect.
+            def problem = messages ? messages.join(" ") : "exit status ${status}"
+            throw new GradleException("banksman: cannot get a build slot: ${problem}")
+        }
+        return ""
+    }
+}
+
+abstract class BanksmanBuildSlot implements BuildService<Params>, OperationCompletionListener, AutoCloseable {
+    interface Params extends BuildServiceParameters {
+        Property<String> getDirectory()
+    }
+
+    void onFinish(FinishEvent event) {}
+
+    // Gradle closes the service when the build ends, also when it fails. A release that fails
+    // does not fail the build: the next build of this process gives the slot back, and the end
+    // of the process frees it.
+    void close() {
+        def program = BanksmanBuildSlotCommand.program()
+        if (program != null) {
+            BanksmanBuildSlotCommand.releaseAll(program, parameters.directory.get())
+        }
+    }
+}
+
+abstract class BanksmanBuildSlotPlugin implements Plugin<Gradle> {
+    @Inject
+    abstract ProviderFactory getProviders()
+
+    @Inject
+    abstract BuildEventsListenerRegistry getListeners()
+
+    void apply(Gradle gradle) {
+        // buildSrc and included builds run inside the build that holds the slot.
+        if (gradle.parent != null) {
+            return
+        }
+        def directory = gradle.startParameter.currentDir.absolutePath
+        def tasks = gradle.startParameter.taskNames.join(" ")
+        providers.of(BanksmanBuildSlotAcquire) {
+            it.parameters.directory.set(directory)
+            it.parameters.purpose.set("gradle ${tasks}".trim())
+            it.parameters.wait.set(providers.gradleProperty("banksman.buildSlotWait").orElse("30m"))
+        }.get()
+        def slot = gradle.sharedServices.registerIfAbsent("banksmanBuildSlot", BanksmanBuildSlot) {
+            it.parameters.directory.set(directory)
+        }
+        // A listener of task events comes back with a reused cache entry, so the service is
+        // closed at the end of every build that runs a task. Getting it now closes it also when
+        // the build fails before its first task. A reused entry that runs no task, as with
+        // --dry-run, keeps the slot until the next build of this process, the end of this
+        // process, or the hard cap: Gradle's hook for the end of such a build, FlowAction, is
+        // incubating and needs Gradle 8.1.
+        listeners.onTaskCompletion(slot)
+        slot.get()
+    }
+}
+
+apply plugin: BanksmanBuildSlotPlugin
+

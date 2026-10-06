@@ -1,12 +1,12 @@
 # banksman design
 
 **Status:** the project scaffold, the lease core, kinds as configuration, fencing, discovery,
-holder identity, requests by properties, joint acquire with accounts, and the console exist.
-Sections 3 to 9 are implemented, with `banksman acquire`, `touch`, `release`, `reap`,
-`banksman whoami`, the commands that scripts run (`enter`, `check`, and `leave`),
-`banksman admin discover`, and `banksman admin release --force`. Of section 10, `status`,
-`watch`, and `log` are implemented. `explain`, the queue of the callers that wait, and build
-slots are not implemented yet.
+holder identity, requests by properties, joint acquire with accounts, the console, and build
+slots exist. Sections 3 to 9 and 11 are implemented, with `banksman acquire`, `touch`,
+`release`, `reap`, `banksman whoami`, the commands that scripts run (`enter`, `check`, and
+`leave`), `banksman admin discover`, `banksman admin release --force`, and
+`banksman admin gradle-init`. Of section 10, `status`, `watch`, and `log` are implemented.
+`explain` and the queue of the callers that wait are not implemented yet.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
 
@@ -243,7 +243,7 @@ not code.
   drain_timeout = "5m"
 
   [kinds.build]
-  count = 4
+  count = 5
   owner_grace = "0s"
   idle_timeout = "off"
 
@@ -374,7 +374,10 @@ holdings apart (section 9).
   a request with several parts, this is while the parts cannot all be granted (section 7).
   With `--wait`, it looks again every 5 seconds until the wait ends, and each look reads the
   configuration, the inventory, and the machine again. So the reaper of a caller that waits
-  also uses the hooks of the current configuration (section 5). When no permitted resource that is present now matches, held or free,
+  also uses the hooks of the current configuration (section 5). When it starts to wait, it
+  says so once on standard error, with the resources that are in use, so that a person sees
+  why a command, such as a build, does not go on. It stops waiting, and fails, when its owner
+  process (section 9) ends, because nothing would use what it gets. When no permitted resource that is present now matches, held or free,
   `acquire` fails at once, also with `--wait`, because only a held resource can become free.
   There is no queue yet: when many callers wait, a caller can get a resource before another
   caller that started to wait earlier.
@@ -654,25 +657,77 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
 ## 11. Build slots
 
 Sessions are cheap; builds and emulators are what use up memory. Build slots are a counted
-kind in the same pool.
+kind in the same pool, and a Gradle init script makes every Gradle build of the user hold one
+while it runs. So a build that an agent starts directly is covered too, not only the
+project's own build script.
 
-- A Gradle init script on the machine acquires a slot when a build starts and releases it
-  when the build ends. So a build that an agent starts directly is covered too, not only
-  the project's own build script.
-- Liveness is exact: the slot is valid while the Gradle client process is alive, capped by
-  a hard limit. No touch loop is needed.
-- A build waits for a free slot for a bounded time. On timeout it fails with a clear
-  message, which a caller should treat as an infrastructure problem, not a code failure.
+- **Setup.** `banksman admin gradle-init` prints the init script. The operator saves it in
+  `~/.gradle/init.d/`, and declares the kind `build` in the configuration:
+
+  ```toml
+  [kinds.build]
+  count = 5
+  owner_grace = "0s"
+  idle_timeout = "off"
+  ```
+
+  banksman does not write the file itself, because `~/.gradle` belongs to Gradle and to the
+  operator. The script uses Gradle APIs from version 6.2 on. With an older Gradle it does not
+  compile, and then every build fails. Without `banksman` on the `PATH` of the build, the
+  script does nothing. It looks only in absolute directories of the `PATH`, so a file in a
+  project cannot stand in for `banksman`.
+- **The owner process is the process that runs the build:** the Gradle daemon, or the client
+  with `--no-daemon`. The daemon does not know the process of its client, so the client
+  cannot be the owner. A daemon runs one build at a time, so its slot is the slot of the
+  build that it runs. With `owner_grace = "0s"`, the slot is free as soon as that process
+  ends, for example when the daemon crashes, and with `idle_timeout = "off"` no touch loop is
+  needed. At the hard cap, the slot is free again, also when the build still runs: a hung
+  build must not hold a slot forever, and banksman does not stop it. Until such a build ends,
+  one more build than the slots can run. The holder is the worktree of the directory where the
+  build started, and the purpose is `gradle` and the requested tasks.
+- **When the build starts**, the script runs `banksman release --all --owner-pid <pid>`, and
+  then `banksman acquire --where kind=build --owner-pid <pid> --wait 30m`. It does this in a
+  Gradle `ValueSource`: an init script does not run when Gradle reuses the configuration
+  cache, but Gradle runs the value sources of the init script again before it reuses an
+  entry, before any task. The value never changes, so it never makes an entry stale. When an
+  entry is stale, Gradle runs the value source twice in one build, and the two runs share no
+  memory, so the script keeps no lease id: it first gives back any slot that its process
+  still holds.
+- **When the build ends**, also when it fails, a Gradle build service of the script runs
+  `banksman release --all --owner-pid <pid>`. A release that fails does not fail the build:
+  the next build of the same daemon gives the slot back, and the end of the daemon frees it.
+  The same is true for a build that runs no task while Gradle reuses the configuration cache,
+  for example with `--dry-run`: Gradle creates the build service then only after a task, so
+  the slot stays held until the next build of the daemon, the end of the daemon, or the hard
+  cap. Gradle's only hook at the end of a build without tasks, `FlowAction`, is incubating
+  and needs Gradle 8.1, and a change in Gradle would then fail every build of the user.
+- **Waiting.** A build waits for a free slot for 30 minutes, or for the Gradle property
+  `banksman.buildSlotWait`, such as `45m`, for example in `~/.gradle/gradle.properties`. While
+  it waits, its console shows the line that `acquire` prints when it starts to wait
+  (section 6), and `banksman status` shows who holds the slots. When the wait ends, the build
+  fails with a message that says that this is a limit of the machine, not a failure of the
+  build. A caller should treat it as an infrastructure problem. Any other error of banksman,
+  such as a configuration without the kind `build`, fails the build too, because a build that
+  ignores the slots uses the memory that they protect.
+- **Limits.** Gradle cannot interrupt a build that waits in a value source. When its client
+  stops, for example with Ctrl-C, the daemon stops itself after 10 seconds, the next build
+  starts a new daemon, and the `acquire` that waited ends with its owner process. A slot
+  bounds the builds that run, not the daemons that wait for the next build: a daemon keeps
+  its memory until it ends, by default after 3 hours without a build. Gradle reuses an idle
+  daemon before it starts a new one, so the number of daemons tends towards the number of
+  slots. So `count` comes from the peak memory of one build, with its daemon, its worker
+  processes, and the Kotlin daemon. Every Gradle build of the user takes a slot, also a build
+  or a sync in an IDE. A build that runs another Gradle build in another daemon, and waits for
+  it, needs two slots.
 
 ## 12. Command line (sketch)
 
-`explain` and `acquire --kind build --user-pid` do not exist yet. The rest exists.
+`explain` does not exist yet. The rest exists.
 
 ```
 banksman acquire [--as <part>] [--where <attr><op><value> ...] [--accounts <n>] ...
                  [--for <text>] [--expect <duration>] [--wait <duration>] [--lease <id>]
                  [--issue <id>] [--owner-pid <pid>] [--json]
-banksman acquire --kind build --user-pid <pid> [--wait <duration>]
 banksman enter   --resource <name> --lease <id> --pid <pid> [--pgid <pgid>]  # check, touch, register
 banksman check   --resource <name> --lease <id>                    # touch; exit 0: yours, 3: lost
 banksman leave   --resource <name> --lease <id> --pid <pid>
@@ -689,6 +744,7 @@ banksman version [--json]
 
 banksman admin discover [--kind <kind>] [--all] [--json] [--yes]
 banksman admin release --force --resource <name>
+banksman admin gradle-init                                         # the init script for build slots
 ```
 
 Commands that grant a resource print `KEY=value` lines, for example `RESOURCE=`, `SERIAL=`,
@@ -744,13 +800,14 @@ Done:
 - Joint acquire: several resources in one call, one holding for each call, and accounts
   leased with their device.
 - The console: `status` with every resource and when it can be free, `watch`, and the `log`.
+- Build slots: a Gradle init script that holds a slot while each build runs, also when Gradle
+  reuses the configuration cache.
 
 Next:
 
 - `explain`, and a queue for the callers that wait.
 - Keeping a lease while an agent waits for a person, and getting the same resource back
   after a lease ends.
-- Build slots through a Gradle init script.
 
 ## 16. Open questions
 

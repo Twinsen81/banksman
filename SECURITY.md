@@ -88,6 +88,14 @@ value has only the characters of a resource name; several accounts are separated
 The name of a part, which is the prefix of its keys, has only lowercase letters, digits, and
 `_`. A serial with other characters is not printed, and no other fact is printed.
 
+**The Gradle init script runs in every build of the user.** It runs the `banksman` that the
+`PATH` of the build finds, and it looks only in absolute directories, so a file in a project
+cannot stand in for it. The purpose of a build slot is `gradle` and the requested tasks,
+which come from the command line of the build: like any purpose, it is untrusted holder text.
+At the start and at the end of each build, the script gives back every lease whose owner
+process is the process that runs the build. So a lease that another caller gives that owner
+process, with `--owner-pid`, does not outlive the build.
+
 **No credentials.** For accounts on devices, banksman stores identifiers such as email
 addresses, never passwords or tokens. The account is already signed in on the device; a
 run needs the address, not a secret.
