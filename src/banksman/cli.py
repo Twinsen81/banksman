@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from importlib import resources
 
 from banksman import SCHEMA_VERSION, __version__, console, hooks
 from banksman.assign import MAX_ACCOUNTS, MAX_PARTS
@@ -67,6 +68,8 @@ EXIT_BUSY = 4
 POLL_SECONDS = 5.0
 # How often watch shows the table again by default. Each refresh also runs discovery.
 WATCH_SECONDS = 5
+# The Gradle init script that takes a build slot for every build, in this package.
+GRADLE_INIT_SCRIPT = "build-slot.gradle"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -290,6 +293,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     discover_command.add_argument(
         "--json", action="store_true", help="print JSON; without --yes, write nothing"
+    )
+    admin_commands.add_parser(
+        "gradle-init",
+        help="print the Gradle init script that makes every build hold a build slot; save it"
+        " in ~/.gradle/init.d/",
+        allow_abbrev=False,
     )
     return parser
 
@@ -714,6 +723,8 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         purpose=args.purpose,
     )
     give_up = machine.clock() + args.wait
+    waiting = False
+    owner_started = None
     while True:
         # The configuration, the inventory, and the machine are read again on every look. The
         # reaper must use the hooks of the current configuration, so that a hook that the
@@ -749,6 +760,18 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         left = give_up - machine.clock()
         if left <= 0:
             raise Busy(_busy(parts, found.candidates, still=bool(args.wait)))
+        owner_started = _owner_still_runs(machine, holder.owner_pid, owner_started)
+        if not waiting:
+            # A caller that waits, such as a build, shows why it does not go on.
+            busy = _busy(parts, found.candidates, still=False)
+            print(
+                clean(
+                    f"banksman: {busy}; waiting up to {console.span(args.wait)}. banksman status"
+                    " shows who holds them"
+                ),
+                file=sys.stderr,
+            )
+            waiting = True
         machine.sleep(min(POLL_SECONDS, left))
     leases = _prepare(store, config, granted)
     facts = []
@@ -759,6 +782,24 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         facts.append(_facts_now(config, candidate) if reset else candidate.facts)
     _print_grant(parts, granted, leases, facts, args.json)
     return 0
+
+
+def _owner_still_runs(machine: Machine, owner_pid: int | None, started: str | None) -> str | None:
+    """Return the start time of the owner process of a request that waits, or raise when that
+    process has ended.
+
+    Nothing would use what an ended owner gets, and the grant would end at the next reap. A
+    Gradle daemon that stops while its build waits for a slot leaves its acquire behind.
+    """
+    if owner_pid is None:
+        return None
+    now = machine.running([owner_pid]).get(owner_pid)
+    # The start time guards against a pid that the system has given to a new process.
+    if now is None or started not in (None, now):
+        raise BanksmanError(
+            f"the owner process {owner_pid} has ended, so the request stops waiting"
+        )
+    return now
 
 
 def _some(candidates: Sequence[Candidate], shown: int = 10) -> str:
@@ -1013,6 +1054,13 @@ def _cmd_admin_release(args: argparse.Namespace) -> int:
             clean(f"banksman: scripts of {args.resource} still run: {_processes(running)}"),
             file=sys.stderr,
         )
+    return 0
+
+
+def _cmd_admin_gradle_init(args: argparse.Namespace) -> int:
+    # banksman does not write the file itself: ~/.gradle belongs to Gradle and to the operator.
+    script = resources.files("banksman").joinpath(GRADLE_INIT_SCRIPT)
+    sys.stdout.write(script.read_text(encoding="utf-8"))
     return 0
 
 
@@ -1359,6 +1407,7 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "release": _cmd_release,
     "admin release": _cmd_admin_release,
     "admin discover": _cmd_admin_discover,
+    "admin gradle-init": _cmd_admin_gradle_init,
 }
 
 

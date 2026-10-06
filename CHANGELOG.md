@@ -109,6 +109,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between two touches; a quarantine records the scripts that still ran and whether stopping
   was on for the kind. Lease files carry the time of the grant and the longest time between
   two touches, so their schema is now 5.
+- Build slots for Gradle. `banksman admin gradle-init` prints a Gradle init script that the
+  operator saves in `~/.gradle/init.d/`. Every Gradle build of the user then holds a slot of
+  the counted kind `build` while it runs, also when Gradle reuses the configuration cache, and
+  gives it back when it ends. The owner process of the slot is the process that runs the
+  build, so the slot is free as soon as a daemon ends. A build waits for a slot for 30
+  minutes, or for the Gradle property `banksman.buildSlotWait`, and then fails with a message
+  that says that this is a limit of the machine. Without `banksman` on the `PATH`, the script
+  does nothing.
+- `acquire --wait` says on standard error when it starts to wait, and stops waiting when its
+  owner process ends.
 - Design document ([docs/DESIGN.md](docs/DESIGN.md)), recorded decisions
   ([DECISIONS.md](DECISIONS.md)), security policy and threat model
   ([SECURITY.md](SECURITY.md)), and contribution guide.

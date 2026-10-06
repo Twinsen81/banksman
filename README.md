@@ -7,8 +7,8 @@ one forever.
 > **Status: pre-alpha, not usable yet.** This repository has the design, the lease core
 > (lease files, void triggers, and the reaper), resource kinds as configuration, fencing,
 > discovery with the allowlist, holder identity, requests by properties, joint acquire with
-> accounts, and the console (`status`, `watch`, and `log`). `explain`, the queue of the
-> callers that wait, and build slots are not written yet. The design is in
+> accounts, the console (`status`, `watch`, and `log`), and build slots for Gradle.
+> `explain` and the queue of the callers that wait are not written yet. The design is in
 > [docs/DESIGN.md](docs/DESIGN.md).
 
 A *banksman* is the person on a building site who directs crane lifts and tells each
@@ -36,6 +36,9 @@ One agent installs its build while another is in the middle of a UI test. A lock
 - **Automatic holder identity.** banksman records the worktree, the issue, and the agent
   process that holds each lease. It works the same for any coding agent, and for a person
   at a terminal.
+- **Build slots.** A Gradle init script makes every build on the machine hold one of a few
+  build slots while it runs, so that parallel agents do not use up the memory. A build that
+  finds every slot in use waits, and says so.
 - **One view of everything.** `banksman status` shows every resource, who holds it, why,
   and when it will be free at the latest. Agents read the same data as JSON.
 - **Closed by default.** An agent can only get what the operator allows. A personal phone

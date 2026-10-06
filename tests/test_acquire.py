@@ -2,6 +2,8 @@
 
 import json
 import os
+import subprocess
+import sys
 
 import pytest
 from helpers import age_lease, hook, table_rows, write_config
@@ -200,7 +202,35 @@ def test_a_wait_has_a_limit(capsys, config_path, monkeypatch):
     Store(cli.default_state_dir(), Machine()).acquire("build-0", "build", Holder("/w/b"))
     status, _, err = acquire(capsys, "--where", "kind=build", "--wait", "1s")
     assert status == 4
-    assert err == "banksman: every matching resource is still in use: build-0\n"
+    # A caller that waits, such as a build, says once why it does not go on.
+    assert err.splitlines() == [
+        "banksman: every matching resource is in use: build-0; waiting up to 1s. banksman status"
+        " shows who holds them",
+        "banksman: every matching resource is still in use: build-0",
+    ]
+
+
+def test_a_request_that_waits_stops_when_its_owner_process_ends(capsys, config_path, monkeypatch):
+    configure(config_path)
+    Store(cli.default_state_dir(), Machine()).acquire("build-0", "build", Holder("/w/b"))
+    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+
+        def end_owner_while_waiting(self, seconds):
+            owner.kill()
+            owner.wait()
+
+        monkeypatch.setattr(Machine, "sleep", end_owner_while_waiting)
+        status, _, err = acquire(
+            capsys, "--where", "kind=build", "--wait", "15m", "--owner-pid", str(owner.pid)
+        )
+    finally:
+        owner.kill()
+        owner.wait()
+    assert status == 1
+    assert err.splitlines()[-1] == (
+        f"banksman: the owner process {owner.pid} has ended, so the request stops waiting"
+    )
 
 
 def test_a_request_that_nothing_permitted_matches_fails_at_once(
