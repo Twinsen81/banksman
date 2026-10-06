@@ -681,8 +681,10 @@ project's own build script.
   cannot be the owner. A daemon runs one build at a time, so its slot is the slot of the
   build that it runs. With `owner_grace = "0s"`, the slot is free as soon as that process
   ends, for example when the daemon crashes, and with `idle_timeout = "off"` no touch loop is
-  needed. The hard cap still ends a build that runs too long. The holder is the worktree of
-  the directory where the build started, and the purpose is `gradle` and the requested tasks.
+  needed. At the hard cap, the slot is free again, also when the build still runs: a hung
+  build must not hold a slot forever, and banksman does not stop it. Until such a build ends,
+  one more build than the slots can run. The holder is the worktree of the directory where the
+  build started, and the purpose is `gradle` and the requested tasks.
 - **When the build starts**, the script runs `banksman release --all --owner-pid <pid>`, and
   then `banksman acquire --where kind=build --owner-pid <pid> --wait 30m`. It does this in a
   Gradle `ValueSource`: an init script does not run when Gradle reuses the configuration
@@ -694,6 +696,11 @@ project's own build script.
 - **When the build ends**, also when it fails, a Gradle build service of the script runs
   `banksman release --all --owner-pid <pid>`. A release that fails does not fail the build:
   the next build of the same daemon gives the slot back, and the end of the daemon frees it.
+  The same is true for a build that runs no task while Gradle reuses the configuration cache,
+  for example with `--dry-run`: Gradle creates the build service then only after a task, so
+  the slot stays held until the next build of the daemon, the end of the daemon, or the hard
+  cap. Gradle's only hook at the end of a build without tasks, `FlowAction`, is incubating
+  and needs Gradle 8.1, and a change in Gradle would then fail every build of the user.
 - **Waiting.** A build waits for a free slot for 30 minutes, or for the Gradle property
   `banksman.buildSlotWait`, such as `45m`, for example in `~/.gradle/gradle.properties`. While
   it waits, its console shows the line that `acquire` prints when it starts to wait

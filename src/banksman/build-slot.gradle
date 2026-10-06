@@ -158,8 +158,11 @@ abstract class BanksmanBuildSlotPlugin implements Plugin<Gradle> {
             it.parameters.directory.set(directory)
         }
         // A listener of task events comes back with a reused cache entry, so the service is
-        // closed at the end of every build. Getting it now closes it also when the build fails
-        // before its first task.
+        // closed at the end of every build that runs a task. Getting it now closes it also when
+        // the build fails before its first task. A reused entry that runs no task, as with
+        // --dry-run, keeps the slot until the next build of this process, the end of this
+        // process, or the hard cap: Gradle's hook for the end of such a build, FlowAction, is
+        // incubating and needs Gradle 8.1.
         listeners.onTaskCompletion(slot)
         slot.get()
     }
