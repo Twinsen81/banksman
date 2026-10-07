@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "banksman"
 dynamic = ["version"]
-description = "Lease shared devices, emulators, and build slots to parallel coding agents on one machine."
+description = "Lease shared devices and emulators to parallel coding agents on one machine."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

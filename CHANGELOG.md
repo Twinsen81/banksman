@@ -109,8 +109,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between two touches; a quarantine records the scripts that still ran and whether stopping
   was on for the kind. Lease files carry the time of the grant and the longest time between
   two touches, so their schema is now 5.
-- Build slots for Gradle. `banksman admin gradle-init` prints a Gradle init script that the
-  operator saves in `~/.gradle/init.d/`, and `banksman admin gradle-init --build-slot` prints
+- Optional build slots for Gradle, an example of a counted kind that is not a device. A
+  project that leases devices does not need them. `banksman admin gradle-init` prints a
+  Gradle init script that the operator saves in `~/.gradle/init.d/`, and `banksman admin gradle-init --build-slot` prints
   the build-slot part that it applies, which the operator saves in `~/.gradle/banksman/`.
   Every Gradle build of the user then holds a slot of the counted kind `build` while it runs,
   also when Gradle reuses the configuration cache, and gives it back when it ends. The owner

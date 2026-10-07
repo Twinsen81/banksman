@@ -90,8 +90,9 @@ value has only the characters of a resource name; several accounts are separated
 The name of a part, which is the prefix of its keys, has only lowercase letters, digits, and
 `_`. A serial with other characters is not printed, and no other fact is printed.
 
-**The Gradle init script runs in every build of the user.** On Gradle 7.4 and later, it
-applies the build-slot part from `~/.gradle/banksman/build-slot.gradle`, so that file is as
+**The Gradle init script runs in every build of the user.** This applies only when the
+operator installs the optional build slots (DESIGN.md, section 11). On Gradle 7.4 and later,
+the init script applies the build-slot part from `~/.gradle/banksman/build-slot.gradle`, so that file is as
 trusted as the init script in `~/.gradle/init.d/`: whoever can write it runs code in every
 build of the user. The build-slot part runs the `banksman` that the `PATH` of the build finds,
 and it looks only in absolute directories, so a file in a project cannot stand in for it. The

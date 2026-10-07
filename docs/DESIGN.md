@@ -1,8 +1,8 @@
 # banksman design
 
 **Status:** the project scaffold, the lease core, kinds as configuration, fencing, discovery,
-holder identity, requests by properties, joint acquire with accounts, the console, build
-slots, and the supervised run exist. Sections 3 to 9, 11, and 14 are implemented, with
+holder identity, requests by properties, joint acquire with accounts, the console, the
+supervised run, and the optional build slots exist. Sections 3 to 9, 11, and 14 are implemented, with
 `banksman acquire`, `touch`, `release`, `reap`, `banksman whoami`, the commands that scripts
 run (`enter`, `check`, `leave`, and `run`), `banksman admin discover`,
 `banksman admin release --force`, and `banksman admin gradle-init`. Of section 10, `status`,
@@ -15,9 +15,12 @@ model is in [SECURITY.md](../SECURITY.md).
 
 Goals:
 
-- Parallel runs on one machine share scarce resources without using the same one at the
-  same time. The resources are physical devices, emulators, memory for heavy builds, and
-  things that live on a device, such as a signed-in account.
+- Parallel runs on one machine share physical devices and emulators without using the same
+  one at the same time. This is the main purpose of banksman. Things that live on a device,
+  such as a signed-in account, are leased with their device.
+- The same leases work for other resources that the operator declares, such as host ports or
+  a mutex for `sdkmanager`. These are optional: a machine that only shares devices does not
+  declare them. Build slots for Gradle (section 11) are one example.
 - A dead, hung, or forgotten run can never hold a resource forever. If a script of a void
   lease does not stop, the resource waits for a person (section 4).
 - A person and an agent can both see what exists, who holds it, why, and when it will be
@@ -38,10 +41,10 @@ Non-goals:
 
 | Term | Meaning |
 |---|---|
-| Resource | One thing that can be leased: a device serial, an emulator, a build slot, an account. |
+| Resource | One thing that can be leased: a device serial, an emulator, an account, or another resource that the operator declares, such as a host port. |
 | Kind | A class of resources, declared in configuration: how to find instances, how to reset one, how to take one back. |
 | Named kind | Instances have identities: serials, emulator names, account addresses, or names that the operator lists, such as port numbers. |
-| Counted kind | Instances are interchangeable slots: build slots, licence seats. |
+| Counted kind | Instances are interchangeable slots, for example a mutex with one slot, licence seats, or build slots. |
 | Lease | The record that one holder may use one resource until the lease is released or void. |
 | Holder | Who holds a lease: the worktree, the issue, the agent process, and a purpose. The lease id identifies one holding. |
 | Inventory | The allowlist of resources that agents may use at all, and the operator's tags. |
@@ -262,14 +265,6 @@ not code.
   hard_cap = "3h"
   drain_timeout = "5m"
 
-  [kinds.build]
-  count = 5
-  owner_grace = "0s"
-  idle_timeout = "off"
-
-  [kinds.port]
-  instances = ["9101", "9102", "9103"]
-
   [kinds.emulator]
   preset = "android-emulator"
   preselect = ["qa_*"]
@@ -279,6 +274,16 @@ not code.
 
   [kinds.device]
   preset = "android-device"
+
+  # Optional kinds for resources that are not devices.
+  [kinds.port]
+  instances = ["9101", "9102", "9103"]
+
+  # Optional: build slots for Gradle (section 11).
+  [kinds.build]
+  count = 5
+  owner_grace = "0s"
+  idle_timeout = "off"
   ```
 
 - **`on_void`** is a command that ends a void instance, for example one that kills an
@@ -682,7 +687,12 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   agent can then decide to wait or to do something else. The queue of the callers that wait
   comes with it, and `status` then also shows the callers that wait for each resource.
 
-## 11. Build slots
+## 11. Optional: build slots for Gradle
+
+This section is an example of a counted kind for a resource that is not a device. Build slots
+are not part of the device setup, and a project that uses banksman for devices and emulators
+does not need them. Set them up only when the operator wants to limit parallel Gradle builds
+on the machine.
 
 Sessions are cheap; builds and emulators are what use up memory. Build slots are a counted
 kind in the same pool, and a Gradle init script makes every Gradle build of the user hold one
@@ -797,7 +807,7 @@ banksman version [--json]
 
 banksman admin discover [--kind <kind>] [--all] [--json] [--yes]
 banksman admin release --force --resource <name>
-banksman admin gradle-init [--build-slot]                          # the scripts for build slots
+banksman admin gradle-init [--build-slot]                          # optional build slots
 ```
 
 Commands that grant a resource print `KEY=value` lines, for example `RESOURCE=`, `SERIAL=`,
@@ -874,13 +884,12 @@ instances = ["9101", "9102", "9103"]
 [kinds.sdk]
 count = 1
 owner_grace = "0s"
-
-# Build slots for Gradle (section 11).
-[kinds.build]
-count = 2
-owner_grace = "0s"
-idle_timeout = "off"
 ```
+
+The emulators and the devices are the main part. The ports and the mutex are optional.
+Build slots for Gradle (section 11) are not in this configuration: they are a separate,
+optional setup of the operator for every Gradle build on the machine, and the project does
+not need them.
 
 After `banksman admin discover`, the inventory allows the selected AVDs, devices, and
 accounts. A test run then gets an emulator and a port in one call, and the scripts use the
@@ -910,8 +919,8 @@ Done:
 - Joint acquire: several resources in one call, one holding for each call, and accounts
   leased with their device.
 - The console: `status` with every resource and when it can be free, `watch`, and the `log`.
-- Build slots: a Gradle init script that holds a slot while each build runs, also when Gradle
-  reuses the configuration cache.
+- Optional build slots: a Gradle init script that holds a slot while each build runs, also
+  when Gradle reuses the configuration cache.
 - The supervised run: `banksman run`, and the helper, the stub for tests, and the rules for
   the scripts and agents of a project.
 

@@ -82,7 +82,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # command text always sees the flag's full name.
     parser = argparse.ArgumentParser(
         prog="banksman",
-        description="Lease shared devices, emulators, and build slots to parallel coding agents.",
+        description="Lease shared devices and emulators to parallel coding agents.",
         allow_abbrev=False,
     )
     parser.add_argument("--version", action="version", version=VERSION_LINE)
@@ -360,8 +360,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     gradle_init_command = admin_commands.add_parser(
         "gradle-init",
-        help="print the Gradle init script that makes every build hold a build slot; save it"
-        " in ~/.gradle/init.d/",
+        help="print the optional Gradle init script that makes every build hold a build slot;"
+        " save it in ~/.gradle/init.d/",
         allow_abbrev=False,
     )
     gradle_init_command.add_argument(
