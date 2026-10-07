@@ -102,12 +102,19 @@ def test_status_shows_when_a_lease_can_be_free(capsys, config_path, tmp_path, mo
     assert all(ends[key]["at"].endswith("Z") for key in ends)
     assert lease["drain_deadline"] is None
 
+    before = time.time()
     assert main(["status"]) == 0
+    after = time.time()
     row = {row["RESOURCE"]: row for row in table_rows(capsys.readouterr().out)}["qa_phone"]
     assert row["STATE"] == "ready"
     assert row["HOLDER"] == "tree-a · verify the layout"
-    latest = time.strftime("%H:%M", time.localtime(time.time() + 3 * 60 * 60))
-    assert row["LATEST"].endswith(latest)
+    # The hard cap ends up to 5 seconds before 3 hours after status; a new minute can start
+    # between the commands, so either minute is correct.
+    latest = {
+        time.strftime("%H:%M", time.localtime(moment + 3 * 60 * 60))
+        for moment in (before - 5, after)
+    }
+    assert row["LATEST"][-5:] in latest
 
 
 def test_status_shows_the_drain_deadline_of_a_draining_lease(capsys, state_dir):

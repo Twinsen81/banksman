@@ -5,6 +5,14 @@ emulators, or other resources that banksman leases. banksman decides who may use
 resource. The project keeps its app setup and cleanup in its own scripts. The rules, and an
 example configuration for an Android project, are in section 14 of [DESIGN.md](DESIGN.md).
 
+The usual integration leases devices and emulators: the project copies the helper, runs its
+device work with `banksman run`, tests its scripts with the stub, and adds the rules for its
+agents. That is all that this guide describes. Other kinds, such as host ports or a mutex,
+are optional, and a project adds one only when it needs it. Build slots for Gradle
+(DESIGN.md, section 11) are not part of a project's integration: they are an optional setup
+of the operator for every Gradle build on the machine. Do not add them to a project unless
+its maintainers ask for them.
+
 ## Run work under a lease: `banksman run`
 
 A script that uses a leased resource for some time must notice when its lease is lost, and

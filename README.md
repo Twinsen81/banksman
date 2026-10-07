@@ -1,14 +1,13 @@
 # banksman
 
-Lease shared devices, emulators, and build slots to parallel coding agents on one machine,
-so that two agents never use the same device at the same time, and a dead run never holds
-one forever.
+Lease shared devices and emulators to parallel coding agents on one machine, so that two
+agents never use the same device at the same time, and a dead run never holds one forever.
 
 > **Status: pre-alpha, not usable yet.** This repository has the design, the lease core
 > (lease files, void triggers, and the reaper), resource kinds as configuration, fencing,
 > discovery with the allowlist, holder identity, requests by properties, joint acquire with
-> accounts, the console (`status`, `watch`, and `log`), build slots for Gradle, and the
-> supervised run (`banksman run`) with a helper for the scripts of a project.
+> accounts, the console (`status`, `watch`, and `log`), the supervised run (`banksman run`)
+> with a helper for the scripts of a project, and optional build slots for Gradle.
 > `explain` and the queue of the callers that wait are not written yet. The design is in
 > [docs/DESIGN.md](docs/DESIGN.md).
 
@@ -20,9 +19,13 @@ the holder is gone.
 ## The problem
 
 Run two or three coding agents in parallel worktrees of one mobile app, and they reach for
-the same things: a phone on USB, a small number of emulators, and memory for heavy builds.
-One agent installs its build while another is in the middle of a UI test. A lock held by
-"whoever started it" does not help, because it stays taken forever when that run dies.
+the same devices: a phone on USB, and a small number of emulators. One agent installs its
+build while another is in the middle of a UI test. A lock held by "whoever started it" does
+not help, because it stays taken forever when that run dies.
+
+banksman is made for devices and emulators. The lease core does not depend on the type of
+resource, so an operator can also declare other resources, such as host ports or a mutex for
+`sdkmanager`. These are optional, and a project that only shares devices does not need them.
 
 ## How it works
 
@@ -40,15 +43,16 @@ One agent installs its build while another is in the middle of a UI test. A lock
 - **Automatic holder identity.** banksman records the worktree, the issue, and the agent
   process that holds each lease. It works the same for any coding agent, and for a person
   at a terminal.
-- **Build slots.** A Gradle init script makes every build on the machine hold one of a few
-  build slots while it runs, so that parallel agents do not use up the memory. A build that
-  finds every slot in use waits, and says so.
 - **One view of everything.** `banksman status` shows every resource, who holds it, why,
   and when it will be free at the latest. Agents read the same data as JSON.
 - **Closed by default.** An agent can only get what the operator allows. A personal phone
   or emulator on the same machine is never offered.
 - **Knows no app.** banksman leases devices. What a run installs or clears on a device is
   the run's own business.
+- **Other resources, when the operator wants them.** A counted kind is a number of
+  interchangeable slots. For example, an operator who wants to limit parallel Gradle builds
+  can install a Gradle init script that makes every build hold a build slot. This is one
+  use of a counted kind. It is not part of the device setup, and a project does not need it.
 - **Optional.** Scripts that call banksman behave exactly as before on a machine where it
   is not installed. [docs/PROJECTS.md](docs/PROJECTS.md) has a helper that a project copies,
   a stub for its tests, and permission rules for its agents.
