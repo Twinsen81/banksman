@@ -1,0 +1,49 @@
+#!/bin/sh
+# A stand-in for banksman in the tests of a project's scripts. Put it on PATH as `banksman`.
+#
+# It appends each call to the file that BANKSMAN_STUB_LOG names, one line for each call. acquire
+# prints a grant of the resource stub-0 with the lease stub-lease, or keeps the lease that
+# --lease names, or exits with BANKSMAN_STUB_STATUS, for example 4 for a machine whose devices
+# are all in use. run runs the
+# command after -- with the environment that banksman run --lease gives it, and every other
+# command does nothing.
+
+if [ -n "${BANKSMAN_STUB_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$BANKSMAN_STUB_LOG"
+fi
+case $1 in
+    acquire)
+        if [ -n "${BANKSMAN_STUB_STATUS:-}" ]; then
+            exit "$BANKSMAN_STUB_STATUS"
+        fi
+        lease=stub-lease
+        kept=false
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = --lease ]; then
+                lease=$2
+                kept=true
+            fi
+            shift
+        done
+        printf 'RESOURCE=stub-0\nKIND=stub\nLEASE=%s\nSTATE=ready\nKEPT=%s\n' "$lease" "$kept"
+        printf 'SERIAL=stub-serial\n'
+        ;;
+    run)
+        shift
+        unset BANKSMAN_SERIAL BANKSMAN_ACCOUNTS
+        export BANKSMAN_KIND=stub
+        while [ "$#" -gt 0 ]; do
+            case $1 in
+                --resource) export BANKSMAN_RESOURCE="$2" ;;
+                --lease) export BANKSMAN_LEASE="$2" ;;
+                --)
+                    shift
+                    break
+                    ;;
+            esac
+            shift
+        done
+        exec "$@"
+        ;;
+esac
+

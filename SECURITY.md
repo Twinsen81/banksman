@@ -45,7 +45,8 @@ hook that ends anything.
 **Agents are clients, not operators.** Agents acquire, touch, check, and release leases.
 Discovery, which decides what agents may use, and forced release, which takes a resource
 from another holder, are operator commands under `banksman admin`. An agent's permission
-rules can refuse all of them with one pattern. The inventory that discovery writes,
+rules can refuse all of them with one pattern; [docs/PROJECTS.md](docs/PROJECTS.md) gives
+such rules for Claude Code and Codex. The inventory that discovery writes,
 `~/.config/banksman/inventory.toml`, decides what agents may use, so banksman refuses an
 inventory that another user owns or that group or others can write to, as for the
 configuration file. A new scan never allows a name that a person refused. That is a guardrail against a careless
@@ -83,7 +84,8 @@ such an instance, so `status` and `acquire` show only why a discovery failed and
 notes it has; only `banksman admin discover` shows the notes.
 
 **A grant is safe to read in a shell.** The `KEY=value` lines of `acquire` carry only the
-resource name, the kind, the lease id, the state, a serial, and the granted accounts, and each
+resource name, the kind, the lease id, the state, whether the lease was kept, a serial, and
+the granted accounts, and each
 value has only the characters of a resource name; several accounts are separated by commas.
 The name of a part, which is the prefix of its keys, has only lowercase letters, digits, and
 `_`. A serial with other characters is not printed, and no other fact is printed.
@@ -102,6 +104,14 @@ that runs the build. So a lease that another caller gives that owner process, wi
 **No credentials.** For accounts on devices, banksman stores identifiers such as email
 addresses, never passwords or tokens. The account is already signed in on the device; a
 run needs the address, not a secret.
+
+**A supervised run signals only the group that it created.** `banksman run` starts the
+leader of a new process group for its command, and signals that group only while the leader,
+its own child, is not yet reaped, so that the id of the group cannot name another group. It
+passes on to the group the SIGHUP, SIGINT, SIGQUIT, and SIGTERM that it gets, and it stops the
+group when the lease is lost. The command gets the resource, the kind, and the lease id in its
+environment, and the serial and the accounts of its grant, all with the characters of a
+resource name only.
 
 **Fencing covers the scripts, not every command.** A script that registers as a user of a
 lease stops itself when the lease is lost, or the reaper stops it when the operator turns

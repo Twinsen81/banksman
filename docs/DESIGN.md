@@ -1,11 +1,12 @@
 # banksman design
 
 **Status:** the project scaffold, the lease core, kinds as configuration, fencing, discovery,
-holder identity, requests by properties, joint acquire with accounts, the console, and build
-slots exist. Sections 3 to 9 and 11 are implemented, with `banksman acquire`, `touch`,
-`release`, `reap`, `banksman whoami`, the commands that scripts run (`enter`, `check`, and
-`leave`), `banksman admin discover`, `banksman admin release --force`, and
-`banksman admin gradle-init`. Of section 10, `status`, `watch`, and `log` are implemented.
+holder identity, requests by properties, joint acquire with accounts, the console, build
+slots, and the supervised run exist. Sections 3 to 9, 11, and 14 are implemented, with
+`banksman acquire`, `touch`, `release`, `reap`, `banksman whoami`, the commands that scripts
+run (`enter`, `check`, `leave`, and `run`), `banksman admin discover`,
+`banksman admin release --force`, and `banksman admin gradle-init`. Of section 10, `status`,
+`watch`, and `log` are implemented.
 `explain` and the queue of the callers that wait are not implemented yet.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
@@ -152,6 +153,25 @@ minutes, and its lease can become void in the middle.
   its own process group. When the script no longer uses the resource, it runs `leave`.
   `leave` refuses while another process of the script still runs, so a script cannot leave
   while its work still uses the resource.
+- **`banksman run` does the user's side for one command.** A shell script cannot easily create
+  a process group, because macOS has no `setsid` command, and a check loop is easy to get
+  wrong in each project. `run` starts a small leader program as the leader of a new process
+  group, registers the leader and its group with `enter`, and only then lets the leader start
+  the command in the group. While the command runs, `run` checks the lease every 10 seconds,
+  or every quarter of the drain timeout or the idle timeout of the lease when that is shorter.
+  When the lease is lost, it stops the group: SIGTERM, and SIGKILL to the processes that still
+  run after 10 seconds. It leaves only when no process is left in the group, so it also waits
+  for the processes that the command started and left behind. The leader lives until `run` is
+  done with the group, so the id of the group never names another group when `run` signals
+  it. When `run` ends first, for example because its caller killed it, the leader ends the
+  group, so the command never runs without its check loop. `run` exits with the status of the
+  command, or with status 3 when the lease was lost, also when the command failed after the
+  lease was lost, because the reaper can stop the group or end the instance. `run` fences only
+  the processes in the group: a daemon that the command uses, such as the Gradle daemon or the
+  adb server, runs outside it. With `--where` instead of a lease id, it
+  acquires a lease for the command, with itself as the owner process, and releases it after
+  the command, so a counted kind with `count = 1` is a mutex for one command at a time.
+  [PROJECTS.md](PROJECTS.md) has the details.
 - **The reaper's side: no signals by default.** For a void lease, the reaper first marks it
   `draining`, so that no further ownership check passes. By default it sends no signal to
   any process. It waits until every registered script has stopped itself, confirms that by
@@ -330,7 +350,8 @@ When several resources match, banksman chooses in a fixed order:
 
 1. A resource of the caller's holding, if the caller passes the lease id with `--lease` and
    the resource still matches. The lease is touched, and it records the caller's agent
-   process as its owner process.
+   process as its owner process, unless its owner process still runs and started the
+   caller, as `banksman run` does for a script that it runs (section 9).
 2. A kind with a lower `rank` (section 5). So a request that does not name a kind gets an
    emulator before a physical device.
 3. An instance that runs before one that does not run, which saves the time and the memory
@@ -342,8 +363,10 @@ several agents can work in one worktree at the same time, so only the lease id t
 holdings apart (section 9).
 
 - **The grant.** `acquire` prints `KEY=value` lines: `RESOURCE`, `KIND`, `LEASE` (the lease
-  id that the scripts pass back), `STATE`, `SERIAL` when discovery knows it, and `ACCOUNTS`
-  when the request asks for accounts (section 7). Each value has only the characters of a
+  id that the scripts pass back), `STATE`, `KEPT` (`true` for a lease of the caller's holding
+  that `--lease` kept, otherwise `false`), `SERIAL` when discovery knows it, and `ACCOUNTS`
+  when the request asks for accounts (section 7). A kept lease can have another id than the
+  one that the caller passed, because each lease of a holding has its own id. Each value has only the characters of a
   resource name, so that a shell script can use it as it is: a serial with other characters
   is not printed. With `--json`, it prints a list `parts` with the same values for each part
   of the request.
@@ -396,12 +419,14 @@ holdings apart (section 9).
   PHONE_KIND=device
   PHONE_LEASE=4f1c2b0e9d7a4c55a0f3e6b1c2d3e4f5
   PHONE_STATE=ready
+  PHONE_KEPT=false
   PHONE_SERIAL=R5CR1234ABC
   PHONE_ACCOUNTS=qa@example.test
   TABLET_RESOURCE=qa_tablet
   TABLET_KIND=emulator
   TABLET_LEASE=9e8d7c6b5a4f4e3d2c1b0a9f8e7d6c5b
   TABLET_STATE=ready
+  TABLET_KEPT=false
   ```
 
   A part name has lowercase letters, digits, and `_`, and becomes the prefix of the keys of
@@ -571,7 +596,10 @@ holding, and `acquire --lease`, `touch`, and `release` take it. Liveness stays w
 agent, through its own agent process.
 
 - `touch` records the caller's agent process as the owner process of every lease of the
-  holding, so a lease survives a restart of the agent.
+  holding, so a lease survives a restart of the agent. A lease whose owner process still runs
+  and started the caller keeps that owner, also for `acquire --lease`: the caller works within
+  the life of that process. So a script that `banksman run --where` runs cannot move the lease
+  of the run to the agent, and the lease still ends with the run.
 - `release --all` gives back only the leases whose owner process is the caller's agent
   process, so it acts for one agent. After a restart of the agent, it finds a lease only
   after a touch has recorded the new agent process; until then, the lease ends by its
@@ -753,6 +781,9 @@ banksman acquire [--as <part>] [--where <attr><op><value> ...] [--accounts <n>] 
 banksman enter   --resource <name> --lease <id> --pid <pid> [--pgid <pgid>]  # check, touch, register
 banksman check   --resource <name> --lease <id>                    # touch; exit 0: yours, 3: lost
 banksman leave   --resource <name> --lease <id> --pid <pid>
+banksman run     --lease <id> --resource <name> -- <command> ...   # in a group of its own, fenced
+banksman run     --where <attr><op><value> ... [--accounts <n>] [--for <text>] [--expect <duration>]
+                 [--wait <duration>] [--issue <id>] [--owner-pid <pid>] -- <command> ...
 banksman touch   --lease <id> [--resource <name>] [--expect <duration>] [--owner-pid <pid>]
 banksman release --lease <id> [--resource <name>]                  # the holding, or one resource
 banksman release --all [--owner-pid <pid>]                         # the leases of this agent
@@ -773,7 +804,8 @@ Commands that grant a resource print `KEY=value` lines, for example `RESOURCE=`,
 `ACCOUNTS=`, and `LEASE=`, the lease id that the scripts pass back, so that a shell script
 can read them.
 With `--json` they print JSON instead. Exit status 1 is an error, 2 a usage error, 3 a lease
-that is lost, and 4 a request whose matching resources are all in use.
+that is lost, and 4 a request whose matching resources are all in use. `run` exits with the
+status of its command, unless banksman fails before the command starts or the lease is lost.
 
 Every command that only an operator may run is under `banksman admin`, so that an agent's
 permission rules can refuse all of them with one pattern, including ones added later.
@@ -791,18 +823,74 @@ permission rules can refuse all of them with one pattern, including ones added l
 
 ## 14. Using banksman from a project
 
+[PROJECTS.md](PROJECTS.md) has the helper, the stub for tests, and the rules for agents that
+this section names.
+
 - Every script goes through one small helper that returns at once when `banksman` is not
-  on `PATH`, so the script behaves exactly as before on a machine without it. Test the
-  scripts both ways.
+  on `PATH`, so the script behaves exactly as before on a machine without it. The project
+  copies the helper into its repository, because its scripts cannot depend on a file that
+  banksman installs. Test the scripts both ways: with a stub `banksman` on `PATH`, and
+  without one.
+- Run the work that uses a resource with `banksman run`, so that it stops when its lease is
+  lost (section 4).
 - Pass the leased serial to every tool, for example `adb -s <serial>`. A bare `adb` call
   acts on whatever device adb chooses.
 - Keep the lease id that `acquire` prints. Pass it to the scripts, and back to `acquire` with
   `--lease` to keep the same resource.
 - Start the granted instance when it does not run, and handle one that already runs:
-  discovery can miss an emulator that is still starting.
+  discovery can miss an emulator that is still starting. Start it before `banksman run`, not
+  inside it: `run` waits for every process that its command leaves in its group.
 - Release leases before waiting for a person, so that a run that waits overnight does not
   hold a device. If a run forgets, the owner and idle checks free the device later.
 - Keep app setup and cleanup in the project's scripts.
+- Refuse `banksman admin` in the permission rules of the agents. Without such a rule, an agent
+  can widen what agents may use, or take a resource from another holder. The rule is a
+  guardrail, not a security boundary.
+
+An example configuration for a typical Android project, in `~/.config/banksman/config.toml`:
+
+```toml
+# Emulators: discover selects at first only the AVDs whose names start with e2e_, so a
+# personal AVD on the same machine is never offered by mistake.
+[kinds.emulator]
+preset = "android-emulator"
+preselect = ["e2e_*"]
+boot_timeout = "8m"
+
+# Physical devices: no pattern, so a person selects each device in banksman admin discover.
+[kinds.device]
+preset = "android-device"
+
+# Accounts: only the test accounts are selected at first.
+[accounts]
+preselect = ["*@example.test"]
+
+# Host ports, for example for a server that a test run starts: each run gets its own.
+[kinds.port]
+instances = ["9101", "9102", "9103"]
+
+# A mutex: one AVD creation or sdkmanager call at a time. The lease of banksman run --where
+# ends with the run, so a run that is killed frees the mutex at the next command.
+[kinds.sdk]
+count = 1
+owner_grace = "0s"
+
+# Build slots for Gradle (section 11).
+[kinds.build]
+count = 2
+owner_grace = "0s"
+idle_timeout = "off"
+```
+
+After `banksman admin discover`, the inventory allows the selected AVDs, devices, and
+accounts. A test run then gets an emulator and a port in one call, and the scripts use the
+mutex with `banksman run`:
+
+```sh
+banksman acquire --as phone --where kind=emulator --where form=phone \
+                 --as port --where kind=port --for "UI tests" --wait 15m
+banksman run --where kind=sdk --wait 10m --for "create an AVD" -- avdmanager create avd ...
+```
 
 ## 15. Roadmap
 
@@ -824,6 +912,8 @@ Done:
 - The console: `status` with every resource and when it can be free, `watch`, and the `log`.
 - Build slots: a Gradle init script that holds a slot while each build runs, also when Gradle
   reuses the configuration cache.
+- The supervised run: `banksman run`, and the helper, the stub for tests, and the rules for
+  the scripts and agents of a project.
 
 Next:
 

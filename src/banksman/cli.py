@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import json
 import os
+import signal
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -40,6 +41,8 @@ from banksman.request import (
     parse_clause,
     search,
 )
+from banksman.run import Outcome
+from banksman.run import run as run_command
 from banksman.sanitize import clean
 from banksman.store import (
     Busy,
@@ -260,6 +263,65 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _lease_arguments(leave)
     leave.add_argument("--pid", type=_pid, required=True, help="the process of the script")
+
+    run = commands.add_parser(
+        "run",
+        help="run a command in a process group of its own under a lease, and stop the group when"
+        " the lease is lost",
+        allow_abbrev=False,
+    )
+    run.set_defaults(parts=None)
+    run.add_argument(
+        "--lease", metavar="ID", help="the id of a lease that the caller holds, from acquire"
+    )
+    run.add_argument("--resource", help="with --lease: the leased resource")
+    run.add_argument(
+        "--where",
+        action=_WhereAction,
+        type=_clause,
+        metavar="CLAUSE",
+        help="instead of --lease: lease a resource that matches for the command, and give it"
+        " back after the command; repeat it for more",
+    )
+    run.add_argument(
+        "--accounts",
+        action=_AccountsAction,
+        type=_account_count,
+        metavar="N",
+        help="with --where: also lease N allowed accounts that are signed in on the resource",
+    )
+    run.add_argument(
+        "--for",
+        dest="purpose",
+        metavar="TEXT",
+        help="with --where: why the resource is needed; people and other agents read it",
+    )
+    run.add_argument(
+        "--expect",
+        type=_duration,
+        metavar="DURATION",
+        help="with --where: how long the resource is needed, such as 20m; only a hint for others",
+    )
+    run.add_argument(
+        "--wait",
+        type=_duration,
+        metavar="DURATION",
+        help="with --where: how long to wait while every matching resource is in use",
+    )
+    run.add_argument(
+        "--issue", help="with --where: the issue id; by default it comes from the branch name"
+    )
+    run.add_argument(
+        "--owner-pid",
+        type=_pid,
+        help="with --where: the process whose end frees the lease; by default this run",
+    )
+    run.add_argument(
+        "command_line",
+        nargs=argparse.REMAINDER,
+        metavar="-- COMMAND",
+        help="the command and its arguments, after --",
+    )
 
     admin = commands.add_parser("admin", help="commands for the operator", allow_abbrev=False)
     admin_commands = admin.add_subparsers(
@@ -715,22 +777,197 @@ def _cmd_leave(args: argparse.Namespace) -> int:
     return 0
 
 
+# When the command ends by one of these signals, banksman ends by the same signal, so that the
+# shell that runs banksman sees the same end; for example, a script stops on Ctrl-C. For a
+# signal that dumps core, banksman exits with 128 and the number of the signal instead.
+_PASSED_ON = (signal.SIGHUP, signal.SIGINT, signal.SIGKILL, signal.SIGPIPE, signal.SIGTERM)
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    command = args.command_line
+    if command[:1] == ["--"]:
+        command = command[1:]
+    if not command:
+        raise BanksmanError(
+            "give the command after --, for example: banksman run --lease <id> --resource <name>"
+            " -- ./run-tests"
+        )
+    request = args.parts is not None
+    if request == (args.lease is not None):
+        raise BanksmanError("run needs --lease and --resource, or --where, but not both")
+    if not request:
+        if args.resource is None:
+            raise BanksmanError("run --lease needs --resource, the leased resource")
+        given = [
+            flag
+            for flag, value in (
+                ("--for", args.purpose),
+                ("--expect", args.expect),
+                ("--wait", args.wait),
+                ("--issue", args.issue),
+                ("--owner-pid", args.owner_pid),
+            )
+            if value is not None
+        ]
+        if given:
+            raise BanksmanError(f"run {given[0]} needs --where")
+        store, _ = _reaped_store()
+        lease = store.check(args.resource, args.lease)
+        outcome = run_command(
+            store, lease.resource, lease.lease_id, command, _command_env(lease, None), _warn
+        )
+        return _run_status(outcome, command)
+    if args.resource is not None:
+        raise BanksmanError("run --resource needs --lease; with --where, banksman chooses it")
+    parts = _parts(args)
+    grant = _acquire(
+        parts,
+        purpose=args.purpose,
+        expect=args.expect,
+        wait=args.wait or 0,
+        keep=None,
+        issue=args.issue,
+        # The lease belongs to this run, so it ends with it, also when something kills it.
+        owner_pid=os.getpid() if args.owner_pid is None else args.owner_pid,
+    )
+    (lease,) = grant.leases
+    try:
+        outcome = run_command(
+            grant.store,
+            lease.resource,
+            lease.lease_id,
+            command,
+            _command_env(lease, _serial(grant.facts[0])),
+            _warn,
+        )
+    finally:
+        _give_back_after_run(lease)
+    return _run_status(outcome, command)
+
+
+def _command_env(lease: Lease, serial: str | None) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if key not in hooks.VARIABLES}
+    env.update(
+        BANKSMAN_RESOURCE=lease.resource, BANKSMAN_KIND=lease.kind, BANKSMAN_LEASE=lease.lease_id
+    )
+    if serial is not None:
+        env["BANKSMAN_SERIAL"] = serial
+    if lease.accounts:
+        env["BANKSMAN_ACCOUNTS"] = ",".join(lease.accounts)
+    return env
+
+
+def _give_back_after_run(lease: Lease) -> None:
+    # The reaper first, as for banksman release, so that a lease that became void is taken back
+    # with the hooks of the current configuration. The lease can be lost already.
+    try:
+        store, _ = _reaped_store()
+        for each, drained in store.release_holding(lease.lease_id):
+            if drained is not None:
+                _warn(_released(each.resource, drained))
+    except NotHeld:
+        pass
+    except (BanksmanError, OSError) as exc:
+        _warn(f"cannot give back {lease.resource}: {exc}")
+
+
+def _run_status(outcome: Outcome, command: Sequence[str]) -> int:
+    if outcome.lost is not None:
+        if outcome.running:
+            pids = ", ".join(f"pid {pid}" for pid in outcome.running)
+            stopped = (
+                f"processes of the command still run: {pids}. The resource is handed on only"
+                " after they have ended"
+            )
+        else:
+            stopped = "the command was stopped"
+        _warn(f"the lease is lost: {outcome.lost}; {stopped}")
+        return EXIT_LOST
+    if outcome.error is not None:
+        _warn(f"cannot run {command[0]}: {outcome.error}")
+    returncode = outcome.returncode
+    assert returncode is not None
+    if outcome.terminal and returncode in (-signal.SIGINT, 128 + signal.SIGINT):
+        # Ctrl-C reached only the group of the command, which had the terminal. Without
+        # banksman, the script that runs the command would get it too. A program such as a JVM
+        # exits with 130 after Ctrl-C instead of ending by the signal.
+        _end_by(signal.SIGINT, os.getpgrp())
+    if returncode >= 0:
+        return returncode
+    signum = -returncode
+    if signum in _PASSED_ON:
+        _end_by(signum, None)
+    return 128 + signum
+
+
+def _end_by(signum: int, group: int | None) -> None:
+    """End banksman by a signal, together with its process group when one is given."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if signum != signal.SIGKILL:
+        signal.signal(signum, signal.SIG_DFL)
+    if group is not None:
+        os.killpg(group, signum)
+    else:
+        os.kill(os.getpid(), signum)
+
+
+def _warn(text: str) -> None:
+    print(clean(f"banksman: {text}"), file=sys.stderr)
+
+
 def _cmd_acquire(args: argparse.Namespace) -> int:
-    parts = [
+    parts = _parts(args)
+    grant = _acquire(
+        parts,
+        purpose=args.purpose,
+        expect=args.expect,
+        wait=args.wait,
+        keep=args.lease,
+        issue=args.issue,
+        owner_pid=args.owner_pid,
+    )
+    _print_grant(parts, grant.granted, grant.leases, grant.facts, args.json)
+    return 0
+
+
+def _parts(args: argparse.Namespace) -> list[Part]:
+    return [
         Part(tuple(each.clauses), each.name, each.accounts or 0)
         for each in args.parts or [_PartArguments(None)]
     ]
+
+
+@dataclass(frozen=True)
+class _Grant:
+    store: Store
+    granted: list[Granted]
+    leases: list[Lease]
+    # The facts of each granted resource, read again after a reset.
+    facts: list[Mapping[str, FactValue]]
+
+
+def _acquire(
+    parts: Sequence[Part],
+    *,
+    purpose: str | None,
+    expect: int | None,
+    wait: int,
+    keep: str | None,
+    issue: str | None,
+    owner_pid: int | None,
+) -> _Grant:
     config = load_config()
     check_kinds([clause for part in parts for clause in part.clauses], config)
     machine = Machine()
     holder = find_holder(
         machine.process_table(),
         config.holder,
-        issue=args.issue,
-        owner_pid=args.owner_pid,
-        purpose=args.purpose,
+        issue=issue,
+        owner_pid=owner_pid,
+        purpose=purpose,
     )
-    give_up = machine.clock() + args.wait
+    give_up = machine.clock() + wait
     waiting = False
     owner_started = None
     while True:
@@ -759,22 +996,22 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         granted = store.grant(
             needs,
             holder,
-            keep=args.lease,
-            expect=args.expect,
+            keep=keep,
+            expect=expect,
             reset_time=hooks.HOOK_TIMEOUT_SECONDS,
         )
         if granted is not None:
             break
         left = give_up - machine.clock()
         if left <= 0:
-            raise Busy(_busy(parts, found.candidates, still=bool(args.wait)))
+            raise Busy(_busy(parts, found.candidates, still=bool(wait)))
         owner_started = _owner_still_runs(machine, holder.owner_pid, owner_started)
         if not waiting:
             # A caller that waits, such as a build, shows why it does not go on.
             busy = _busy(parts, found.candidates, still=False)
             print(
                 clean(
-                    f"banksman: {busy}; waiting up to {console.span(args.wait)}. banksman status"
+                    f"banksman: {busy}; waiting up to {console.span(wait)}. banksman status"
                     " shows who holds them"
                 ),
                 file=sys.stderr,
@@ -788,8 +1025,7 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         reset = not grant.kept and config.kinds[candidate.kind].on_acquire is not None
         # The hook can restart the instance, and a restarted emulator can get another serial.
         facts.append(_facts_now(config, candidate) if reset else candidate.facts)
-    _print_grant(parts, granted, leases, facts, args.json)
-    return 0
+    return _Grant(store, granted, leases, facts)
 
 
 def _owner_still_runs(machine: Machine, owner_pid: int | None, started: str | None) -> str | None:
@@ -936,14 +1172,7 @@ def _print_grant(
     facts: Sequence[Mapping[str, FactValue]],
     as_json: bool,
 ) -> None:
-    # Facts come from devices and hooks. Only a serial is printed, and only when it has the
-    # characters of a resource name, so that a shell script can use every value as it is.
-    # Account names are resource names too.
-    serials = []
-    for each in facts:
-        serial = each.get("serial")
-        valid = isinstance(serial, str) and RESOURCE_NAME.fullmatch(serial) is not None
-        serials.append(serial if valid else None)
+    serials = [_serial(each) for each in facts]
     if as_json:
         _print_json(
             {
@@ -970,6 +1199,7 @@ def _print_grant(
             ("KIND", leases[0].kind),
             ("LEASE", leases[0].lease_id),
             ("STATE", leases[0].state),
+            ("KEPT", _flag(granted[0].kept)),
         ]
         lines += [("SERIAL", serials[0])] if serials[0] is not None else []
         lines += [("ACCOUNTS", ",".join(granted[0].accounts))] if parts[0].accounts else []
@@ -982,11 +1212,25 @@ def _print_grant(
                 (f"{prefix}KIND", lease.kind),
                 (f"{prefix}LEASE", lease.lease_id),
                 (f"{prefix}STATE", lease.state),
+                (f"{prefix}KEPT", _flag(grant.kept)),
             ]
             lines += [(f"{prefix}SERIAL", serial)] if serial is not None else []
             lines += [(f"{prefix}ACCOUNTS", ",".join(grant.accounts))] if part.accounts else []
     for key, value in lines:
         print(f"{key}={value}")
+
+
+def _flag(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _serial(facts: Mapping[str, FactValue]) -> str | None:
+    # Facts come from devices and hooks. Only a serial is printed, and only when it has the
+    # characters of a resource name, so that a shell script can use every value as it is.
+    # Account names are resource names too.
+    serial = facts.get("serial")
+    valid = isinstance(serial, str) and RESOURCE_NAME.fullmatch(serial) is not None
+    return serial if valid else None  # type: ignore[return-value]
 
 
 def _cmd_touch(args: argparse.Namespace) -> int:
@@ -1411,6 +1655,7 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "enter": _cmd_enter,
     "check": _cmd_check,
     "leave": _cmd_leave,
+    "run": _cmd_run,
     "acquire": _cmd_acquire,
     "touch": _cmd_touch,
     "release": _cmd_release,

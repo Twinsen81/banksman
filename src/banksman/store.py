@@ -803,10 +803,26 @@ class Store:
             touched_at=self.system.wall_clock(),
             longest_quiet=max(lease.longest_quiet, now - lease.touched),
         )
-        if owner_pid is None:
+        if owner_pid is None or (owner_pid != lease.owner_pid and self._owner_started_me(lease)):
             return touched
         # A restarted agent runs under a new pid. Recording it keeps the owner rule true.
         return replace(touched, owner_pid=owner_pid, owner_started=self._start_time(owner_pid))
+
+    def _owner_started_me(self, lease: Lease) -> bool:
+        """Whether the owner process of the lease runs and is an ancestor of this process.
+
+        The caller then works within the life of that owner, for example a script that banksman
+        run runs with the lease that it took for its command, so the lease keeps its owner.
+        """
+        if lease.owner_pid is None:
+            return False
+        table = self.system.process_table()
+        owner = table.get(lease.owner_pid)
+        return (
+            owner is not None
+            and owner.started == lease.owner_started
+            and lease.owner_pid in fencing.ancestors(table, os.getpid())
+        )
 
     def _start_time(self, pid: int | None) -> str | None:
         if pid is None:

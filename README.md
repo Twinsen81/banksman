@@ -7,7 +7,8 @@ one forever.
 > **Status: pre-alpha, not usable yet.** This repository has the design, the lease core
 > (lease files, void triggers, and the reaper), resource kinds as configuration, fencing,
 > discovery with the allowlist, holder identity, requests by properties, joint acquire with
-> accounts, the console (`status`, `watch`, and `log`), and build slots for Gradle.
+> accounts, the console (`status`, `watch`, and `log`), build slots for Gradle, and the
+> supervised run (`banksman run`) with a helper for the scripts of a project.
 > `explain` and the queue of the callers that wait are not written yet. The design is in
 > [docs/DESIGN.md](docs/DESIGN.md).
 
@@ -33,6 +34,9 @@ One agent installs its build while another is in the middle of a UI test. A lock
 - **Several resources at once.** A run that needs a phone and a tablet, or a device with a
   signed-in test account, gets them in one call, all or nothing. Two runs never use the same
   account at the same time, also not on two different devices.
+- **Work that stops when its lease is lost.** `banksman run` runs a command in a process
+  group of its own under a lease, and stops it when the lease is lost. With `--where`, it
+  leases a resource just for that command, so a kind with one instance is a mutex.
 - **Automatic holder identity.** banksman records the worktree, the issue, and the agent
   process that holds each lease. It works the same for any coding agent, and for a person
   at a terminal.
@@ -46,7 +50,8 @@ One agent installs its build while another is in the middle of a UI test. A lock
 - **Knows no app.** banksman leases devices. What a run installs or clears on a device is
   the run's own business.
 - **Optional.** Scripts that call banksman behave exactly as before on a machine where it
-  is not installed.
+  is not installed. [docs/PROJECTS.md](docs/PROJECTS.md) has a helper that a project copies,
+  a stub for its tests, and permission rules for its agents.
 
 ## Requirements
 
