@@ -18,6 +18,7 @@ from banksman.store import Store
 from banksman.system import Machine
 
 PRINT_ARGUMENT = "import sys; print(sys.argv[1])"
+READ = "import sys; print(open(sys.argv[1]).read())"
 OWNER = "/work/tree-a"
 BENCH = [
     {"name": "qa_phone", "facts": {"form": "phone", "api": 35, "running": True}},
@@ -82,6 +83,7 @@ def test_status_shows_every_permitted_resource_also_when_it_is_free(capsys, conf
         "kind": "emulator",
         "state": "free",
         "present": True,
+        "serial": None,
         "facts": {"form": "tablet", "api": 33},
         "lease": None,
     }
@@ -135,6 +137,58 @@ def test_status_shows_the_drain_deadline_of_a_draining_lease(capsys, state_dir):
     lease = status_json(capsys)["phone-1"]["lease"]
     assert (lease["state"], lease["free_by"]) == ("draining", None)
     assert 590 <= lease["drain_deadline"]["in"] <= 600
+
+
+def test_status_records_the_serials_that_its_discovery_finds(capsys, config_path, tmp_path):
+    found = tmp_path / "found.json"
+
+    def instances(*listed):
+        for each in listed:
+            each["facts"]["avd"] = each["name"]
+        found.write_text(json.dumps({"schema": 1, "instances": list(listed)}))
+
+    instances(
+        {"name": "qa_phone", "facts": {"running": False}},
+        {"name": "qa_tablet", "facts": {"running": False}},
+    )
+    write_config(
+        config_path,
+        "[holder]\nagents = []\n"
+        f"[kinds.emulator]\ndiscover = {json.dumps(hook(READ, str(found)))}\n",
+    )
+    save_inventory(Inventory(kinds={"emulator": Decisions(allowed=("qa_phone", "qa_tablet"))}))
+    acquire(capsys, "--where", "avd=qa_phone")
+    acquire(capsys, "--where", "avd=qa_tablet")
+    # The holder starts the emulator. The status of any caller records its serial.
+    instances(
+        {"name": "qa_phone", "facts": {"running": True, "serial": "emulator-5554"}},
+        {"name": "qa_tablet", "facts": {"running": True, "serial": "emulator-5556"}},
+    )
+    assert main(["status"]) == 0
+    rows = {row["RESOURCE"]: row for row in table_rows(capsys.readouterr().out)}
+    assert (rows["qa_phone"]["SERIAL"], rows["qa_tablet"]["SERIAL"]) == (
+        "emulator-5554",
+        "emulator-5556",
+    )
+    # The phone stops, and the tablet is not found: only the phone loses its serial.
+    instances({"name": "qa_phone", "facts": {"running": False}})
+    shown = status_json(capsys)
+    assert (shown["qa_phone"]["serial"], shown["qa_phone"]["lease"]["serial"]) == (None, None)
+    assert shown["qa_tablet"]["lease"]["serial"] == "emulator-5556"
+    # A discovery that fails keeps every serial.
+    found.write_text("not JSON")
+    assert status_json(capsys)["qa_tablet"]["serial"] == "emulator-5556"
+
+
+def test_status_shows_the_serial_of_a_free_instance(capsys, config_path, tmp_path):
+    found = tmp_path / "found.json"
+    running = {"name": "qa_phone", "facts": {"running": True, "serial": "emulator-5554"}}
+    found.write_text(json.dumps({"schema": 1, "instances": [running]}))
+    discover = json.dumps(hook(READ, str(found)))
+    write_config(config_path, f"[kinds.emulator]\ndiscover = {discover}\n")
+    save_inventory(Inventory(kinds={"emulator": Decisions(allowed=("qa_phone",))}))
+    shown = status_json(capsys)["qa_phone"]
+    assert (shown["state"], shown["serial"], shown["lease"]) == ("free", "emulator-5554", None)
 
 
 def test_status_shows_the_notes_of_discovery(capsys, config_path):

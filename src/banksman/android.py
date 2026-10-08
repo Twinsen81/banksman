@@ -54,7 +54,7 @@ class AndroidError(BanksmanError):
     """A program of the Android SDK did not give an answer."""
 
 
-def emulators(settings: Android, run: Run | None = None) -> Document:
+def emulators(settings: Android, run: Run | None = None, *, accounts: bool = True) -> Document:
     """Find the AVDs, with the serial and the accounts of each one that runs."""
     run = run_program if run is None else run
     adb = str(sdk(settings) / "platform-tools" / "adb")
@@ -62,15 +62,22 @@ def emulators(settings: Android, run: Run | None = None) -> Document:
     home = avd_home(settings)
     avds = _avds(home, notes)
     running: dict[str, str] = {}
+    booting: set[str] = set()
     listed = True
     try:
         for serial, state in _devices(run, adb):
-            if serial.startswith(_EMULATOR_PREFIX) and state == "device":
-                name = _avd_name(run, adb, serial)
-                if name is None:
-                    notes.append(f"cannot read the AVD name of the running {serial}")
-                else:
-                    running[name] = serial
+            if not serial.startswith(_EMULATOR_PREFIX) or state not in ("device", "offline"):
+                continue
+            # adb lists an emulator as offline until the adb daemon in it starts, for example
+            # while it boots. Its console answers already, so its AVD and its serial are known
+            # from the start.
+            name = _avd_name(run, adb, serial, shell=state == "device")
+            if name is None:
+                notes.append(f"cannot read the AVD name of the running {serial}")
+            else:
+                running[name] = serial
+                if state != "device":
+                    booting.add(serial)
     except AndroidError as exc:
         listed = False
         notes.append(f"cannot list the running emulators, so none is shown as running: {exc}")
@@ -84,12 +91,22 @@ def emulators(settings: Android, run: Run | None = None) -> Document:
             instance["facts"]["running"] = serial is not None
         if serial is not None:
             instance["facts"]["serial"] = serial
-            instance.update(_accounts(run, adb, serial))
+            # The accounts of an emulator that boots cannot be read yet, so they are not known.
+            if accounts and serial not in booting:
+                instance.update(_accounts(run, adb, serial))
         instances.append(instance)
     return {"schema": DISCOVER_SCHEMA, "instances": instances, "notes": notes}
 
 
-def devices(settings: Android, run: Run | None = None) -> Document:
+def avd_name(settings: Android, serial: str, run: Run | None = None) -> str | None:
+    """Return the name of the AVD that runs as the emulator with this serial, or None."""
+    if not serial.startswith(_EMULATOR_PREFIX):
+        return None
+    run = run_program if run is None else run
+    return _avd_name(run, str(sdk(settings) / "platform-tools" / "adb"), serial)
+
+
+def devices(settings: Android, run: Run | None = None, *, accounts: bool = True) -> Document:
     """Find the attached physical devices, with their facts and their accounts."""
     run = run_program if run is None else run
     adb = str(sdk(settings) / "platform-tools" / "adb")
@@ -113,10 +130,11 @@ def devices(settings: Android, run: Run | None = None) -> Document:
             instance["note"] = f"cannot read the properties: {exc}"
         else:
             instance["facts"].update(_device_facts(getprop))
-        accounts = _accounts(run, adb, serial)
-        if "note" in instance and "note" in accounts:
-            accounts["note"] = f"{instance['note']}; {accounts['note']}"
-        instance.update(accounts)
+        if accounts:
+            found = _accounts(run, adb, serial)
+            if "note" in instance and "note" in found:
+                found["note"] = f"{instance['note']}; {found['note']}"
+            instance.update(found)
         instances.append(instance)
     return {"schema": DISCOVER_SCHEMA, "instances": instances, "notes": notes}
 
@@ -204,7 +222,7 @@ def _devices(run: Run, adb: str) -> list[tuple[str, str]]:
     return listed
 
 
-def _avd_name(run: Run, adb: str, serial: str) -> str | None:
+def _avd_name(run: Run, adb: str, serial: str, *, shell: bool = True) -> str | None:
     try:
         # The emulator console prints the name, then "OK".
         lines = run(_adb(adb, serial, "emu", "avd", "name"), ADB_TIMEOUT_SECONDS).splitlines()
@@ -212,6 +230,9 @@ def _avd_name(run: Run, adb: str, serial: str) -> str | None:
             return lines[0].strip()
     except AndroidError:
         pass
+    # The properties need the adb daemon in the emulator.
+    if not shell:
+        return None
     try:
         properties = parse_properties(
             run(_adb(adb, serial, "shell", "getprop"), ADB_TIMEOUT_SECONDS)

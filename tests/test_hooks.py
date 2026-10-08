@@ -4,6 +4,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import replace
 
 import pytest
 from helpers import SRC, hook
@@ -89,6 +90,44 @@ def test_a_hook_gets_the_resource_and_the_kind_a_fixed_directory_and_no_input(tm
     )
     assert hooks.run(hook(code, str(out)), LEASE, timeout=30) is None
     assert out.read_text() == "emu-1 emulator /|"
+
+
+SHOW_SERIALS = (
+    "import os, sys\n"
+    "values = [os.environ.get(name, '-') for name in ('BANKSMAN_SERIAL', 'ANDROID_SERIAL')]\n"
+    "open(sys.argv[1], 'w').write(' '.join(values))\n"
+)
+
+
+def test_a_hook_gets_the_serial_and_an_android_hook_gets_android_serial(tmp_path, monkeypatch):
+    # A hook runs in the environment of whichever command reaps, for example a command of
+    # another lease that banksman run started.
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5560")
+    monkeypatch.setenv("BANKSMAN_SERIAL", "emulator-5560")
+    out = tmp_path / "out"
+    addressed = replace(LEASE, serial="emulator-5554", serial_seen=1000.0)
+    shown = []
+    for lease, android in ((addressed, True), (addressed, False), (LEASE, True), (LEASE, False)):
+        assert hooks.run(hook(SHOW_SERIALS, str(out)), lease, timeout=30, android=android) is None
+        shown.append(out.read_text())
+    assert shown == [
+        "emulator-5554 emulator-5554",
+        "emulator-5554 -",
+        # No device has this serial, so adb without -s finds no device.
+        f"- {hooks.NO_SERIAL}",
+        "- -",
+    ]
+
+
+def test_the_hooks_of_an_android_kind_get_android_serial(tmp_path):
+    out = tmp_path / "out"
+    kinds = {
+        "emulator": Kind(
+            "emulator", preset="android-emulator", on_void=tuple(hook(SHOW_SERIALS, str(out)))
+        )
+    }
+    assert hooks.take_back(kinds, replace(LEASE, serial="emulator-5554")) is None
+    assert out.read_text() == "emulator-5554 emulator-5554"
 
 
 def test_the_output_of_a_hook_is_not_shown(capfd):

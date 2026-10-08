@@ -304,6 +304,30 @@ def test_the_serial_is_read_again_after_a_reset(capsys, config_path, tmp_path):
     save_inventory(Inventory(kinds={"emulator": Decisions(allowed=("qa_phone",))}))
     status, values, _ = acquire(capsys, "--where", "serial=emulator-5554")
     assert (status, values["RESOURCE"], values["SERIAL"]) == (0, "qa_phone", "emulator-5556")
+    assert leases()["qa_phone"].serial == "emulator-5556"
+
+
+def test_the_lease_records_the_serial_of_its_instance(capsys, config_path):
+    configure(config_path)
+    assert acquire(capsys, "--where", "form=phone")[1]["SERIAL"] == "emulator-5554"
+    first = leases()["qa_phone"]
+    assert first.serial == "emulator-5554"
+    values = acquire(capsys, "--where", "form=tablet")[1]
+    assert "SERIAL" not in values
+    tablet = leases()["qa_tablet"]
+    assert tablet.serial is None
+    # The holder starts the tablet, and keeps its lease: the lease gets the serial now.
+    started = [
+        {**each, "facts": {**each["facts"], "running": True, "serial": "emulator-5556"}}
+        if each["name"] == "qa_tablet"
+        else each
+        for each in BENCH
+    ]
+    configure(config_path, instances=started)
+    values = acquire(capsys, "--where", "form=tablet", "--lease", values["LEASE"])[1]
+    assert (values["KEPT"], values["SERIAL"]) == ("true", "emulator-5556")
+    assert leases()["qa_tablet"].serial == "emulator-5556"
+    assert leases()["qa_tablet"].serial_seen > first.serial_seen
 
 
 def test_no_serial_is_printed_for_an_instance_that_is_gone_after_its_reset(
@@ -323,6 +347,29 @@ def test_no_serial_is_printed_for_an_instance_that_is_gone_after_its_reset(
     status, values, _ = acquire(capsys, "--where", "serial=emulator-5554")
     assert (status, values["RESOURCE"]) == (0, "qa_phone")
     assert "SERIAL" not in values
+    assert leases()["qa_phone"].serial is None
+
+
+def test_no_serial_is_kept_from_before_a_reset_when_discovery_fails_after_it(
+    capsys, config_path, tmp_path
+):
+    # The hook can restart the instance on another port. A discovery that fails then cannot tell
+    # which serial it has, and the serial from before the reset can be another instance's.
+    found = tmp_path / "found.json"
+    before = {"name": "qa_phone", "facts": {"running": True, "serial": "emulator-5554"}}
+    found.write_text(json.dumps({"schema": 1, "instances": [before]}))
+    broken = f"open({str(found)!r}, 'w').write('not JSON')"
+    write_config(
+        config_path,
+        "[holder]\nagents = []\n[kinds.emulator]\n"
+        f"discover = {json.dumps(hook(READ, str(found)))}\n"
+        f"on_acquire = {json.dumps(hook(broken))}\n",
+    )
+    save_inventory(Inventory(kinds={"emulator": Decisions(allowed=("qa_phone",))}))
+    status, values, _ = acquire(capsys, "--where", "serial=emulator-5554")
+    assert (status, values["RESOURCE"]) == (0, "qa_phone")
+    assert "SERIAL" not in values
+    assert leases()["qa_phone"].serial is None
 
 
 def test_a_failing_on_acquire_hook_gives_the_lease_back(capsys, config_path):

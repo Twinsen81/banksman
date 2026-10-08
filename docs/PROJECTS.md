@@ -57,17 +57,40 @@ banksman run --lease "$LEASE" --resource "$RESOURCE" -- ./gradlew connectedCheck
   together with the job of banksman. A program in the same pipeline that reads the terminal,
   such as `less`, waits until the command has ended.
 - The command gets `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, and `BANKSMAN_LEASE` in its
-  environment, and `BANKSMAN_ACCOUNTS` when the lease has accounts. It does not get
-  `BANKSMAN_SERIAL` from the environment of the caller, because banksman cannot check that the
-  serial belongs to the lease: pass the serial in an argument.
+  environment, `BANKSMAN_ACCOUNTS` when the lease has accounts, and `BANKSMAN_SERIAL` when the
+  serial of the instance is known. Before the command starts, banksman asks discovery for the
+  serial, so the command gets the serial of an emulator that its holder started or restarted
+  after the grant. When discovery cannot confirm the serial then, for example because adb
+  fails, the command gets no serial. It never takes `BANKSMAN_SERIAL` from the environment of
+  the caller.
+- For a kind with an Android preset, the command also gets `ANDROID_SERIAL`, which `adb`
+  without `-s` and the connected tests of the Android Gradle plugin use. So a tool that a
+  script calls without the serial still acts on the leased device. While the serial is not
+  known, for example because the emulator does not run, `ANDROID_SERIAL` is
+  `banksman-serial-unknown`, which no device has: such a tool then fails with "device not
+  found" instead of acting on a device that adb chooses, which can be the device of another
+  holder. banksman says so on standard error. For other kinds, the command keeps the
+  `ANDROID_SERIAL` of its caller.
+- Each argument of the command that is exactly `{serial}` becomes the serial, and each one
+  that is exactly `{resource}` becomes the resource, as `find -exec` replaces `{}`. The shell
+  of the caller cannot expand `$BANKSMAN_SERIAL`, because banksman sets it only for the
+  command, so this is the short way to pass it:
+
+  ```sh
+  banksman run --lease "$LEASE" --resource "$RESOURCE" -- ./scripts/ui-tests.sh --device {serial}
+  ```
+
+  A part of an argument, such as `--device={serial}`, is not replaced. When the command has
+  `{serial}` and the serial is not known, banksman exits with status 1 before the command
+  starts; with `--where`, it gives the lease back.
 
 With `--where` instead of `--lease`, banksman leases a resource for the command, and gives it
 back after the command. The lease belongs to the run: its owner process is `banksman run`
-itself, so the lease ends with the run, also when something kills the run. The command also
-gets `BANKSMAN_SERIAL` when discovery knows the serial. `--accounts`, `--for`, `--expect`,
-`--wait`, `--issue`, and `--owner-pid` work as for `acquire`. Such a request has one part; for
-several resources at the same time, use `acquire` with `--as`, and run each command with
-`--lease`.
+itself, so the lease ends with the run, also when something kills the run. `--accounts`,
+`--for`, `--expect`, `--wait`, `--issue`, and `--owner-pid` work as for `acquire`. Such a
+request has one part; for several resources at the same time, use `acquire` with `--as`, and
+run each command with `--lease`. `{resource}` passes the resource that banksman chose, for
+example a port: `banksman run --where kind=port -- ./server --port {resource}`.
 
 A counted kind with `count = 1` is a mutex for one command at a time, for example for the
 creation of an AVD or for `sdkmanager`:
@@ -126,9 +149,10 @@ the tests of the project, and put it on `PATH` as `banksman`:
   `stub-serial`. With `--lease`, it keeps that lease (`KEPT=true`). With
   `BANKSMAN_STUB_STATUS` set, for example to 4 for a busy machine, it prints nothing and exits
   with that status.
-- `run` runs the command after `--`, with the environment that `banksman run --lease` gives
-  it: `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, and `BANKSMAN_LEASE`, and no `BANKSMAN_SERIAL`.
-  Every other command does nothing.
+- `run` runs the command after `--` as `banksman run --lease` runs it for a device:
+  with `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, and `BANKSMAN_LEASE`, with `stub-serial` in
+  `BANKSMAN_SERIAL` and `ANDROID_SERIAL`, and with each argument `{serial}` and `{resource}`
+  replaced. Every other command does nothing.
 
 ```sh
 stub=$(mktemp -d)
@@ -230,7 +254,9 @@ Other agents on this machine use the same devices and emulators. When `banksman`
 - Keep the lease id that acquire prints (`LEASE=...`). Pass it to the project's scripts as
   `BANKSMAN_LEASE`, and to `banksman acquire --lease <id>` to keep the same device.
 - Pass the serial to every tool, for example `adb -s <serial>`. A bare `adb` command acts on
-  whatever device adb chooses.
+  whatever device adb chooses. In `banksman run`, write `{serial}` where the command needs
+  the serial, for example
+  `banksman run --lease <id> --resource <name> -- ./scripts/ui-tests.sh --device {serial}`.
 - A granted emulator may not run yet. Start it when it does not run, and use it when it
   runs already.
 - Release the lease (`banksman release --lease <id>`) before you stop to wait for a person.

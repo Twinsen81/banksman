@@ -10,14 +10,14 @@ import signal
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from importlib import resources
 
 from banksman import SCHEMA_VERSION, __version__, console, hooks
 from banksman.assign import MAX_ACCOUNTS, MAX_PARTS
 from banksman.config import Config, Kind, load_config, parse_duration
-from banksman.discovery import FactValue, Found, Instance, discover
+from banksman.discovery import Found, Instance, discover, serial_now, serials_seen
 from banksman.errors import BanksmanError
 from banksman.history import Event, History
 from banksman.identity import find_agent, find_holder
@@ -31,7 +31,7 @@ from banksman.inventory import (
     preselected,
     save_inventory,
 )
-from banksman.lease import QUARANTINED, READY, RESOURCE_NAME, VOID_REASONS, Lease, User
+from banksman.lease import QUARANTINED, READY, VOID_REASONS, Lease, SerialSeen, User
 from banksman.request import (
     PART_NAME,
     Candidate,
@@ -535,12 +535,23 @@ def _recorder() -> Record:
 
 def _take_back(config: Config) -> TakeBack:
     def take_back(lease: Lease) -> bool:
+        kind = config.kinds.get(lease.kind)
+        if kind is not None and kind.on_void is not None:
+            # The hook can end the instance by its serial. The serial in the lease can be old,
+            # and an emulator takes the lowest free port, so another instance can have it now.
+            lease = replace(lease, serial=_serial_found(config, kind, lease))
         failure = hooks.take_back(config.kinds, lease)
         if failure is not None:
             print(clean(f"banksman: cannot take back {lease.resource}: {failure}"), file=sys.stderr)
         return failure is None
 
     return take_back
+
+
+def _serial_found(config: Config, kind: Kind, lease: Lease) -> str | None:
+    """Return the serial that discovery finds now for the instance of a lease, or None."""
+    seen = serial_now(kind, config, lease.resource, lease.serial, Machine().clock)
+    return next((each.serial for each in seen if each.resource == lease.resource), None)
 
 
 def _stopping(config: Config) -> Stopping:
@@ -617,8 +628,9 @@ class _Status:
 def _status(config: Config) -> _Status:
     store, _ = _reaped_store(config)
     # Discovery finds the free resources and their facts. It runs before the leases are read,
-    # because it can take seconds.
-    found = search(config, load_inventory(), [Part()])
+    # because it can take seconds. What it finds about serials goes into the leases first.
+    found = search(config, load_inventory(), [Part()], clock=store.system.clock)
+    store.observe(found.serials)
     resources = console.resources(store.snapshot(), found)
     machine = store.system
     pids = console.owner_pids(resources)
@@ -811,10 +823,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
         ]
         if given:
             raise BanksmanError(f"run {given[0]} needs --where")
-        store, _ = _reaped_store()
+        config = load_config()
+        store, _ = _reaped_store(config)
+        # A lease that is lost runs no discovery.
         lease = store.check(args.resource, args.lease)
+        kind = config.kinds.get(lease.kind)
+        seen: tuple[SerialSeen, ...] = ()
+        if kind is not None and kind.discovered:
+            # The holder can have started or restarted the instance since the grant.
+            clock = store.system.clock
+            seen = serial_now(kind, config, lease.resource, lease.serial, clock)
+            store.observe(seen)
+            lease = store.check(args.resource, args.lease)
+        # The command acts on the serial, so it gets only one that discovery confirms now: a
+        # discovery that fails cannot tell whether another instance has the serial by now.
+        if lease.resource not in {each.resource for each in seen if each.serial is not None}:
+            lease = replace(lease, serial=None)
+        command = _command_line(command, lease)
         outcome = run_command(
-            store, lease.resource, lease.lease_id, command, _command_env(lease, None), _warn
+            store, lease.resource, lease.lease_id, command, _command_env(lease, kind), _warn
         )
         return _run_status(outcome, command)
     if args.resource is not None:
@@ -832,12 +859,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     (lease,) = grant.leases
     try:
+        command = _command_line(command, lease)
         outcome = run_command(
             grant.store,
             lease.resource,
             lease.lease_id,
             command,
-            _command_env(lease, _serial(grant.facts[0])),
+            _command_env(lease, grant.config.kinds.get(lease.kind)),
             _warn,
         )
     finally:
@@ -845,15 +873,36 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return _run_status(outcome, command)
 
 
-def _command_env(lease: Lease, serial: str | None) -> dict[str, str]:
+# The arguments of a command that run replaces. The shell of the caller cannot expand a variable
+# that banksman sets only for the command, so a placeholder is the short way to pass a value.
+SERIAL_PLACEHOLDER = "{serial}"
+RESOURCE_PLACEHOLDER = "{resource}"
+
+
+def _command_line(command: Sequence[str], lease: Lease) -> list[str]:
+    """Replace each argument that is a placeholder, as a whole, with its value."""
+    if SERIAL_PLACEHOLDER in command and lease.serial is None:
+        raise BanksmanError(
+            f"the serial of {lease.resource} is not known, so {SERIAL_PLACEHOLDER} cannot be"
+            " replaced: the instance does not run, or discovery does not find its serial. Start"
+            " the instance, and run the command again"
+        )
+    values = {SERIAL_PLACEHOLDER: lease.serial, RESOURCE_PLACEHOLDER: lease.resource}
+    return [values.get(argument) or argument for argument in command]
+
+
+def _command_env(lease: Lease, kind: Kind | None) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key not in hooks.VARIABLES}
-    env.update(
-        BANKSMAN_RESOURCE=lease.resource, BANKSMAN_KIND=lease.kind, BANKSMAN_LEASE=lease.lease_id
-    )
-    if serial is not None:
-        env["BANKSMAN_SERIAL"] = serial
+    android = hooks.is_android(kind)
+    env.update(hooks.variables(lease, android=android), BANKSMAN_LEASE=lease.lease_id)
     if lease.accounts:
         env["BANKSMAN_ACCOUNTS"] = ",".join(lease.accounts)
+    if android and lease.serial is None:
+        _warn(
+            f"the serial of {lease.resource} is not known, so {hooks.ANDROID_SERIAL} names no"
+            f" device ({hooks.NO_SERIAL}): adb without -s, and the connected tests of Gradle,"
+            " find no device"
+        )
     return env
 
 
@@ -927,7 +976,7 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         issue=args.issue,
         owner_pid=args.owner_pid,
     )
-    _print_grant(parts, grant.granted, grant.leases, grant.facts, args.json)
+    _print_grant(parts, grant.granted, grant.leases, args.json)
     return 0
 
 
@@ -941,10 +990,9 @@ def _parts(args: argparse.Namespace) -> list[Part]:
 @dataclass(frozen=True)
 class _Grant:
     store: Store
+    config: Config
     granted: list[Granted]
     leases: list[Lease]
-    # The facts of each granted resource, read again after a reset.
-    facts: list[Mapping[str, FactValue]]
 
 
 def _acquire(
@@ -976,7 +1024,7 @@ def _acquire(
         # operator removes stops at once, also for a caller that waits.
         config = load_config()
         store, _ = _reaped_store(config)
-        found = search(config, load_inventory(), parts)
+        found = search(config, load_inventory(), parts, clock=machine.clock)
         needs = [
             Need(tuple(_choice(candidate, config) for candidate in candidates), part.accounts)
             for part, candidates in zip(parts, found.candidates)
@@ -999,6 +1047,7 @@ def _acquire(
             keep=keep,
             expect=expect,
             reset_time=hooks.HOOK_TIMEOUT_SECONDS,
+            seen=found.serials,
         )
         if granted is not None:
             break
@@ -1019,13 +1068,37 @@ def _acquire(
             waiting = True
         machine.sleep(min(POLL_SECONDS, left))
     leases = _prepare(store, config, granted)
-    facts = []
-    for grant, candidates in zip(granted, found.candidates):
-        candidate = next(each for each in candidates if each.resource == grant.lease.resource)
-        reset = not grant.kept and config.kinds[candidate.kind].on_acquire is not None
+    reset = [
+        lease
+        for grant, lease in zip(granted, leases)
+        if not grant.kept and config.kinds[lease.kind].on_acquire is not None
+    ]
+    if reset:
         # The hook can restart the instance, and a restarted emulator can get another serial.
-        facts.append(_facts_now(config, candidate) if reset else candidate.facts)
-    return _Grant(store, granted, leases, facts)
+        seen: list[SerialSeen] = []
+        for name in sorted({lease.kind for lease in reset}):
+            kind = config.kinds[name]
+            if not kind.discovered:
+                continue
+            started = machine.clock()
+            found = serials_seen(discover(kind, config), started)
+            seen.extend(found)
+            # The serial from before the reset can name another instance now, so an instance
+            # that discovery does not find with a serial now, also because it fails, has none.
+            known = {each.resource for each in found if each.serial is not None}
+            seen.extend(
+                SerialSeen(lease.resource, name, None, started)
+                for lease in reset
+                if lease.kind == name and lease.resource not in known
+            )
+        now = store.observe(seen)
+        leases = [
+            now[lease.resource]
+            if lease.resource in now and now[lease.resource].lease_id == lease.lease_id
+            else lease
+            for lease in leases
+        ]
+    return _Grant(store, config, granted, leases)
 
 
 def _owner_still_runs(machine: Machine, owner_pid: int | None, started: str | None) -> str | None:
@@ -1108,18 +1181,6 @@ def _prepare(store: Store, config: Config, granted: Sequence[Granted]) -> list[L
     return leases
 
 
-def _facts_now(config: Config, candidate: Candidate) -> Mapping[str, FactValue]:
-    kind = config.kinds[candidate.kind]
-    if not kind.discovered:
-        return candidate.facts
-    instance = next(
-        (each for each in discover(kind, config).instances if each.name == candidate.resource),
-        None,
-    )
-    # An instance that discovery does not find now has no serial to print.
-    return {} if instance is None else instance.facts
-
-
 def _give_back(store: Store, lease: Lease) -> None:
     with contextlib.suppress(BanksmanError):
         store.release(lease.resource, lease.lease_id)
@@ -1169,10 +1230,11 @@ def _print_grant(
     parts: Sequence[Part],
     granted: Sequence[Granted],
     leases: Sequence[Lease],
-    facts: Sequence[Mapping[str, FactValue]],
     as_json: bool,
 ) -> None:
-    serials = [_serial(each) for each in facts]
+    # A serial in a lease has only the characters of a resource name, as every value here, so
+    # that a shell script can use it as it is. Account names are resource names too.
+    serials = [lease.serial for lease in leases]
     if as_json:
         _print_json(
             {
@@ -1222,15 +1284,6 @@ def _print_grant(
 
 def _flag(value: bool) -> str:
     return "true" if value else "false"
-
-
-def _serial(facts: Mapping[str, FactValue]) -> str | None:
-    # Facts come from devices and hooks. Only a serial is printed, and only when it has the
-    # characters of a resource name, so that a shell script can use every value as it is.
-    # Account names are resource names too.
-    serial = facts.get("serial")
-    valid = isinstance(serial, str) and RESOURCE_NAME.fullmatch(serial) is not None
-    return serial if valid else None  # type: ignore[return-value]
 
 
 def _cmd_touch(args: argparse.Namespace) -> int:

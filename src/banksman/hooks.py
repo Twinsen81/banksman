@@ -14,7 +14,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 
 from banksman import supervisor
-from banksman.config import Kind
+from banksman.config import PRESETS, Kind
 from banksman.lease import Lease
 
 HOOK_TIMEOUT_SECONDS = 60.0
@@ -32,6 +32,13 @@ VARIABLES = (
     "BANKSMAN_SERIAL",
     "BANKSMAN_ACCOUNTS",
 )
+# adb, and the connected tests of the Android Gradle plugin, act on the device that this variable
+# names when a command does not name one.
+ANDROID_SERIAL = "ANDROID_SERIAL"
+# The value of ANDROID_SERIAL while the serial of an Android instance is not known. No device has
+# it, so a command that does not name a device fails with "device not found" instead of acting
+# on a device that adb chooses, which can be the device of another holder.
+NO_SERIAL = "banksman-serial-unknown"
 
 
 def take_back(
@@ -45,7 +52,7 @@ def take_back(
     # A kind that the configuration no longer declares has no hook to run either.
     if kind is None or kind.on_void is None:
         return None
-    failure = run(kind.on_void, lease, timeout=timeout)
+    failure = run(kind.on_void, lease, timeout=timeout, android=is_android(kind))
     return None if failure is None else f"the on_void hook {failure}"
 
 
@@ -59,7 +66,7 @@ def reset(
     kind = kinds.get(lease.kind)
     if kind is None or kind.on_acquire is None:
         return None
-    failure = run(kind.on_acquire, lease, timeout=timeout)
+    failure = run(kind.on_acquire, lease, timeout=timeout, android=is_android(kind))
     return None if failure is None else f"the on_acquire hook {failure}"
 
 
@@ -71,16 +78,44 @@ def discover(kind: Kind, *, timeout: float = HOOK_TIMEOUT_SECONDS) -> tuple[str 
     return (None if failure is None else f"the discover hook {failure}"), output
 
 
-def run(command: Sequence[str], lease: Lease, *, timeout: float) -> str | None:
-    """Run a hook for the resource of a lease. Return None when it succeeded, or how it failed."""
-    variables = {"BANKSMAN_RESOURCE": lease.resource, "BANKSMAN_KIND": lease.kind}
-    return _run(command, variables, timeout)[0]
+def run(
+    command: Sequence[str], lease: Lease, *, timeout: float, android: bool = False
+) -> str | None:
+    """Run a hook for the resource of a lease. Return None when it succeeded, or how it failed.
+
+    With `android`, the hook also gets ANDROID_SERIAL.
+    """
+    return _run(command, variables(lease, android=android), timeout)[0]
+
+
+def variables(lease: Lease, *, android: bool) -> dict[str, str]:
+    """Return the variables that name the resource of a lease for a hook or a command.
+
+    The serial is the one in the lease. With `android`, ANDROID_SERIAL names it too, or names no
+    device while the serial is not known.
+    """
+    values = {"BANKSMAN_RESOURCE": lease.resource, "BANKSMAN_KIND": lease.kind}
+    if lease.serial is not None:
+        values["BANKSMAN_SERIAL"] = lease.serial
+    if android:
+        values[ANDROID_SERIAL] = NO_SERIAL if lease.serial is None else lease.serial
+    return values
+
+
+def is_android(kind: Kind | None) -> bool:
+    return kind is not None and kind.preset in PRESETS
 
 
 def _run(
     command: Sequence[str], variables: Mapping[str, str], timeout: float, *, capture: bool = False
 ) -> tuple[str | None, bytes]:
-    env = {key: value for key, value in os.environ.items() if key not in VARIABLES}
+    # A hook runs in the environment of whichever command reaps, for example a command that
+    # banksman run started with the ANDROID_SERIAL of another lease.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in VARIABLES and key != ANDROID_SERIAL
+    }
     env.update(variables)
     with contextlib.ExitStack() as stack:
         # The output goes to a file, not a pipe: a program that the hook leaves running would

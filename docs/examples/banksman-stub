@@ -2,11 +2,11 @@
 # A stand-in for banksman in the tests of a project's scripts. Put it on PATH as `banksman`.
 #
 # It appends each call to the file that BANKSMAN_STUB_LOG names, one line for each call. acquire
-# prints a grant of the resource stub-0 with the lease stub-lease, or keeps the lease that
-# --lease names, or exits with BANKSMAN_STUB_STATUS, for example 4 for a machine whose devices
-# are all in use. run runs the
-# command after -- with the environment that banksman run --lease gives it, and every other
-# command does nothing.
+# prints a grant of the resource stub-0 with the lease stub-lease and the serial stub-serial, or
+# keeps the lease that --lease names, or exits with BANKSMAN_STUB_STATUS, for example 4 for a
+# machine whose devices are all in use. run runs the command after -- as banksman run --lease
+# runs it for a device: with the serial stub-serial in BANKSMAN_SERIAL and ANDROID_SERIAL, and
+# with each argument {serial} and {resource} replaced. Every other command does nothing.
 
 if [ -n "${BANKSMAN_STUB_LOG:-}" ]; then
     printf '%s\n' "$*" >>"$BANKSMAN_STUB_LOG"
@@ -30,8 +30,8 @@ case $1 in
         ;;
     run)
         shift
-        unset BANKSMAN_SERIAL BANKSMAN_ACCOUNTS
-        export BANKSMAN_KIND=stub
+        unset BANKSMAN_ACCOUNTS
+        export BANKSMAN_KIND=stub BANKSMAN_SERIAL=stub-serial ANDROID_SERIAL=stub-serial
         while [ "$#" -gt 0 ]; do
             case $1 in
                 --resource) export BANKSMAN_RESOURCE="$2" ;;
@@ -42,6 +42,15 @@ case $1 in
                     ;;
             esac
             shift
+        done
+        # Only a whole argument is replaced, as banksman run does.
+        for argument; do
+            shift
+            case $argument in
+                '{serial}') set -- "$@" stub-serial ;;
+                '{resource}') set -- "$@" "$BANKSMAN_RESOURCE" ;;
+                *) set -- "$@" "$argument" ;;
+            esac
         done
         exec "$@"
         ;;

@@ -170,3 +170,57 @@ def table_rows(text: str) -> list[dict[str, str]]:
         for line in lines
         if line.strip()
     ]
+
+
+FAKE_ADB = """\
+import json, os, sys
+here = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(here, "calls"), "a") as calls:
+    calls.write(" ".join(sys.argv[1:]) + "\\n")
+answer = json.load(open(os.path.join(here, "answers.json"))).get(" ".join(sys.argv[1:]))
+if answer is None:
+    sys.exit(1)
+sys.stdout.write(answer)
+"""
+
+
+class FakeSdk:
+    """An Android SDK whose adb answers from a table that the test sets, and an AVD home.
+
+    No test runs the real adb. The fake records each call in `calls`.
+    """
+
+    def __init__(self, root: Path, avds=()) -> None:
+        self.sdk = root / "sdk"
+        self.avd_home = root / "avd"
+        tools = self.sdk / "platform-tools"
+        tools.mkdir(parents=True)
+        adb = tools / "adb"
+        adb.write_text(f"#!{sys.executable}\n{FAKE_ADB}")
+        adb.chmod(0o755)
+        self.avd_home.mkdir(parents=True)
+        for name in avds:
+            directory = self.avd_home / f"{name}.avd"
+            directory.mkdir()
+            (self.avd_home / f"{name}.ini").write_text(f"path={directory}\n")
+            (directory / "config.ini").write_text("tag.id=google_apis\n")
+        self.answer({})
+
+    def answer(self, answers) -> None:
+        (self.sdk / "platform-tools" / "answers.json").write_text(json.dumps(answers))
+
+    def running(self, emulators) -> None:
+        """Answer as adb does while these emulators run, by serial and AVD name."""
+        devices = "".join(f"{serial}\tdevice\n" for serial in emulators)
+        answers = {"devices": f"List of devices attached\n{devices}"}
+        for serial, name in emulators.items():
+            answers[f"-s {serial} emu avd name"] = f"{name}\r\nOK\r\n"
+            answers[f"-s {serial} shell dumpsys account"] = "  Accounts: 0\n"
+        self.answer(answers)
+
+    def calls(self) -> list[str]:
+        path = self.sdk / "platform-tools" / "calls"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def config(self) -> str:
+        return f'[android]\nsdk = "{self.sdk}"\navd_home = "{self.avd_home}"\n'
