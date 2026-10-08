@@ -29,6 +29,7 @@ from banksman.lease import (
     REBOOTED,
     RELEASE,
     Holder,
+    SerialSeen,
     Timeouts,
 )
 from banksman.store import (
@@ -1495,3 +1496,127 @@ def test_the_quarantine_directory_does_not_depend_on_the_environment(monkeypatch
     monkeypatch.setenv("XDG_STATE_HOME", "/somewhere/else/state")
     home = pwd.getpwuid(os.geteuid()).pw_dir
     assert default_quarantine_dir() == Path(home) / ".local" / "state" / "banksman" / "quarantine"
+
+
+# The serial of an instance: only discovery sets it.
+
+
+def seen(resource, serial, at, kind="emulator"):
+    return SerialSeen(resource, kind, serial, at)
+
+
+def serials(store):
+    return {lease.resource: (lease.serial, lease.serial_seen) for lease in store.snapshot().leases}
+
+
+def test_a_new_lease_gets_the_serial_that_the_discovery_of_its_request_found(store, system):
+    choices = [Choice("emu-1", "emulator"), Choice("emu-2", "emulator")]
+    found = [seen("emu-1", "emulator-5554", 5.0), seen("emu-2", None, 5.0)]
+    first = grant_one(store, choices, Holder(OWNER), seen=found).lease
+    second = grant_one(store, choices, Holder(OWNER), seen=found).lease
+    assert (first.resource, first.serial, first.serial_seen) == ("emu-1", "emulator-5554", 5.0)
+    assert (second.resource, second.serial) == ("emu-2", None)
+    # A result that it does not run is recorded too, so that an older result cannot set one.
+    assert serials(store) == {"emu-1": ("emulator-5554", 5.0), "emu-2": (None, 5.0)}
+
+
+def test_a_kept_lease_gets_the_serial_that_discovery_finds_now(store, system):
+    choices = [Choice("emu-1", "emulator")]
+    held = grant_one(store, choices, Holder(OWNER)).lease
+    assert held.serial is None
+    # The holder started the instance after the grant.
+    found = [seen("emu-1", "emulator-5556", 9.0)]
+    kept = grant_one(store, choices, Holder(OWNER), keep=held.lease_id, seen=found)
+    assert (kept.kept, kept.lease.serial) == (True, "emulator-5556")
+
+
+def test_observe_sets_and_clears_the_serial_and_is_not_a_touch(store, system):
+    lease = store.acquire("emu-1", "emulator", Holder(OWNER))
+    system.advance(60)
+    now = store.observe([seen("emu-1", "emulator-5554", system.now)])
+    assert now["emu-1"].serial == "emulator-5554"
+    assert now["emu-1"].touched == lease.touched
+    # The instance stopped: a discovery that started later finds that it does not run.
+    store.observe([seen("emu-1", None, system.now + 1)])
+    assert serials(store) == {"emu-1": (None, system.now + 1)}
+
+
+def test_a_result_that_says_nothing_keeps_the_serial(store, system):
+    store.acquire("emu-1", "emulator", Holder(OWNER))
+    store.observe([seen("emu-1", "emulator-5554", 5.0)])
+    # A failed discovery, an absent instance, or one without the running fact gives no result.
+    store.observe([])
+    assert serials(store) == {"emu-1": ("emulator-5554", 5.0)}
+
+
+def test_a_discovery_that_started_earlier_does_not_undo_a_newer_one(store, system):
+    store.acquire("emu-1", "emulator", Holder(OWNER))
+    # A slow discovery started before the holder started the emulator, and ends after a run
+    # recorded the serial.
+    store.observe([seen("emu-1", "emulator-5554", 20.0)])
+    store.observe([seen("emu-1", None, 10.0)])
+    assert serials(store) == {"emu-1": ("emulator-5554", 20.0)}
+
+
+def test_two_emulators_that_exchange_their_ports_keep_both_serials(store, system):
+    store.acquire("emu-1", "emulator", Holder(OWNER))
+    store.acquire("emu-2", "emulator", Holder(OTHER))
+    store.observe([seen("emu-1", "emulator-5554", 5.0), seen("emu-2", "emulator-5556", 5.0)])
+    # Both restarted, and each got the port of the other. One discovery finds both.
+    store.observe([seen("emu-1", "emulator-5556", 9.0), seen("emu-2", "emulator-5554", 9.0)])
+    assert serials(store) == {"emu-1": ("emulator-5556", 9.0), "emu-2": ("emulator-5554", 9.0)}
+
+
+def test_a_serial_on_an_instance_without_a_lease_leaves_every_lease(store, system):
+    store.acquire("lab-1", "lab", Holder(OWNER))
+    store.observe([seen("lab-1", "emulator-5554", 5.0, kind="lab")])
+    # lab-1 stopped, and a discover hook that lists only running instances does not list it.
+    # An instance that nobody holds started on its port.
+    store.observe([seen("lab-2", "emulator-5554", 8.0, kind="lab")])
+    assert serials(store) == {"lab-1": (None, 8.0)}
+    # A result that is older than the serial of the lease does not take it.
+    store.observe([seen("lab-1", "emulator-5556", 9.0, kind="lab")])
+    store.observe([seen("lab-2", "emulator-5556", 7.0, kind="lab")])
+    assert serials(store) == {"lab-1": ("emulator-5556", 9.0)}
+
+
+def test_a_serial_belongs_to_one_held_lease_also_across_kinds(store, system):
+    store.acquire("emu-1", "emulator", Holder(OWNER))
+    store.acquire("lab-1", "lab", Holder(OTHER))
+    store.observe([seen("emu-1", "emulator-5554", 5.0)])
+    # The emulator stopped, and another instance has its port now.
+    store.observe([seen("lab-1", "emulator-5554", 8.0, kind="lab")])
+    assert serials(store) == {"emu-1": (None, 8.0), "lab-1": ("emulator-5554", 8.0)}
+    # A result that is older than the claim of the other lease is out of date.
+    store.observe([seen("emu-1", "emulator-5554", 7.0)])
+    assert serials(store) == {"emu-1": (None, 8.0), "lab-1": ("emulator-5554", 8.0)}
+
+
+def test_a_new_lease_takes_its_serial_from_an_older_claim(store, system):
+    store.acquire("emu-1", "emulator", Holder(OWNER))
+    store.observe([seen("emu-1", "emulator-5554", 5.0)])
+    found = [seen("emu-2", "emulator-5554", 9.0)]
+    granted = grant_one(store, [Choice("emu-2", "emulator")], Holder(OTHER), seen=found)
+    assert granted.lease.serial == "emulator-5554"
+    assert serials(store)["emu-1"] == (None, 9.0)
+
+
+def test_a_result_applies_to_the_lease_of_its_resource_and_kind_only(store, system):
+    store.acquire("emu-1", "emulator", Holder(OWNER))
+    store.observe([seen("emu-1", "emulator-5554", 5.0, kind="lab"), seen("emu-2", "x", 5.0)])
+    assert serials(store) == {"emu-1": (None, None)}
+
+
+def test_a_booting_lease_keeps_its_serial(store, system):
+    lease = store.reserve("emu-1", "emulator", Holder(OWNER))
+    store.observe([seen("emu-1", "emulator-5554", 5.0)])
+    store.observe([seen("emu-1", None, 6.0)])
+    assert serials(store) == {"emu-1": ("emulator-5554", 5.0)}
+    assert lease.state == BOOTING
+
+
+def test_observe_leaves_leases_that_are_not_held(store, system, state_dir):
+    store.acquire("emu-1", "emulator", Holder(OWNER))
+    edit_lease(state_dir, "emu-1", drain)
+    store.observe([seen("emu-1", "emulator-5554", 5.0)])
+    assert lease_file(state_dir, "emu-1")["serial"] is None

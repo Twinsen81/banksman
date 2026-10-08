@@ -10,17 +10,27 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from banksman import android
 from banksman.config import Config, Kind
-from banksman.discovery import ACCOUNT, FACT_NAME, KIND, TAG, FactValue, Found
+from banksman.discovery import (
+    ACCOUNT,
+    FACT_NAME,
+    KIND,
+    RUNNING,
+    TAG,
+    FactValue,
+    Found,
+    serials_seen,
+)
 from banksman.discovery import discover as discover_now
 from banksman.errors import BanksmanError
 from banksman.inventory import Inventory
+from banksman.lease import SerialSeen
 
-RUNNING = "running"
 # Attributes that are known also when no instance has them now, so that a request for one waits
 # for a match instead of failing.
 KNOWN = frozenset({KIND, ACCOUNT, TAG, *android.FACTS})
@@ -82,6 +92,8 @@ class Search:
     notes: tuple[str, ...] = ()
     # The allowed instances that discovery does not find now, as (kind, name).
     absent: tuple[tuple[str, str], ...] = ()
+    # What the discovery found about the serials of the instances, for the leases.
+    serials: tuple[SerialSeen, ...] = ()
 
 
 def parse_clause(text: str) -> Clause:
@@ -119,6 +131,7 @@ def search(
     parts: Sequence[Part],
     *,
     discover: Discover = discover_now,
+    clock: Callable[[], float] = time.monotonic,
 ) -> Search:
     """Find, for each part, the permitted resources that are present now and match every clause
     of the part.
@@ -136,6 +149,7 @@ def search(
     notes: list[str] = []
     absent: list[tuple[str, str]] = []
     resources: list[Candidate] = []
+    serials: list[SerialSeen] = []
     for kind in config.kinds.values():
         if kind.name not in wanted:
             continue
@@ -147,7 +161,10 @@ def search(
                 for name in kind.instances()
             )
             continue
+        # The awake time of the leases, so that a lease can tell which discovery is newer.
+        started = clock()
         found = discover(kind, config)
+        serials.extend(serials_seen(found, started))
         notes.extend(_shown_notes(found))
         for instance in found.instances:
             found_facts[kind.name].update(instance.facts)
@@ -189,7 +206,7 @@ def search(
         # holder must start, which saves the time and the memory of a start.
         matching.sort(key=lambda candidate: (candidate.rank, candidate.cold, candidate.resource))
         candidates.append(tuple(matching))
-    return Search(tuple(candidates), tuple(notes), tuple(absent))
+    return Search(tuple(candidates), tuple(notes), tuple(absent), tuple(serials))
 
 
 def _shown_notes(found: Found) -> list[str]:

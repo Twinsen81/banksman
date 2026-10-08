@@ -56,6 +56,18 @@ class LeaseFormatError(BanksmanError):
 
 
 @dataclass(frozen=True)
+class SerialSeen:
+    """What one discovery found about the serial of an instance."""
+
+    resource: str
+    kind: str
+    # None when the instance does not run, so it has no serial.
+    serial: str | None
+    # When the discovery started, in awake time.
+    at: float
+
+
+@dataclass(frozen=True)
 class Timeouts:
     """How long a lease can live, in seconds of awake time.
 
@@ -176,6 +188,12 @@ class Lease:
     accounts: tuple[str, ...] = ()
     # The longest time between two touches, in seconds of awake time.
     longest_quiet: float = 0.0
+    # The address of the instance while it runs, such as emulator-5554. Only discovery sets it,
+    # never the holder: `banksman run` and the hooks act on this address.
+    serial: str | None = None
+    # When the discovery that set or cleared the serial started, in awake time. A discovery that
+    # started earlier is out of date, and does not change the serial.
+    serial_seen: float | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -202,11 +220,13 @@ class Lease:
                 "hard_deadline": self.hard_deadline,
                 "drain_deadline": self.drain_deadline,
                 "expected": self.expected,
+                "serial_seen": self.serial_seen,
             },
             "idle_timeout": self.idle_timeout,
             "owner_grace": self.owner_grace,
             "drain_timeout": self.drain_timeout,
             "longest_quiet": self.longest_quiet,
+            "serial": self.serial,
             "users": [user.to_json() for user in self.users],
             "accounts": list(self.accounts),
             "void_reason": self.void_reason,
@@ -255,6 +275,8 @@ class Lease:
             owner_grace=_get(data, "owner_grace", _is_number),
             drain_timeout=_get(data, "drain_timeout", _is_number),
             longest_quiet=_get(data, "longest_quiet", _is_seconds),
+            serial=_get(data, "serial", _optional(_is_resource)),
+            serial_seen=_get(awake, "serial_seen", _optional(_is_number)),
             users=tuple(User.from_json(user) for user in users),
             accounts=tuple(accounts),
             void_reason=_get(data, "void_reason", _optional(_is_void_reason)),

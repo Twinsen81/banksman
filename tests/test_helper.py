@@ -163,6 +163,22 @@ def test_the_stub_records_the_calls_of_the_script(project_script, with_stub):
     ]
 
 
+def test_the_stub_runs_a_command_as_banksman_run_runs_it_for_a_device(with_stub):
+    path, _ = with_stub
+    shown = 'printf "%s|" "$BANKSMAN_SERIAL" "$ANDROID_SERIAL" "$@"'
+    for shell in SHELLS:
+        result = subprocess.run(
+            [shell, "-c", 'banksman run --lease stub-lease --resource stub-0 -- "$@"', "sh",
+             "sh", "-c", shown, "sh", "{serial}", "{resource}", "{serial}x", "a b"],
+            env={**os.environ, "PATH": path},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "stub-serial|stub-serial|stub-serial|stub-0|{serial}x|a b|"
+
+
 def test_the_stub_can_play_a_busy_machine(project_script, with_stub):
     path, calls = with_stub
     result = run_script(

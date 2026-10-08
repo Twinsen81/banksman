@@ -209,6 +209,48 @@ def test_reap_runs_the_on_void_hook_of_the_kind(capsys, state_dir, config_path, 
     assert out.read_text() == "emu-1"
 
 
+@pytest.mark.parametrize(
+    "instances, shown",
+    [
+        # The emulator of the lease stopped, and started again on another port.
+        (
+            [{"name": "emu-1", "facts": {"running": True, "serial": "emulator-5556"}}],
+            "emulator-5556",
+        ),
+        # The emulator stopped. Another one has its earlier port now.
+        (
+            [
+                {"name": "emu-1", "facts": {"running": False}},
+                {"name": "emu-2", "facts": {"running": True, "serial": "emulator-5554"}},
+            ],
+            "-",
+        ),
+        # The discovery failed, so the serial is not known.
+        (None, "-"),
+    ],
+)
+def test_on_void_gets_the_serial_that_discovery_finds_at_the_take_back(
+    capsys, state_dir, config_path, tmp_path, instances, shown
+):
+    out = tmp_path / "out"
+    code = "import os, sys; open(sys.argv[1], 'w').write(os.environ.get('BANKSMAN_SERIAL', '-'))"
+    found = "raise SystemExit(1)" if instances is None else (
+        f"print({json.dumps(json.dumps({'schema': 1, 'instances': instances}))})"
+    )
+    write_config(
+        config_path,
+        f"[kinds.emulator]\ndiscover = {json.dumps(hook(found))}\n"
+        f"on_void = {json.dumps(hook(code, str(out)))}\n",
+    )
+    store = Store(state_dir, Machine())
+    store.acquire("emu-1", "emulator", Holder(OWNER))
+    # The serial in the lease is old.
+    edit_lease(state_dir, "emu-1", lambda data: data.update(serial="emulator-5554"))
+    age_lease(state_dir, "emu-1", 21 * 60)
+    assert main(["reap"]) == 0
+    assert out.read_text() == shown
+
+
 def test_a_failing_on_void_hook_quarantines_the_lease(capsys, state_dir, config_path):
     write_config(
         config_path, f"[kinds.emulator]\non_void = {json.dumps(hook('raise SystemExit(3)'))}\n"

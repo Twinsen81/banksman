@@ -17,14 +17,14 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from banksman import android, hooks
 from banksman.config import ANDROID_DEVICE, ANDROID_EMULATOR, Config, Kind
 from banksman.errors import BanksmanError
-from banksman.lease import RESOURCE_NAME
+from banksman.lease import RESOURCE_NAME, SerialSeen
 from banksman.sanitize import clean
 
 DISCOVER_SCHEMA = android.DISCOVER_SCHEMA
@@ -44,6 +44,8 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 KIND = "kind"
 ACCOUNT = "account"
 TAG = "tag"
+SERIAL = "serial"
+RUNNING = "running"
 
 FactValue = str | int | bool
 
@@ -69,13 +71,17 @@ class Found:
     failure: str | None = None
 
 
-def discover(kind: Kind, config: Config) -> Found:
-    """Find the instances of a kind now. A failure becomes a note, never an exception."""
+def discover(kind: Kind, config: Config, *, accounts: bool = True) -> Found:
+    """Find the instances of a kind now. A failure becomes a note, never an exception.
+
+    Without `accounts`, the presets do not read the accounts, which takes the most time, and
+    the accounts are not known.
+    """
     try:
         if kind.preset == ANDROID_EMULATOR:
-            return parse(kind.name, android.emulators(config.android))
+            return parse(kind.name, android.emulators(config.android, accounts=accounts))
         if kind.preset == ANDROID_DEVICE:
-            return parse(kind.name, android.devices(config.android))
+            return parse(kind.name, android.devices(config.android, accounts=accounts))
     except BanksmanError as exc:
         return _failed(kind.name, note_text(str(exc)))
     failure, output = hooks.discover(kind)
@@ -86,6 +92,58 @@ def discover(kind: Kind, config: Config) -> Found:
     except (ValueError, UnicodeDecodeError):
         return _failed(kind.name, "the discover hook printed text that is not JSON")
     return parse(kind.name, document)
+
+
+def serial_of(facts: Mapping[str, FactValue]) -> str | None:
+    """Return the serial in the facts of an instance when it is a valid resource name.
+
+    A serial comes from a device or a hook. banksman prints it, puts it into the environment of
+    commands, and replaces arguments with it, so only the characters of a resource name pass.
+    """
+    serial = facts.get(SERIAL)
+    valid = isinstance(serial, str) and RESOURCE_NAME.fullmatch(serial) is not None
+    return serial if valid else None  # type: ignore[return-value]
+
+
+def serials_seen(found: Found, at: float) -> tuple[SerialSeen, ...]:
+    """Return what a discovery that started at `at` says about the serials of its instances.
+
+    An instance with a valid serial has that serial, and one without a serial that does not run
+    has none. Every other case says nothing, so a lease keeps its serial: a discovery that
+    failed, an instance that it does not find, and an instance whose `running` fact is missing.
+    """
+    seen = []
+    for instance in found.instances:
+        serial = serial_of(instance.facts)
+        if serial is not None:
+            seen.append(SerialSeen(instance.name, found.kind, serial, at))
+        elif instance.facts.get(RUNNING) is False:
+            seen.append(SerialSeen(instance.name, found.kind, None, at))
+    return tuple(seen)
+
+
+def serial_now(
+    kind: Kind, config: Config, resource: str, known: str | None, clock: Callable[[], float]
+) -> tuple[SerialSeen, ...]:
+    """Find the serial of one instance now, without its accounts.
+
+    For an emulator whose serial is known, one question to that emulator confirms it. Otherwise
+    the discovery of the kind runs, and the result is about all its instances.
+    """
+    at = clock()
+    other = None
+    if kind.preset == ANDROID_EMULATOR and known is not None:
+        other = android.avd_name(config.android, known)
+        if other == resource:
+            return (SerialSeen(resource, kind.name, known, at),)
+    if not kind.discovered:
+        return ()
+    seen = serials_seen(discover(kind, config, accounts=False), at)
+    if other is not None and resource not in {each.resource for each in seen}:
+        # Another emulator answers at the known serial, so the instance does not have it now,
+        # also when the discovery fails.
+        seen += (SerialSeen(resource, kind.name, None, at),)
+    return seen
 
 
 def parse(kind: str, document: object) -> Found:

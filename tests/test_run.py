@@ -12,11 +12,13 @@ import time
 from contextlib import suppress
 
 import pytest
-from helpers import SRC, edit_lease, reap_in_child, write_config
+from helpers import SRC, FakeSdk, edit_lease, reap_in_child, write_config
 
 from banksman import run as runs
 from banksman.cli import main
+from banksman import hooks
 from banksman.history import History
+from banksman.inventory import Decisions, Inventory, save_inventory
 from banksman.lease import Holder, Timeouts
 from banksman.store import Store
 from banksman.system import Machine
@@ -559,3 +561,150 @@ def _clean_up(process, command):
         with suppress(ProcessLookupError):
             os.kill(command[0], signal.SIGKILL)
 
+
+
+# The serial: run gives the command the serial that discovery finds for the lease.
+
+SHOW_COMMAND = """
+import json, os, sys
+names = ("BANKSMAN_SERIAL", "ANDROID_SERIAL")
+print(json.dumps({"argv": sys.argv[1:], "env": [os.environ.get(name) for name in names]}))
+"""
+
+
+@pytest.fixture
+def android_sdk(tmp_path, config_path):
+    sdk = FakeSdk(tmp_path, avds=("qa_phone",))
+    write_config(
+        config_path,
+        f"[holder]\nagents = []\n{sdk.config()}[kinds.emulator]\npreset = \"android-emulator\"\n",
+    )
+    save_inventory(Inventory(kinds={"emulator": Decisions(allowed=("qa_phone",))}))
+    return sdk
+
+
+def grant(capsys, *arguments):
+    assert main(["acquire", *arguments]) == 0
+    return dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
+
+
+def shown_by(lease_id, *arguments, resource="qa_phone"):
+    process = banksman(
+        "run", "--lease", lease_id, "--resource", resource, "--",
+        sys.executable, "-c", SHOW_COMMAND, *arguments,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    status, out, err = finish(process)
+    return status, (json.loads(out) if out else None), err
+
+
+def test_run_gives_the_serial_and_follows_a_restart_of_the_emulator(
+    android_sdk, capsys, state_dir
+):
+    android_sdk.running({"emulator-5554": "qa_phone"})
+    values = grant(capsys, "--where", "kind=emulator")
+    assert values["SERIAL"] == "emulator-5554"
+    status, shown, _ = shown_by(values["LEASE"], "-s", "{serial}", "--avd", "{resource}")
+    assert status == 0
+    assert shown == {
+        "argv": ["-s", "emulator-5554", "--avd", "qa_phone"],
+        "env": ["emulator-5554", "emulator-5554"],
+    }
+    # The holder restarts the emulator, and it gets another port.
+    android_sdk.running({"emulator-5556": "qa_phone"})
+    before = len(android_sdk.calls())
+    status, shown, _ = shown_by(values["LEASE"], "{serial}")
+    assert (status, shown["argv"], shown["env"]) == (
+        0,
+        ["emulator-5556"],
+        ["emulator-5556", "emulator-5556"],
+    )
+    assert json.loads((state_dir / "qa_phone.json").read_text())["serial"] == "emulator-5556"
+    # The run asks the emulator of the lease first, and reads no accounts.
+    calls = android_sdk.calls()[before:]
+    assert calls[0] == "-s emulator-5554 emu avd name"
+    assert not [call for call in calls if "dumpsys" in call]
+    # Later runs confirm the serial with one question.
+    before = len(android_sdk.calls())
+    assert shown_by(values["LEASE"])[0] == 0
+    assert android_sdk.calls()[before:] == ["-s emulator-5556 emu avd name"]
+
+
+def test_without_a_serial_the_command_finds_no_device(android_sdk, capsys, tmp_path):
+    android_sdk.running({})
+    values = grant(capsys, "--where", "kind=emulator")
+    assert "SERIAL" not in values
+    marker = tmp_path / "ran"
+    process = banksman(
+        "run", "--lease", values["LEASE"], "--resource", "qa_phone", "--",
+        sys.executable, "-c", f"open({str(marker)!r}, 'w')", "--device", "{serial}",
+        stderr=subprocess.PIPE,
+    )
+    status, _, err = finish(process)
+    assert status == 1
+    assert err.startswith("banksman: the serial of qa_phone is not known, so {serial} cannot be")
+    assert not marker.exists()
+    # Without {serial}, the command runs, and ANDROID_SERIAL names no device.
+    status, shown, err = shown_by(values["LEASE"])
+    assert (status, shown["env"]) == (0, [None, hooks.NO_SERIAL])
+    assert "ANDROID_SERIAL names no device" in err
+
+
+def test_a_serial_that_discovery_cannot_confirm_does_not_reach_the_command(
+    state_dir, config_path, tmp_path
+):
+    found = tmp_path / "found.json"
+    running = {"name": "lab-1", "facts": {"running": True, "serial": "emulator-5554"}}
+    found.write_text(json.dumps({"schema": 1, "instances": [running]}))
+    read = "import sys; print(open(sys.argv[1]).read())"
+    discover = json.dumps([sys.executable, "-c", read, str(found)])
+    write_config(config_path, f"[holder]\nagents = []\n[kinds.lab]\ndiscover = {discover}\n")
+    lease = Store(state_dir, Machine()).acquire("lab-1", "lab", Holder(OWNER), timeouts=FAST)
+    status, shown, _ = shown_by(lease.lease_id, "{serial}", resource="lab-1")
+    assert (status, shown["argv"]) == (0, ["emulator-5554"])
+    # The discovery fails now. The lease keeps the serial, but the command does not get it,
+    # because another instance can have it by now.
+    found.write_text("not JSON")
+    status, shown, _ = shown_by(lease.lease_id, resource="lab-1")
+    assert (status, shown["env"]) == (0, [None, None])
+    assert json.loads((state_dir / "lab-1.json").read_text())["serial"] == "emulator-5554"
+    status, _, err = shown_by(lease.lease_id, "{serial}", resource="lab-1")
+    assert status == 1
+    assert "the serial of lab-1 is not known" in err
+
+
+def test_the_serial_of_a_caller_does_not_reach_the_command(state_dir, monkeypatch):
+    # The command of another kind keeps the ANDROID_SERIAL of its caller, for example of a run
+    # that the command runs in. banksman sets BANKSMAN_SERIAL only from the lease.
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5560")
+    monkeypatch.setenv("BANKSMAN_SERIAL", "emulator-5560")
+    lease = lease_on(state_dir)
+    status, shown, _ = shown_by(lease.lease_id, resource="phone-1")
+    assert (status, shown["env"]) == (0, [None, "emulator-5560"])
+
+
+def test_run_where_replaces_the_resource_and_refuses_an_unknown_serial(
+    state_dir, config_path, log_path, tmp_path
+):
+    write_config(config_path, "[holder]\nagents = []\n[kinds.port]\ninstances = [\"9101\"]\n")
+    process = banksman(
+        "run", "--where", "kind=port", "--", sys.executable, "-c", SHOW_COMMAND, "--port",
+        "{resource}", "{serial}x",
+        stdout=subprocess.PIPE,
+    )
+    status, out, _ = finish(process)
+    # Only a whole argument is replaced.
+    assert (status, json.loads(out)["argv"]) == (0, ["--port", "9101", "{serial}x"])
+    marker = tmp_path / "ran"
+    process = banksman(
+        "run", "--where", "kind=port", "--",
+        sys.executable, "-c", f"open({str(marker)!r}, 'w')", "{serial}",
+        stderr=subprocess.PIPE,
+    )
+    status, _, err = finish(process)
+    assert status == 1
+    assert "the serial of 9101 is not known" in err
+    assert not marker.exists()
+    assert not (state_dir / "9101.json").exists()
+    events, _ = History(log_path).read()
+    assert [event.event for event in events] == ["acquire", "release"] * 2

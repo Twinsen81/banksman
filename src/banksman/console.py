@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from banksman.discovery import FactValue
+from banksman.discovery import FactValue, serial_of
 from banksman.history import ACQUIRE, FORCE_RELEASE, QUARANTINE, RELEASE, VOID, Event
 from banksman.lease import DRAINING, VOID_REASONS, Lease, User, free_by
 from banksman.request import Search
@@ -38,6 +38,8 @@ class Resource:
     lease: Lease | None = None
     # Why the lease file cannot be read.
     error: str | None = None
+    # The serial in the lease, or for a resource without a lease, the one that discovery found.
+    serial: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,7 @@ def resources(snapshot: Snapshot, found: Search) -> list[Resource]:
             present=candidate is not None,
             facts=_shown(candidate.facts) if candidate is not None else {},
             lease=lease,
+            serial=lease.serial,
         )
     for entry in snapshot.unreadable:
         candidate = present.get(entry.resource)
@@ -84,10 +87,18 @@ def resources(snapshot: Snapshot, found: Search) -> list[Resource]:
             present=candidate is not None,
             facts=_shown(candidate.facts) if candidate is not None else {},
             error=entry.error,
+            serial=serial_of(candidate.facts) if candidate is not None else None,
         )
     for name, candidate in present.items():
         if name not in shown:
-            shown[name] = Resource(name, candidate.kind, FREE, True, _shown(candidate.facts))
+            shown[name] = Resource(
+                name,
+                candidate.kind,
+                FREE,
+                True,
+                _shown(candidate.facts),
+                serial=serial_of(candidate.facts),
+            )
     for name, kind in absent.items():
         if name not in shown:
             shown[name] = Resource(name, kind, ABSENT, False)
@@ -130,6 +141,7 @@ def _resource_json(
         "kind": item.kind,
         "state": item.state,
         "present": item.present,
+        "serial": item.serial,
         "facts": dict(item.facts),
         "lease": None if item.lease is None else lease_json(item.lease, clock, running, verbose),
     }
@@ -151,6 +163,7 @@ def lease_json(
         "agent": lease.agent,
         "issue": lease.issue,
         "session": lease.session,
+        "serial": lease.serial,
         "acquired_at": utc(lease.acquired_at),
         "touched_at": utc(lease.touched_at),
         "free_by": None
@@ -199,6 +212,7 @@ def processes_text(items: Sequence[object]) -> str:
 STATUS_HEADER = (
     "RESOURCE",
     "KIND",
+    "SERIAL",
     "FORM",
     "API",
     "STATE",
@@ -219,9 +233,12 @@ def status_rows(
     for item in items:
         lease = item.lease
         facts = [str(item.facts[name]) if name in item.facts else NONE for name in SHOWN_FACTS]
+        serial = item.serial or NONE
         if lease is None:
             holder = NONE if item.error is None else f"lease file: {item.error}"
-            rows.append([item.name, item.kind or NONE, *facts, item.state, *[NONE] * 6, holder])
+            rows.append(
+                [item.name, item.kind or NONE, serial, *facts, item.state, *[NONE] * 6, holder]
+            )
             continue
         ends = free_by(lease, running)
         times = [NONE, NONE, NONE]
@@ -235,6 +252,7 @@ def status_rows(
             [
                 item.name,
                 lease.kind,
+                serial,
                 *facts,
                 lease.state,
                 _time(lease.acquired_at, clock),

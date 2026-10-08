@@ -121,12 +121,22 @@ def test_json_round_trip():
         expected=START + 600,
     )
     paired = replace(LEASE, accounts=("qa@example.test", "qb@example.test"))
-    for lease in (LEASE, OWNED, booting, draining, users, described, paired):
+    addressed = replace(LEASE, serial="emulator-5554", serial_seen=START + 5)
+    for lease in (LEASE, OWNED, booting, draining, users, described, paired, addressed):
         assert Lease.from_json(lease.to_json()) == lease
 
 
 def test_the_lease_file_carries_the_schema():
     assert LEASE.to_json()["schema"] == SCHEMA_VERSION
+
+
+def test_a_lease_file_of_an_earlier_schema_is_refused():
+    # Schema 5 had no serial. Two banksman versions must not share one state directory.
+    data = LEASE.to_json()
+    del data["serial"], data["awake"]["serial_seen"]
+    data["schema"] = 5
+    with pytest.raises(LeaseFormatError, match="does not have schema 6"):
+        Lease.from_json(data)
 
 
 def _without_awake(data):
@@ -177,6 +187,11 @@ def _user(**changes):
         lambda data: data.update(accounts=["../escape"]),
         lambda data: data.update(accounts=["qa@example.test", "qa@example.test"]),
         lambda data: data.update(accounts=[f"qa{index}@example.test" for index in range(101)]),
+        lambda data: data.update(serial="emulator 5554"),
+        lambda data: data.update(serial="emulator-5554\x1b[2J"),
+        lambda data: data.update(serial=""),
+        lambda data: data.update(serial=5554),
+        lambda data: data["awake"].update(serial_seen=float("nan")),
         _without_awake,
     ],
 )

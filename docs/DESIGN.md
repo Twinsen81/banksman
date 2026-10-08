@@ -2,7 +2,8 @@
 
 **Status:** the project scaffold, the lease core, kinds as configuration, fencing, discovery,
 holder identity, requests by properties, joint acquire with accounts, the console, the
-supervised run, and the optional build slots exist. Sections 3 to 9, 11, and 14 are implemented, with
+supervised run, the serial in the lease, and the optional build slots exist. Sections 3 to 9,
+11, and 14 are implemented, with
 `banksman acquire`, `touch`, `release`, `reap`, `banksman whoami`, the commands that scripts
 run (`enter`, `check`, `leave`, and `run`), `banksman admin discover`,
 `banksman admin release --force`, and `banksman admin gradle-init`. Of section 10, `status`,
@@ -132,6 +133,22 @@ leases instead.
   that process in the same way (section 6): when the lease becomes void during the reset, it
   drains, and it is taken back only after that process has ended. So a take-back never runs
   next to a reset.
+- **The serial.** A lease of an instance that runs records its serial: the address that tools
+  such as adb use, for example `emulator-5554`. Only discovery sets it (section 8), never the
+  holder, because `banksman run` and the hooks act on this address, and a wrong one would make
+  them act on the instance of another holder. Every command that runs discovery records what
+  it finds in the held leases of the kind: `acquire`, `run`, `status`, and `watch`. A serial
+  that discovery reports is recorded. An instance that reports no serial and does not run loses
+  its serial, because an emulator takes the lowest free console port, and the next emulator
+  that starts can get the port of one that stopped. In every other case the lease keeps its
+  serial, for example when discovery fails or does not find the instance. A booting lease keeps
+  its serial too. The lease records when the discovery started, and the result of a discovery
+  that started earlier does not change the serial, so a slow discovery never undoes a newer
+  one. A serial belongs to one held lease at most: when a newer discovery finds it on another
+  instance, also on one without a lease, the lease that had it loses it. Recording a serial is
+  not a touch. `banksman run` gives its command only a serial that its own discovery confirms
+  before the command starts: a discovery that fails cannot tell whether another instance has
+  the serial by now.
 - **Damaged lease files.** A lease file with a newer `schema` stops every command, because
   two versions of banksman must not share one state directory. A lease file that cannot be
   read keeps its resource out of use, and `status` shows it. Other resources are not
@@ -292,7 +309,12 @@ not code.
   reaper ends nothing. If the hook exits with status 0, the instance is gone. If it fails,
   does not end in time, or cannot start, the lease is quarantined. The reaper reads the hook
   from the current configuration, not from the lease, so when the operator removes a hook,
-  it stops at once, also for leases that are already void.
+  it stops at once, also for leases that are already void. The serial in the lease can be old,
+  so before the hook runs, the reaper asks discovery for the serial of the instance now, and
+  the hook gets that one. The reaper runs at the start of every command, so a command of any
+  caller, such as `check`, can then wait for that discovery: up to 60 seconds for a `discover`
+  hook, or the timeouts of adb, and then the `on_void` hook. It does not hold the lock
+  meanwhile, so other commands go on.
 - **Signals are a separate setting.** `stop = true` in the table of a kind lets the reaper
   signal the scripts of a void lease of that kind (section 4). It is off by default, and
   `[defaults]` cannot turn it on for all kinds. Ending an instance and signalling processes
@@ -305,6 +327,12 @@ not code.
   reaps, and a program that one caller's `PATH` finds can be missing for another caller.
   banksman runs it without a shell, in the directory `/`, with no input, and with
   `BANKSMAN_RESOURCE` and `BANKSMAN_KIND` in its environment, and it discards the output.
+  `BANKSMAN_SERIAL` is set when the serial of the instance is known. A hook of a kind with an
+  Android preset also gets `ANDROID_SERIAL`: the serial, or a value that no device has while
+  the serial is not known, so that `adb` without `-s` fails instead of acting on a device that
+  adb chooses. Without `BANKSMAN_SERIAL`, the instance does not run, or its serial is not
+  known; a hook that ends the instance exits with status 0 when it is gone, and checks that a
+  serial still names the instance before it acts on it.
   The hook runs in its own process group. banksman kills that group after 60 seconds, and
   also when the command that runs the hook ends first, for example because its caller
   stopped it, so that a hook never outlives its reaper. A reaper that ends in the middle
@@ -315,8 +343,8 @@ not code.
   every command.
 - **`on_acquire`** is a command that resets an instance before a run gets it. `acquire` runs
   it for each new lease of the kind, after it writes the lease and outside the lock, with the
-  hook contract above. If it fails, the lease is given back (section 6). banksman ships no
-  such command.
+  hook contract above. Its serial is the one that the discovery of the request found, seconds
+  before. If it fails, the lease is given back (section 6). banksman ships no such command.
 - Hooks do device-level work only. App-level work stays in the project's scripts.
 
 ## 6. Requests by properties
@@ -369,7 +397,7 @@ holdings apart (section 9).
 
 - **The grant.** `acquire` prints `KEY=value` lines: `RESOURCE`, `KIND`, `LEASE` (the lease
   id that the scripts pass back), `STATE`, `KEPT` (`true` for a lease of the caller's holding
-  that `--lease` kept, otherwise `false`), `SERIAL` when discovery knows it, and `ACCOUNTS`
+  that `--lease` kept, otherwise `false`), `SERIAL` when the lease records it, and `ACCOUNTS`
   when the request asks for accounts (section 7). A kept lease can have another id than the
   one that the caller passed, because each lease of a holding has its own id. Each value has only the characters of a
   resource name, so that a shell script can use it as it is: a serial with other characters
@@ -393,7 +421,9 @@ holdings apart (section 9).
   time of a hook, for each reset of the request. At the end, every new lease must still be
   held; otherwise all of them are given back. A lease that the caller
   keeps with `--lease` is not reset again. The hook can restart the instance, so `acquire`
-  reads its facts again after the reset, and prints the serial that discovery finds then.
+  reads its facts again after the reset, and records and prints the serial that discovery finds
+  then. An instance that discovery does not find with a serial then, also because discovery
+  fails, has no serial.
 - **No other process acts on the instance during a reset.** The lease names the `acquire`
   that runs the hook, and a hook never outlives that process (section 5). When the lease
   becomes void or is released during the reset, it drains, and the resource is taken back
@@ -561,7 +591,10 @@ holdings apart (section 9).
 - **Presets.** `preset = "android-emulator"` finds the AVDs, with the facts `avd`,
   `display_name` (the name that the AVD manager shows), `manufacturer`, `api`, `image`,
   `abi`, `form`, and `running`, and, for an emulator that runs, its `serial` and its
-  accounts. When adb cannot list the running emulators, `running` is left out.
+  accounts. When adb cannot list the running emulators, `running` is left out. An emulator that
+  adb lists as `offline`, because the adb daemon in it has not started yet, for example while
+  it boots, runs too: its console gives its AVD name, so its serial is known from the start,
+  and its accounts are not known yet.
   `preset = "android-device"` finds the physical devices that adb lists, with the facts
   `serial`, `manufacturer`, `model`, `codename`, `api`, `abi`, `form`, and `running`, which
   is always true, and their accounts. The facts are what the device gives: a Samsung phone
@@ -637,13 +670,15 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
 ## 10. Status, queries, and history
 
 - `banksman status` prints one table with every resource that agents may use, free ones
-  included, and every resource that has a lease file: resource, kind, form and API level,
+  included, and every resource that has a lease file: resource, kind, serial, form and API level,
   state, since, last use, the three "free by" values, the accounts of the lease, and the
   holder. The state is `free`, `booting`, `ready`, `draining`, `quarantined`, `absent` for an
   allowed instance that discovery does not find now, or `unreadable` for a lease file that
   cannot be read. An instance that discovery finds but that the inventory does not allow is
   never shown, also not to agents, because it can be personal. `status` runs discovery, so
-  it takes as long as one look of `acquire`. Under the table, it shows why the discovery of a
+  it takes as long as one look of `acquire`, and it records the serials that it finds in the
+  leases (section 3). The serial of a resource without a lease is the one that discovery
+  finds. Under the table, it shows why the discovery of a
   kind failed, and how many other notes the discovery has. Those notes can name an instance
   that agents may not use, such as a personal phone that is not authorized, so the commands
   for agents, `status` and `acquire`, never show their text; `banksman admin discover` does.
@@ -651,8 +686,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   refresh reaps, reads the configuration again, and runs discovery. An error is shown in
   place of the table, and the next refresh tries again.
 - `banksman status --json` carries the same data for agents and other tools: for each
-  resource its kind, its state, whether it is present now, the facts `form` and `api`, and
-  its lease. The purpose only with `--verbose` (section 9).
+  resource its kind, its state, whether it is present now, its serial, the facts `form` and
+  `api`, and its lease. The purpose only with `--verbose` (section 9).
 - **"Free by"** cannot be known, so it shows three labeled values:
   1. expected: the holder's `--expect`, only a hint, or unknown;
   2. at the latest: the hard cap, which the reaper enforces;
@@ -817,6 +852,11 @@ With `--json` they print JSON instead. Exit status 1 is an error, 2 a usage erro
 that is lost, and 4 a request whose matching resources are all in use. `run` exits with the
 status of its command, unless banksman fails before the command starts or the lease is lost.
 
+In the command of `banksman run`, each argument that is exactly `{serial}` becomes the serial
+of the lease, and each argument that is exactly `{resource}` becomes the resource: the shell of
+the caller cannot expand a variable that banksman sets only for the command. `run` fails before
+the command starts when the command has `{serial}` and the serial is not known.
+
 Every command that only an operator may run is under `banksman admin`, so that an agent's
 permission rules can refuse all of them with one pattern, including ones added later.
 
@@ -844,7 +884,9 @@ this section names.
 - Run the work that uses a resource with `banksman run`, so that it stops when its lease is
   lost (section 4).
 - Pass the leased serial to every tool, for example `adb -s <serial>`. A bare `adb` call
-  acts on whatever device adb chooses.
+  acts on whatever device adb chooses. In the command of `banksman run`, the argument
+  `{serial}` is the serial, and for a kind with an Android preset, `ANDROID_SERIAL` names the
+  leased device, also for the connected tests of the Android Gradle plugin.
 - Keep the lease id that `acquire` prints. Pass it to the scripts, and back to `acquire` with
   `--lease` to keep the same resource.
 - Start the granted instance when it does not run, and handle one that already runs:
@@ -923,6 +965,8 @@ Done:
   when Gradle reuses the configuration cache.
 - The supervised run: `banksman run`, and the helper, the stub for tests, and the rules for
   the scripts and agents of a project.
+- The serial in the lease, from discovery only, for `status`, the hooks, and `banksman run`,
+  with `ANDROID_SERIAL` and the placeholders `{serial}` and `{resource}`.
 
 Next:
 
@@ -955,9 +999,6 @@ Next:
 - A raw `adb -s` call from an agent is not fenced, because only the scripts register as
   users. An `adb` wrapper on `PATH`, or an agent hook that checks the lease before a device
   command, would enforce it.
-- Should a lease record the serial of an instance that its holder started, so that `status`
-  and the `on_void` hook know it? That needs a command for the holder to report it, and it
-  changes the lease file format.
 - Only a quarantined lease is kept outside `/tmp`. A void lease whose scripts still run, and
   that no command reaps, is kept only in `/tmp`. If no banksman command runs for 3 days, a
   cleaner of temporary files can delete it before it is quarantined. Should every lease with

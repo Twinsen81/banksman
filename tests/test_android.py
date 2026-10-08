@@ -264,6 +264,59 @@ def test_the_avd_name_of_an_older_emulator_comes_from_its_properties(tmp_path):
     assert instance["facts"]["serial"] == "emulator-5556"
 
 
+def test_an_emulator_that_boots_has_its_serial_from_its_console(tmp_path):
+    home = tmp_path / "avd"
+    write_avd(home, "qa_phone_api35", PHONE)
+    write_avd(home, "qa_tablet_api33", TABLET)
+    # adb lists an emulator as offline until its adb daemon starts. The console answers before.
+    adb = FakeAdb(
+        {
+            "devices": "List of devices attached\nemulator-5556\toffline\nemulator-5558\toffline\n",
+            "-s emulator-5556 emu avd name": "qa_phone_api35\r\nOK\r\n",
+        }
+    )
+    document = android.emulators(Android(sdk=SDK, avd_home=home), run=adb)
+    phone, tablet = document["instances"]
+    assert (phone["facts"]["running"], phone["facts"]["serial"]) == (True, "emulator-5556")
+    # Its accounts cannot be read yet, so they are not known.
+    assert "accounts" not in phone
+    assert tablet["facts"]["running"] is False
+    # The properties need the adb daemon, so they are not asked for.
+    assert ["-s", "emulator-5558", "shell", "getprop"] not in adb.commands
+    assert document["notes"] == ["cannot read the AVD name of the running emulator-5558"]
+
+
+def test_the_presets_can_leave_out_the_accounts(tmp_path):
+    home = tmp_path / "avd"
+    write_avd(home, "qa_phone_api35", PHONE)
+    adb = FakeAdb(
+        {
+            "devices": DEVICES,
+            "-s emulator-5554 emu avd name": "qa_phone_api35\r\nOK\r\n",
+            "-s R5CR1234ABC shell getprop": GETPROP,
+        }
+    )
+    settings = Android(sdk=SDK, avd_home=home)
+    (emulator,) = android.emulators(settings, run=adb, accounts=False)["instances"]
+    (device,) = android.devices(settings, run=adb, accounts=False)["instances"]
+    assert emulator["facts"]["serial"] == "emulator-5554"
+    assert "accounts" not in emulator and "accounts" not in device
+    assert not [command for command in adb.commands if "dumpsys" in command]
+
+
+def test_the_avd_name_of_one_emulator(tmp_path):
+    adb = FakeAdb({"-s emulator-5554 emu avd name": "qa_phone_api35\r\nOK\r\n"})
+    assert android.avd_name(Android(sdk=SDK), "emulator-5554", run=adb) == "qa_phone_api35"
+    assert android.avd_name(Android(sdk=SDK), "emulator-5556", run=adb) is None
+    # A serial that is not one of an emulator needs no question.
+    assert android.avd_name(Android(sdk=SDK), "R5CR1234ABC", run=adb) is None
+    assert adb.commands == [
+        ["-s", "emulator-5554", "emu", "avd", "name"],
+        ["-s", "emulator-5556", "emu", "avd", "name"],
+        ["-s", "emulator-5556", "shell", "getprop"],
+    ]
+
+
 def test_a_missing_avd_home_has_no_emulators(tmp_path):
     adb = FakeAdb({"devices": "List of devices attached\n"})
     document = android.emulators(Android(sdk=SDK, avd_home=tmp_path / "none"), run=adb)

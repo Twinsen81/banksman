@@ -139,6 +139,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owner process still runs and started the caller keeps that owner when the caller keeps or
   touches it, so a script inside `banksman run --where` cannot move the lease of the run to
   the agent.
+- The serial in the lease. A lease records the serial of its instance, for example
+  `emulator-5554`, from discovery only: at the grant, after an `on_acquire` reset, and
+  whenever `acquire`, `run`, `status`, or `watch` runs discovery. An instance that stops loses
+  its serial, a slow discovery never undoes a newer one, and one serial belongs to one held
+  lease at most. `status` shows the serial in a column and in its JSON. Hooks get
+  `BANKSMAN_SERIAL`; the `on_void` hook gets the serial that discovery finds at the take-back.
+  `banksman run` asks discovery for the serial before its command starts, also with `--lease`,
+  and gives its command only a serial that discovery confirms then, in `BANKSMAN_SERIAL`. For a kind with an Android preset, `run` and the hooks
+  also set `ANDROID_SERIAL`, or a value that no device has while the serial is not known. `run`
+  replaces each argument that is exactly `{serial}` or `{resource}`, and fails before the
+  command starts when it needs a serial that is not known. The `android-emulator` preset finds
+  the serial of an emulator that still boots. Lease files carry the serial, so their schema is
+  now 6: lease files of an earlier banksman cannot be read after the upgrade, and
+  `banksman admin release --force --resource <name>` frees their resources.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

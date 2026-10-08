@@ -14,7 +14,7 @@ import stat
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -44,6 +44,7 @@ from banksman.lease import (
     Holder,
     Lease,
     LeaseFormatError,
+    SerialSeen,
     Timeouts,
     User,
     check_names,
@@ -269,9 +270,13 @@ class Store:
         keep: str | None = None,
         expect: float | None = None,
         reset_time: float = 0.0,
+        seen: Iterable[SerialSeen] = (),
     ) -> list[Granted] | None:
         """Grant a resource for every need, all or nothing, or return None while that cannot be
         done because resources or accounts are in use.
+
+        `seen` is what the discovery of the request found about serials, as for `observe`. The
+        held leases get it first, and each new lease gets the serial of its instance.
 
         Each new lease gets its own id, and the new leases form one holding. With `keep`, the
         id of a lease that the caller holds, the resources of its holding come first: such a
@@ -288,8 +293,9 @@ class Store:
         for need in needs:
             for choice in need.choices:
                 check_names(choice.resource, choice.kind, holder)
+        seen = tuple(seen)
         with self._lock():
-            entries = self._scan()
+            entries, serials = self._see(self._scan(), seen)
             held = {entry.resource for entry in entries}
             # An account is in use while a lease in any state lists it. The accounts of a lease
             # file that cannot be read are not known; the file keeps only its own resource out
@@ -312,7 +318,7 @@ class Store:
                 for need, pick in zip(needs, picks)
             ]
             resets = sum(choice.reset for choice in choices if choice.resource not in kept)
-            granted = []
+            granted: list[tuple[str, tuple[str, ...], bool]] = []
             for choice, pick in zip(choices, picks):
                 current = kept.get(pick.resource)
                 if current is not None:
@@ -322,7 +328,8 @@ class Store:
                     )
                     if expect is not None:
                         lease = replace(lease, expected=lease.touched + expect)
-                    granted.append(Granted(self._write(lease), pick.accounts, kept=True))
+                    serials[lease.resource] = self._write(lease)
+                    granted.append((lease.resource, pick.accounts, True))
                     continue
                 state = BOOTING if resets else READY
                 lease = self._new_lease(
@@ -339,9 +346,38 @@ class Store:
                         reaper_pid=me,
                         reaper_started=self._start_time(me),
                     )
-                granted.append(Granted(self._write(lease), pick.accounts))
+                serials[lease.resource] = lease
+                changed = set()
+                for each in seen:
+                    if each.resource == lease.resource:
+                        changed |= _see_serial(serials, each)
+                for resource in changed - {lease.resource}:
+                    self._write(serials[resource])
+                lease = self._write(serials[lease.resource])
+                granted.append((lease.resource, pick.accounts, False))
                 self._log(ACQUIRE, lease)
-            return granted
+            # A later lease of the request can take the serial of an earlier one.
+            return [
+                Granted(serials[resource], accounts, kept=kept)
+                for resource, accounts, kept in granted
+            ]
+
+    def observe(self, seen: Iterable[SerialSeen]) -> dict[str, Lease]:
+        """Record what a discovery found about serials in the held leases of this boot.
+
+        Each result applies to the lease of its resource and kind, whatever its lease id: the
+        serial belongs to the instance. A result is not applied when the lease records a
+        discovery that started later, so a slow discovery never undoes a newer one. A serial
+        belongs to one held lease at most: a serial that discovery finds on an instance, also on
+        one without a lease, leaves every other lease. A booting lease keeps its serial, because
+        a start can know it before the instance answers. Recording a serial is not a touch.
+
+        Return the held leases of this boot by resource, as they are now.
+        """
+        seen = tuple(seen)
+        with self._lock():
+            _, serials = self._see(self._scan(), seen)
+        return serials
 
     def ready(self, resource: str, lease_id: str) -> Lease:
         """End the boot or the reset of an instance: the holder may use it now."""
@@ -637,6 +673,28 @@ class Store:
         drained = _drained(replace(lease, users=running), RELEASE, self.system.clock())
         self._log(RELEASE_EVENT, lease, drained=True, running=processes(running), **spent)
         return self._write(drained)
+
+    def _see(
+        self, entries: list[Lease | Unreadable], seen: Sequence[SerialSeen]
+    ) -> tuple[list[Lease | Unreadable], dict[str, Lease]]:
+        """Apply the results of discovery to the held leases of this boot, and write those that
+        change. Return the entries as they are now, and the held leases of this boot."""
+        boot_id = self.system.boot_id()
+        serials = {
+            entry.resource: entry
+            for entry in entries
+            if isinstance(entry, Lease) and entry.state in HELD and entry.boot_id == boot_id
+        }
+        changed: set[str] = set()
+        for each in seen:
+            changed |= _see_serial(serials, each)
+        for resource in sorted(changed):
+            self._write(serials[resource])
+        now = [
+            serials.get(entry.resource, entry) if isinstance(entry, Lease) else entry
+            for entry in entries
+        ]
+        return now, serials
 
     def _log(self, event: str, lease: Lease, **details: object) -> None:
         self._record(Event.of(event, lease, self.system.wall_clock(), **details))
@@ -1042,6 +1100,45 @@ def satisfiable(needs: Sequence[Need]) -> bool:
         for need in needs
     ]
     return assign(parts) is not None
+
+
+def _see_serial(leases: dict[str, Lease], seen: SerialSeen) -> set[str]:
+    """Apply one result of discovery to held leases by resource. Return the resources whose
+    lease changed.
+
+    The results of one discovery have the same time, and each can change the leases that
+    another one changes, for example when two emulators exchange their ports. So a result of
+    the discovery that the lease records is applied too.
+    """
+    lease = leases.get(seen.resource)
+    if lease is not None and (
+        lease.kind != seen.kind
+        or (lease.serial_seen is not None and seen.at < lease.serial_seen)
+    ):
+        return set()
+    if seen.serial is None:
+        if lease is None or lease.state == BOOTING:
+            return set()
+        leases[lease.resource] = replace(lease, serial=None, serial_seen=seen.at)
+        return {lease.resource}
+    others = [
+        other
+        for other in leases.values()
+        if other.resource != seen.resource and other.serial == seen.serial
+    ]
+    # A newer discovery found the serial on another instance, so this result is out of date.
+    if any(other.serial_seen is not None and other.serial_seen >= seen.at for other in others):
+        return set()
+    # Another lease with the serial would make a command of its holder act on this instance,
+    # also when this instance has no lease.
+    changed = set()
+    for other in others:
+        leases[other.resource] = replace(other, serial=None, serial_seen=seen.at)
+        changed.add(other.resource)
+    if lease is not None:
+        leases[lease.resource] = replace(lease, serial=seen.serial, serial_seen=seen.at)
+        changed.add(lease.resource)
+    return changed
 
 
 def _drained(lease: Lease, reason: str, now: float) -> Lease:

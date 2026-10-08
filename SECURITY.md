@@ -111,8 +111,20 @@ leader of a new process group for its command, and signals that group only while
 its own child, is not yet reaped, so that the id of the group cannot name another group. It
 passes on to the group the SIGHUP, SIGINT, SIGQUIT, and SIGTERM that it gets, and it stops the
 group when the lease is lost. The command gets the resource, the kind, and the lease id in its
-environment, and the serial and the accounts of its grant, all with the characters of a
-resource name only.
+environment, and the serial and the accounts of its lease, all with the characters of a
+resource name only. An argument that is exactly `{serial}` or `{resource}` is replaced with one
+of these values; no other text of the command changes, and no shell reads it.
+
+**The serial comes from discovery only.** `run` and the hooks act on the serial in a lease:
+they put it into `BANKSMAN_SERIAL` and, for a kind with an Android preset, into
+`ANDROID_SERIAL`. The holder cannot set it, so an agent cannot point the commands of its lease
+at the device of another holder. A serial that is not a valid resource name is not recorded.
+While the serial is not known, `ANDROID_SERIAL` names no device, so `adb` without `-s` fails
+instead of choosing a device. A hook never gets the `ANDROID_SERIAL` of the command that runs
+it. Before the `on_void` hook runs, the reaper asks discovery for the serial now, because the
+serial in the lease can be old. The reaper runs inside any command, so a command that an agent
+runs, such as `check`, can run discovery and the `discover` hook of a kind while it takes a
+lease back.
 
 **Fencing covers the scripts, not every command.** A script that registers as a user of a
 lease stops itself when the lease is lost, or the reaper stops it when the operator turns

@@ -5,7 +5,8 @@ from helpers import hook
 
 from banksman import android, discovery
 from banksman.config import Config, Kind
-from banksman.discovery import MAX_NOTE_LENGTH, Found, Instance, parse
+from banksman.discovery import MAX_NOTE_LENGTH, Found, Instance, parse, serial_now, serials_seen
+from banksman.lease import SerialSeen
 
 
 def document(*instances, notes=None):
@@ -154,8 +155,8 @@ def test_a_preset_returns_the_same_document(monkeypatch):
         "emulators": document({"name": "qa_phone_api35", "facts": {"api": 35}}),
         "devices": document({"name": "R5CR1234ABC", "accounts": []}),
     }
-    monkeypatch.setattr(android, "emulators", lambda settings: documents["emulators"])
-    monkeypatch.setattr(android, "devices", lambda settings: documents["devices"])
+    monkeypatch.setattr(android, "emulators", lambda settings, accounts: documents["emulators"])
+    monkeypatch.setattr(android, "devices", lambda settings, accounts: documents["devices"])
     emulator = discovery.discover(Kind("emulator", preset="android-emulator"), Config())
     device = discovery.discover(Kind("device", preset="android-device"), Config())
     assert emulator.instances[0].facts == {"api": 35, "kind": "emulator"}
@@ -163,7 +164,7 @@ def test_a_preset_returns_the_same_document(monkeypatch):
 
 
 def test_a_preset_that_fails_gives_a_note(monkeypatch):
-    def fails(settings):
+    def fails(settings, accounts):
         raise android.AndroidError("cannot find the home directory")
 
     monkeypatch.setattr(android, "devices", fails)
@@ -185,3 +186,79 @@ def test_the_example_in_the_module_is_valid():
     assert [instance.name for instance in found.instances] == ["R5CR1234ABC"]
     assert found.notes == ("a note",)
 
+
+
+def test_what_a_discovery_says_about_serials():
+    found = parse(
+        "emulator",
+        document(
+            {"name": "runs", "facts": {"running": True, "serial": "emulator-5554"}},
+            {"name": "stopped", "facts": {"running": False}},
+            {"name": "unknown", "facts": {}},
+            {"name": "odd", "facts": {"running": True, "serial": "emulator 5556"}},
+            {"name": "odd_stopped", "facts": {"running": False, "serial": "emulator 5558"}},
+        ),
+    )
+    # Only a valid serial, or an instance that does not run, says something.
+    assert serials_seen(found, 7.0) == (
+        SerialSeen("runs", "emulator", "emulator-5554", 7.0),
+        SerialSeen("stopped", "emulator", None, 7.0),
+        SerialSeen("odd_stopped", "emulator", None, 7.0),
+    )
+    # A discovery that failed says nothing.
+    assert serials_seen(Found("emulator", failure="adb failed"), 7.0) == ()
+
+
+def clock():
+    return 3.0
+
+
+def test_one_question_confirms_the_serial_of_an_emulator(monkeypatch):
+    kind = Kind("emulator", preset="android-emulator")
+    monkeypatch.setattr(android, "avd_name", lambda settings, serial: "qa_phone")
+
+    def no_discovery(*arguments, **options):
+        raise AssertionError("the discovery ran")
+
+    monkeypatch.setattr(discovery, "discover", no_discovery)
+    assert serial_now(kind, Config(), "qa_phone", "emulator-5554", clock) == (
+        SerialSeen("qa_phone", "emulator", "emulator-5554", 3.0),
+    )
+
+
+def test_a_serial_that_names_another_instance_runs_the_discovery_without_accounts(monkeypatch):
+    kind = Kind("emulator", preset="android-emulator")
+    monkeypatch.setattr(android, "avd_name", lambda settings, serial: "qa_tablet")
+    calls = []
+
+    def emulators(settings, accounts):
+        calls.append(accounts)
+        return document(
+            {"name": "qa_phone", "facts": {"running": True, "serial": "emulator-5556"}},
+            {"name": "qa_tablet", "facts": {"running": True, "serial": "emulator-5554"}},
+        )
+
+    monkeypatch.setattr(android, "emulators", emulators)
+    seen = serial_now(kind, Config(), "qa_phone", "emulator-5554", clock)
+    assert seen == (
+        SerialSeen("qa_phone", "emulator", "emulator-5556", 3.0),
+        SerialSeen("qa_tablet", "emulator", "emulator-5554", 3.0),
+    )
+    assert calls == [False]
+
+
+def test_a_known_serial_that_another_emulator_has_now_leaves_the_lease(monkeypatch):
+    kind = Kind("emulator", preset="android-emulator")
+    monkeypatch.setattr(android, "avd_name", lambda settings, serial: "qa_tablet")
+
+    def fails(settings, accounts):
+        raise android.AndroidError("adb devices failed")
+
+    monkeypatch.setattr(android, "emulators", fails)
+    assert serial_now(kind, Config(), "qa_phone", "emulator-5554", clock) == (
+        SerialSeen("qa_phone", "emulator", None, 3.0),
+    )
+
+
+def test_a_kind_without_discovery_has_no_serials():
+    assert serial_now(Kind("build", count=1), Config(), "build-0", None, clock) == ()
