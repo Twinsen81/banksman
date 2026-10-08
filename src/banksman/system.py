@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import subprocess
 import sys
 import time
 from collections.abc import Iterable
@@ -141,6 +140,8 @@ def _read_boot_id() -> str:
         except OSError as exc:
             raise MachineError(f"cannot read the boot id: {exc}") from exc
     elif sys.platform == "darwin":
+        import subprocess  # Not at the top: the adb guard imports this module for every adb call.
+
         try:
             result = subprocess.run(
                 ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
@@ -232,6 +233,8 @@ def _table_from_ps() -> dict[int, Process]:
 
 
 def _ps(arguments: list[str]) -> str:
+    import subprocess  # Not at the top: the adb guard imports this module for every adb call.
+
     # A fixed locale and time zone make every caller get the same start time for one
     # process, whatever its own environment is.
     env = {**os.environ, "LC_ALL": "C", "TZ": "UTC"}

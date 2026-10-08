@@ -66,7 +66,7 @@ def test_a_ps_that_cannot_start_is_an_error(monkeypatch):
     def blocked(*args, **kwargs):
         raise PermissionError(1, "Operation not permitted", "ps")
 
-    monkeypatch.setattr(system.subprocess, "run", blocked)
+    monkeypatch.setattr(subprocess, "run", blocked)
     with pytest.raises(MachineError, match="cannot run ps.*outside the sandbox"):
         system._running_from_ps([os.getpid()])
 
@@ -75,7 +75,7 @@ def test_a_failing_ps_is_an_error(monkeypatch):
     def failing(args, **kwargs):
         return subprocess.CompletedProcess(args, 1, stdout="", stderr="ps: not permitted")
 
-    monkeypatch.setattr(system.subprocess, "run", failing)
+    monkeypatch.setattr(subprocess, "run", failing)
     with pytest.raises(MachineError, match="exit status 1.*outside the sandbox"):
         system._running_from_ps([os.getpid()])
 

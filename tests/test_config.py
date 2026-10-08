@@ -156,6 +156,12 @@ def test_the_holder_rules_have_defaults_and_can_be_changed(config_path):
     assert holder.issue_pattern.pattern == "#([0-9]+)"
 
 
+def test_the_adb_guard_is_strict_only_when_the_operator_says_so(config_path):
+    assert load_config().guard.strict is False
+    write_config(config_path, "[guard]\nstrict = true\n")
+    assert load_config().guard.strict is True
+
+
 def test_a_kind_can_get_its_instances_from_discovery(config_path):
     write_config(
         config_path,
@@ -273,6 +279,8 @@ def test_text_that_is_not_a_duration_is_refused(text):
         ("[accounts]\npattern = ['*']", "accounts.pattern"),
         ("[android]\nsdk = 'Library/Android/sdk'", "android.sdk"),
         ("[android]\nadb = '/opt/adb'", "android.adb"),
+        ("[guard]\nstrict = 'yes'", "guard.strict"),
+        ("[guard]\nstrictly = true", "guard.strictly"),
     ],
 )
 def test_a_configuration_that_is_not_valid_is_refused(config_path, text, key):
@@ -323,7 +331,7 @@ def test_a_fifo_is_refused_without_waiting_for_a_writer(config_path):
 
 def test_the_example_configuration_of_the_design_loads(config_path):
     design = (Path(__file__).resolve().parents[1] / "docs" / "DESIGN.md").read_text()
-    section = design[design.index("## 14. Using banksman from a project") :]
+    section = design[design.index("## 15. Using banksman from a project") :]
     example = section[section.index("```toml\n") + len("```toml\n") : section.index("```\n", 1)]
     loaded = load_config(write_config(config_path, example))
     assert sorted(loaded.kinds) == ["device", "emulator", "port", "sdk"]

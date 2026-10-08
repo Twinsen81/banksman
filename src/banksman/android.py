@@ -1,8 +1,9 @@
-"""The Android presets: discovery of Android emulators and Android devices.
+"""The Android presets: discovery of Android emulators and Android devices; and adb for the guard.
 
-This is the only module that runs `adb`. It only reads: it lists the devices, reads system
-properties and the accounts of a device, asks a running emulator for its AVD name, and reads
-the AVD files. Each preset returns the same document that a discover hook prints.
+This is the only module that runs `adb`. Discovery only reads: it lists the devices, reads
+system properties and the accounts of a device, asks a running emulator for its AVD name, and
+reads the AVD files. Each preset returns the same document that a discover hook prints. The adb
+guard lists the devices here too, and runs the adb call that it allows.
 """
 
 from __future__ import annotations
@@ -10,12 +11,11 @@ from __future__ import annotations
 import os
 import pwd
 import re
-import subprocess
 import sys
-import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from banksman.config import Android
 from banksman.errors import BanksmanError
@@ -54,10 +54,25 @@ class AndroidError(BanksmanError):
     """A program of the Android SDK did not give an answer."""
 
 
+@dataclass(frozen=True)
+class Transport:
+    """A device or an emulator as `adb devices -l` lists it."""
+
+    serial: str
+    state: str
+    # The address of a USB device, such as usb:1-1. An emulator, and a device that adb reaches
+    # over TCP/IP, have none.
+    devpath: str = ""
+    product: str = ""
+    model: str = ""
+    device: str = ""
+    transport_id: str = ""
+
+
 def emulators(settings: Android, run: Run | None = None, *, accounts: bool = True) -> Document:
     """Find the AVDs, with the serial and the accounts of each one that runs."""
     run = run_program if run is None else run
-    adb = str(sdk(settings) / "platform-tools" / "adb")
+    adb = adb_path(settings)
     notes: list[str] = []
     home = avd_home(settings)
     avds = _avds(home, notes)
@@ -103,13 +118,13 @@ def avd_name(settings: Android, serial: str, run: Run | None = None) -> str | No
     if not serial.startswith(_EMULATOR_PREFIX):
         return None
     run = run_program if run is None else run
-    return _avd_name(run, str(sdk(settings) / "platform-tools" / "adb"), serial)
+    return _avd_name(run, adb_path(settings), serial)
 
 
 def devices(settings: Android, run: Run | None = None, *, accounts: bool = True) -> Document:
     """Find the attached physical devices, with their facts and their accounts."""
     run = run_program if run is None else run
-    adb = str(sdk(settings) / "platform-tools" / "adb")
+    adb = adb_path(settings)
     notes: list[str] = []
     try:
         listed = _devices(run, adb)
@@ -137,6 +152,52 @@ def devices(settings: Android, run: Run | None = None, *, accounts: bool = True)
             instance.update(found)
         instances.append(instance)
     return {"schema": DISCOVER_SCHEMA, "instances": instances, "notes": notes}
+
+
+def transports(
+    settings: Android, server: Sequence[str] = (), run: Run | None = None
+) -> list[Transport]:
+    """List the devices and emulators that an adb server knows.
+
+    `server` holds the options of adb that name the server, such as `-P 5038`.
+    """
+    run = run_program if run is None else run
+    return parse_transports(
+        run([adb_path(settings), *server, "devices", "-l"], ADB_TIMEOUT_SECONDS)
+    )
+
+
+def parse_transports(text: str) -> list[Transport]:
+    """Return the devices in the output of `adb devices -l`."""
+    found = []
+    for line in text.splitlines():
+        fields = line.split()
+        # Skip the title line and the lines about starting the adb server.
+        if len(fields) < 2 or line.startswith(("List of devices", "*")):
+            continue
+        serial, state, *rest = fields
+        values = {}
+        for field in rest:
+            key, _, value = field.partition(":")
+            if key in ("product", "model", "device", "transport_id"):
+                values[key] = value
+            elif key == "usb":
+                values["devpath"] = field
+        found.append(Transport(serial, state, **values))
+    return found
+
+
+def exec_adb(settings: Android, arguments: Sequence[str], env: Mapping[str, str]) -> NoReturn:
+    """Run adb in place of this process: it keeps the pid, the terminal, and the signals.
+
+    Raise OSError when adb cannot start.
+    """
+    adb = adb_path(settings)
+    os.execve(adb, [adb, *arguments], env)
+
+
+def adb_path(settings: Android) -> str:
+    return str(sdk(settings) / "platform-tools" / "adb")
 
 
 def sdk(settings: Android) -> Path:
@@ -188,6 +249,11 @@ def parse_properties(text: str) -> dict[str, str]:
 
 
 def run_program(command: Sequence[str], timeout: float) -> str:
+    # Not at the top: the adb guard imports this module for every adb call, and needs these
+    # only for some.
+    import subprocess
+    import tempfile
+
     # The output goes to a file, not a pipe: the adb server that `adb devices` can start keeps
     # running, and a pipe that it inherits would keep this command waiting.
     with tempfile.TemporaryFile() as output:
