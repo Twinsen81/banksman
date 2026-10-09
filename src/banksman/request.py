@@ -79,6 +79,8 @@ class Candidate:
     accounts: tuple[str, ...] | None = None
     # Each use costs money, so a request gets it only with --paid.
     paid: bool = False
+    # It runs, but banksman did not start it (see Instance).
+    unmanaged: bool = False
 
     @property
     def cold(self) -> bool:
@@ -194,7 +196,16 @@ def search(
                 facts[ACCOUNT] = bool(accounts)
             tags = inventory.tags_of(instance.name)
             resources.append(
-                Candidate(instance.name, kind.name, kind.rank, facts, tags, accounts, kind.paid)
+                Candidate(
+                    instance.name,
+                    kind.name,
+                    kind.rank,
+                    facts,
+                    tags,
+                    accounts,
+                    kind.paid,
+                    instance.unmanaged,
+                )
             )
         present = {instance.name for instance in found.instances}
         allowed = inventory.kinds[kind.name].allowed if kind.name in inventory.kinds else ()
@@ -216,13 +227,15 @@ def search(
         # A paid resource last, whatever the ranks are: a request gets one only when the user
         # agreed to the cost, and only when nothing free can serve it. Then lower ranks first, so
         # a request that does not name a kind gets, for example, an emulator before a physical
-        # device. Then an instance that runs before one that its holder must start, which saves
-        # the time and the memory of a start.
+        # device. Then an instance that runs before one that must be started, which saves the
+        # time and the memory of a start, and one that banksman started before one that it did
+        # not, which a person or another program can still use.
         matching.sort(
             key=lambda candidate: (
                 candidate.paid,
                 candidate.rank,
                 candidate.cold,
+                candidate.unmanaged,
                 candidate.resource,
             )
         )

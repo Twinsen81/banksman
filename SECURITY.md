@@ -38,6 +38,18 @@ contains the agent, a program above it, or the reaper itself. Without a known ow
 it signals nothing. Another local user can create the state directory first; banksman then
 refuses to run. That is a denial of service, not a takeover.
 
+**banksman ends only the emulators that it started.** On `--start`, banksman runs the
+`emulator` command of the SDK in the configuration, never one from the `PATH`, with the
+options of `start_args` in the configuration, which are code of the operator like a hook. It
+records the pid and the start time of each emulator that it starts in
+`~/.local/state/banksman/emulator`, which it creates with mode `0700`, and it refuses a record
+there that another user owns or that group or others can write to, because that record decides
+which emulators the reaper ends. The reaper signals only that one process, and only while the
+pid has the recorded start time on the same boot, so it never signals a process that the
+system gave the pid to later. It never signals a process group: other emulators use the
+`netsimd` daemon that an emulator can start in its group. An emulator that the holder or a
+person started is never ended.
+
 **Configuration runs as code.** A kind's hooks are commands that banksman runs as the
 user. So banksman refuses a configuration file that a user other than the user and root
 owns, or that group or others can write to. The reaper runs at the start of most commands,

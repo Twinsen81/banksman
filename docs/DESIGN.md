@@ -125,8 +125,8 @@ leases instead.
   boot, so the boot id also keeps the deadlines of two boots apart.
 - **Reaping in two steps.** Under the lock, the reaper marks a void lease `draining`, which
   fails every ownership check, and records its own pid and start time in the lease. Outside
-  the lock, it ends the instance: a reservation that banksman created for a remote device
-  (section 8), then the kind's `on_void` hook (section 5). It also stops the registered
+  the lock, it ends the instance: an emulator, or a reservation of a remote device, that
+  banksman started (section 8), then the kind's `on_void` hook (section 5). It also stops the registered
   scripts if stopping is on (section 4). Then, under the lock again, and only if
   the file still holds the same lease, it deletes the lease when every registered script has
   ended. Otherwise the lease drains until its scripts end, and later commands check them
@@ -139,7 +139,9 @@ leases instead.
 - **The serial.** A lease of an instance that runs records its serial: the address that tools
   such as adb use, for example `emulator-5554`. Only discovery (section 8), or a start that
   banksman performs (section 6), sets it, never the holder, because `banksman run` and the hooks
-  act on this address, and a wrong one would make them act on the instance of another holder. Every command that runs discovery records what
+  act on this address, and a wrong one would make them act on the instance of another holder.
+  A start of an emulator records it before the boot, because banksman chooses the console port
+  itself (section 8). Every command that runs discovery records what
   it finds in the held leases of the kind: `acquire`, `run`, `status`, and `watch`. A serial
   that discovery reports is recorded. An instance that reports no serial and does not run loses
   its serial, because an emulator takes the lowest free console port, and the next emulator
@@ -201,7 +203,9 @@ minutes, and its lease can become void in the middle.
   [PROJECTS.md](PROJECTS.md) has the details.
 - **The reaper's side: no signals by default.** For a void lease, the reaper first marks it
   `draining`, so that no further ownership check passes. By default it sends no signal to
-  any process. It waits until every registered script has stopped itself, confirms that by
+  any script. The only process that it signals by default is an emulator that banksman
+  started itself, to end it (section 8). It waits until every registered script has stopped
+  itself, confirms that by
   pid and start time, and then frees the resource. A script with a process group runs until
   no process is left in its group. If a script still runs at the drain deadline
   (`drain_timeout`, section 5), the lease is quarantined: it is never handed on, and it
@@ -318,8 +322,9 @@ not code.
 - **`on_void`** is a command that ends a void instance, for example one that kills an
   emulator. The reaper runs it when it takes back a void lease of the kind. Only a declared
   hook lets the reaper end an instance: banksman ships no such command, and without one the
-  reaper ends nothing, with one exception: the reaper ends the reservation of a remote device
-  that banksman itself created with `--start` (section 8), and then runs the hook. If the hook exits with status 0, the instance is gone. If it fails,
+  reaper ends nothing, with one exception: the reaper ends an emulator, or the reservation of a
+  remote device, that banksman itself started with `--start` (section 8), and then runs the
+  hook. If the hook exits with status 0, the instance is gone. If it fails,
   does not end in time, or cannot start, the lease is quarantined. The reaper reads the hook
   from the current configuration, not from the lease, so when the operator removes a hook,
   it stops at once, also for leases that are already void. The serial in the lease can be old,
@@ -356,6 +361,15 @@ not code.
   reapers have started the take-back of a lease and none has finished, for example because
   their callers stopped them, the lease is quarantined, so that a slow hook does not run in
   every command.
+- **`start_args`** is a list of options of the `emulator` command, for example
+  `["-no-window", "-no-snapshot-save"]`, valid only with the `android-emulator` preset.
+  banksman adds them after `-avd <name> -port <port>` when it starts an AVD on `--start`
+  (section 8). banksman chooses the AVD and the console port itself, so `-avd`, `-port`,
+  `-ports`, and `@<name>` are refused here.
+- **`unmanaged`** decides what a request gets of an instance that runs, but that banksman did
+  not start (section 6): `"skip"`, the default, never grants it, and `"grant"` grants it after
+  the instances that banksman knows. It is valid only with the `android-emulator` and
+  `android-remote` presets, whose instances banksman starts.
 - **`on_acquire`** is a command that resets an instance before a run gets it. `acquire` runs
   it for each new lease of the kind, after it writes the lease and outside the lock, with the
   hook contract above. Its serial is the one that the discovery of the request found, seconds
@@ -404,7 +418,8 @@ When several resources match, banksman chooses in a fixed order:
 3. A kind with a lower `rank` (section 5). So a request that does not name a kind gets an
    emulator before a physical device, and a physical device before a remote one.
 4. An instance that runs before one that does not run, which saves the time and the memory
-   of a start.
+   of a start. Of the instances that run, one that banksman knows comes before an unmanaged
+   one, which a request gets only with `unmanaged = "grant"`.
 5. The resource name.
 
 `acquire` without `--lease` or `--holding` never grants a held resource, also not to the same
@@ -434,18 +449,29 @@ holdings apart (section 9).
   permission rules of the agents can ask the user before every `--paid` (section 15).
 - **Starting an instance.** Without `--start`, every grant is `ready`. The holder checks
   whether the instance runs, and starts it if it does not, for example with the `emulator`
-  command. A fact from discovery can be wrong, for example for an emulator that is still
-  starting, so `running` only orders the matches, and the holder decides. With `--start`,
-  banksman starts a granted instance that does not run when it can start its kind; today
-  that is the `android-remote` preset only (section 8), and the holder still starts an
-  emulator. The new leases of the request are `booting` during the start, under the boot
-  deadline, and name the `acquire`, as during a reset. The start records the handle in the
-  lease as soon as it knows it, and the serial when the instance runs, so the adb guard
-  protects the device from the first moment. When the start fails, or does not end by the
+  command. With `--start`, banksman starts a granted instance that does not run when it can
+  start its kind: an AVD of the `android-emulator` preset, or a model of the `android-remote`
+  preset (section 8). The new leases of the request are `booting` during the start, under the
+  boot deadline, and name the `acquire`, as during a reset. The start records the serial in
+  the lease before the instance is ready: for an emulator, the serial of the console port that
+  banksman chose, before the boot; for a remote device, when it is connected, and its handle
+  as soon as the tool prints it. So the adb guard protects the instance from the first
+  moment. When the start fails, or does not end by the
   boot deadline, every new lease of the request is given back, and `acquire` fails with the
   reason. A lease that the caller keeps with `--lease` is not started again. The starts and
   the resets of one request run one after another, so the boot deadline of each new lease
   also counts the boot timeout of every other start of the request.
+- **Instances that banksman did not start.** An instance of the `android-emulator` or the
+  `android-remote` preset that runs, but that banksman did not start and did not see run when
+  a lease of it ended, is `unmanaged`: a person or a program outside banksman started it, for
+  example an emulator in Android Studio, or a remote device that a person reserved by hand.
+  Without this rule, banksman would give such an instance to the next request first, because
+  it runs. So a request does not get it: it counts as a resource in use, a request that waits
+  waits for it, and the request says why. `unmanaged = "grant"` for the kind (section 5) lets
+  a request get it, after the instances that banksman knows. When a lease ends, by a release
+  or by a take-back, banksman records the instance that runs then, so an emulator that the
+  holder started under its lease is not unmanaged when it is free. banksman knows an emulator
+  by its pid and start time, and a remote device by the id of its reservation (section 8).
 - **The agent can choose.** `acquire` grants one resource for each part of the request and
   names it. It does not return a list, because two callers that choose from the same list
   choose the same resource. An agent that needs a specific resource asks for it, for example
@@ -635,7 +661,9 @@ holdings apart (section 9).
   accounts. When adb cannot list the running emulators, `running` is left out. An emulator that
   adb lists as `offline`, because the adb daemon in it has not started yet, for example while
   it boots, runs too: its console gives its AVD name, so its serial is known from the start,
-  and its accounts are not known yet.
+  and its accounts are not known yet. An AVD also runs when the process list has an emulator
+  with `-avd <name>` or `@<name>` on its command line: adb does not list an emulator in the
+  first seconds of its start, or one whose console port is outside the range that adb scans.
   `preset = "android-device"` finds the physical devices that adb lists, with the facts
   `serial`, `manufacturer`, `model`, `codename`, `api`, `abi`, `form`, and `running`, which
   is always true, and their accounts. The facts are what the device gives: a Samsung phone
@@ -648,7 +676,46 @@ holdings apart (section 9).
   on macOS and in `~/Android/Sdk` on Linux, and the AVDs in `~/.android/avd`. The `sdk` and
   `avd_home` keys of the `[android]` table change them. The presets never read
   `$ANDROID_HOME` or `$ANDROID_AVD_HOME`, for the same reason as for the state directory.
-  They only read, and they declare no `on_void`.
+  They only read, except for the starts on `--start`, and they declare no `on_void`.
+- **Emulators that banksman starts.** `acquire --start` (section 6) for an AVD that does not
+  run reads the process list again, and refuses to start an AVD whose emulator runs already.
+  It chooses a console port: an even port from 5554 to 5584, the range in which adb finds
+  emulators by itself, where nothing listens on the port or on the next one, the adb port.
+  Under the lock of the lease store, it records the serial `emulator-<port>` in the lease,
+  the first one that no held lease records. So two starts at the same time never get the
+  same port, and the serial is known before the boot. A program outside banksman, such as
+  Android Studio, can still take the port first; the start then fails, because the console at
+  the port gives another AVD name, and never records a wrong serial. banksman runs
+  `<sdk>/emulator/emulator -avd <name> -port <port> <start_args>` in a session of its own, in
+  the directory `/`, with the SDK and the AVD home of banksman in `ANDROID_HOME`,
+  `ANDROID_SDK_ROOT`, and `ANDROID_AVD_HOME`, so the emulator outlives the command, finds the
+  AVD that discovery found, and gets no Ctrl-C of the caller. The emulator command becomes the
+  emulator process, and banksman records its pid and start time at once. The lease is
+  `booting` until `sys.boot_completed` is `1` and the console at the port gives the name of the
+  AVD, under the boot deadline. When the emulator ends before that, does not complete its boot
+  by the boot deadline, or the start is interrupted, banksman ends the emulator and gives the
+  lease back. What the emulator prints goes to `<name>.log`, which each start begins again;
+  the reason of a failed start is its last line.
+
+  **The record.** `<kind>-emulators.json` lists the emulators that banksman knows: the ones that
+  it started, and the ones that ran when a lease of their AVD ended (section 6), each with its
+  pid, its start time, the boot of the machine, and whether banksman started it. An entry
+  whose process has ended, or that belongs to an earlier boot, goes. An emulator of an
+  allowed AVD that runs without an entry is unmanaged. The record and the logs are in the
+  emulator directory, `~/.local/state/banksman/emulator`, outside `/tmp`, because an emulator
+  can run for days; next to the state directory when only `BANKSMAN_STATE_DIR` is set; or in
+  `BANKSMAN_EMULATOR_DIR`. Without a record that banksman can read, no emulator counts as one
+  that banksman knows.
+
+  **The end.** A release leaves the emulator running, and the next request gets it without a
+  start. The reaper ends the emulator of a void lease only when the record says that banksman
+  started it, whichever lease it started it for: SIGTERM to the emulator process, SIGKILL when
+  it still runs after 20 seconds, and the end confirmed by pid and start time. It never
+  signals a process group, because an emulator can start the `netsimd` daemon in its group,
+  and the other emulators use that daemon. When the emulator does not end, the lease is
+  quarantined. An emulator that the holder started stays, and banksman records it. An
+  `acquire --start` that is killed in the middle, for example by the time limit of an agent,
+  leaves the lease `booting`, and the reaper ends the emulator after the boot deadline.
 - **Remote devices.** `preset = "android-remote"` offers the physical devices of Android
   Device Streaming, a service that reserves a real device in a lab and forwards it to the
   local adb server as `localhost:<port>`. The `android` command line tool does that, and
@@ -726,6 +793,10 @@ holdings apart (section 9).
   emulator that a release leaves running. The reaper ends only what banksman started: for a
   void lease whose handle the record lists as created by banksman, it runs
   `android device remote remove <id>`. A reservation that has ended already counts as gone.
+  A live connection whose reservation is not in banksman's record is unmanaged (section 6).
+  When a lease of a model ends, by a release or a take-back, and the lease records the id of a
+  reservation that the record does not have, banksman records it as one that it did not
+  create: the holder reserved the model by hand.
   The holder can extend a reservation by hand with `BANKSMAN_HANDLE`, so the end that banksman
   recorded can be too early: only `remove` confirms that a reservation has ended, and the record
   stays 3 hours after banksman first recorded the reservation. A reservation that nothing takes
@@ -834,7 +905,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
 - `banksman status` prints one table with every resource that agents may use, free ones
   included, and every resource that has a lease file: resource, kind, serial, form and API level,
   state, since, last use, the three "free by" values, the accounts of the lease, and the
-  holder. The state is `free`, `booting`, `ready`, `draining`, `quarantined`, `absent` for an
+  holder. The state is `free`, `unmanaged` for an instance without a lease that runs but that
+  banksman did not start (section 6), `booting`, `ready`, `draining`, `quarantined`, `absent` for an
   allowed instance that discovery does not find now, or `unreadable` for a lease file that
   cannot be read. An instance that discovery finds but that the inventory does not allow is
   never shown, also not to agents, because it can be personal. `status` runs discovery, so
@@ -1042,9 +1114,10 @@ is a setup of the operator, and a project needs nothing for it.
   `status` shows it. The purpose in it is untrusted text, as in `status`. When the lease belongs
   to the caller's holding but is no longer held, for example because it drains, the guard says
   that the lease is lost.
-- **Remote devices.** The serial of a remote device, `localhost:<port>`, is a serial like
-  any other, and the start records it in the lease before the lease is ready, so the guard
-  protects the device from the first moment. `adb kill-server` and `adb disconnect
+- **Starts.** The start of an emulator records its serial before the boot. The serial of a
+  remote device, `localhost:<port>`, is a serial like any other, and the start records it in
+  the lease before the lease is ready. So the guard protects an instance that banksman starts
+  from the first moment. `adb kill-server` and `adb disconnect
   localhost:<port>` end the connection of a remote device, so the guard refuses them for the
   devices of other holders as for every device, and `banksman run` connects the caller's own
   device again (section 8).
@@ -1165,7 +1238,8 @@ permission rules can refuse all of them with one pattern, including ones added l
   records the shape of every JSON document, so a change of the output cannot pass without a
   decision about the number.
 - The document of a `discover` hook has a schema of its own (section 8), and so have the
-  catalogue and the record of reservations of the `android-remote` preset.
+  catalogue and the record of reservations of the `android-remote` preset, and the record of
+  the emulators of the `android-emulator` preset.
 - The surfaces treated as public API are the CLI (commands, flags, exit codes, `KEY=value`
   output), the JSON output, the lease file format, the log file format, the configuration
   files, and the hook contract.
@@ -1199,9 +1273,13 @@ this section names.
 - Keep every wait shorter than the time limit of the shell tool of the agent. Claude Code
   stops a command of its Bash tool after 10 minutes at most, so a longer `--wait` is stopped
   before it ends. A long run of tests under `banksman run` runs in the background of the tool.
-- Start the granted instance when it does not run, and handle one that already runs:
-  discovery can miss an emulator that is still starting. Start it before `banksman run`, not
-  inside it: `run` waits for every process that its command leaves in its group.
+- Let banksman start an emulator with `--start`, or start the granted instance when it does
+  not run, and handle one that already runs. Start it before `banksman run`, not inside it:
+  `run` waits for every process that its command leaves in its group. With `--start`,
+  `acquire` lasts until the boot completes, so `--wait` and the `boot_timeout` of the kind
+  together must be shorter than the time limit of the shell tool, or `acquire` runs in the
+  background of the tool. An `acquire` that the tool stops leaves the lease booting until the
+  boot deadline, and the emulator is then ended and started again for the next request.
 - Release leases before waiting for a person, so that a run that waits overnight does not
   hold a device. If a run forgets, the owner and idle checks free the device later.
 - Before `--paid`, tell the user that the device costs money, and get a yes. Let the
@@ -1223,7 +1301,8 @@ An example configuration for a typical Android project, in `~/.config/banksman/c
 [kinds.emulator]
 preset = "android-emulator"
 preselect = ["e2e_*"]
-boot_timeout = "8m"
+boot_timeout = "4m"
+start_args = ["-no-window", "-no-snapshot-save"]
 
 # Physical devices: no pattern, so a person selects each device in banksman admin discover.
 [kinds.device]
@@ -1254,7 +1333,7 @@ accounts. A test run then gets an emulator and a port in one call, and the scrip
 mutex with `banksman run`:
 
 ```sh
-banksman acquire --as phone --where kind=emulator --where form=phone \
+banksman acquire --as phone --where kind=emulator --where form=phone --start \
                  --as port --where kind=port --for "UI tests" --wait 5m
 banksman run --where kind=sdk --wait 5m --for "create an AVD" -- avdmanager create avd ...
 ```
@@ -1292,12 +1371,19 @@ Done:
 - Named holdings: `--holding <label>` for `acquire`, `run`, `touch`, and `release`, and
   `held`; and the guide for agents, which `banksman agent-guide` prints in the format of a
   skill.
+- Emulators that banksman starts: `acquire --start` for the `android-emulator` preset, on a
+  console port that banksman chooses before the boot, a take-back that ends only the
+  emulators that banksman started, and unmanaged instances, which a request does not get
+  unless the kind says so.
 
 Next:
 
 - `explain`, and a queue for the callers that wait.
 - Keeping a lease while an agent waits for a person, and getting the same resource back
   after a lease ends.
+- Ending a free emulator that banksman started after a set time without a lease, because each
+  emulator uses several GB of memory. The reaper must then hold a lease of its own while it
+  ends the emulator, so that no request gets it meanwhile.
 
 ## 17. Open questions
 

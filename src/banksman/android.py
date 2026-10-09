@@ -3,7 +3,8 @@
 This is the only module that runs `adb`. Discovery only reads: it lists the devices, reads
 system properties and the accounts of a device, asks a running emulator for its AVD name, and
 reads the AVD files. Each preset returns the same document that a discover hook prints. The adb
-guard, and the preset for remote devices, use adb through this module too.
+guard, the start of an emulator, and the preset for remote devices use adb through this module
+too.
 """
 
 from __future__ import annotations
@@ -122,6 +123,20 @@ def avd_name(settings: Android, serial: str, run: Run | None = None) -> str | No
         return None
     run = run_program if run is None else run
     return _avd_name(run, adb_path(settings), serial)
+
+
+def booted(settings: Android, serial: str, run: Run | None = None) -> bool:
+    """Whether the Android system on a device or an emulator has completed its boot. A device
+    that adb cannot reach yet has not."""
+    run = run_program if run is None else run
+    try:
+        output = run(
+            _adb(adb_path(settings), serial, "shell", "getprop", "sys.boot_completed"),
+            ADB_TIMEOUT_SECONDS,
+        )
+    except AndroidError:
+        return False
+    return output.strip() == "1"
 
 
 def devices(settings: Android, run: Run | None = None, *, accounts: bool = True) -> Document:

@@ -21,6 +21,9 @@ from banksman.sanitize import clean
 from banksman.store import Snapshot
 
 FREE = "free"
+# An instance without a lease that runs, but that banksman did not start: a person or a program
+# outside banksman uses it.
+UNMANAGED = "unmanaged"
 # An allowed instance that discovery does not find now, for example an unplugged phone.
 ABSENT = "absent"
 UNREADABLE = "unreadable"
@@ -111,7 +114,7 @@ def resources(snapshot: Snapshot, found: Search, paid: Collection[str] = ()) -> 
             shown[name] = Resource(
                 name,
                 candidate.kind,
-                FREE,
+                UNMANAGED if candidate.unmanaged else FREE,
                 True,
                 _shown(candidate.facts),
                 serial=serial_of(candidate.facts),

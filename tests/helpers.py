@@ -1,13 +1,16 @@
 """Fakes and helpers that the tests share."""
 
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import banksman
-from banksman.system import Process
+from banksman.system import Machine, Process
 
 # The source directory, for tests that run banksman in a child process.
 SRC = str(Path(banksman.__file__).resolve().parents[1])
@@ -29,6 +32,7 @@ class FakeSystem:
         self.parents: dict[int, int] = {}
         self.groups: dict[int, int] = {}
         self.programs: dict[int, str] = {}
+        self.arguments: dict[int, tuple[str, ...]] = {}
         self.ignores: dict[int, set[int]] = {}
         self.signals: list[tuple[str, int, int]] = []
 
@@ -57,6 +61,12 @@ class FakeSystem:
                 self.programs.get(pid, "/bin/sh"),
             )
             for pid, started in known.items()
+        }
+
+    def commands(self):
+        return {
+            pid: replace(process, arguments=self.arguments.get(pid, ()))
+            for pid, process in self.process_table().items()
         }
 
     def signal(self, pid: int, signum: int) -> None:
@@ -184,10 +194,76 @@ sys.stdout.write(answer)
 """
 
 
+FAKE_EMULATOR = """\
+import fcntl, json, os, signal, sys, time
+here = os.path.dirname(os.path.abspath(__file__))
+tools = os.path.join(os.path.dirname(here), "platform-tools")
+arguments = sys.argv[1:]
+with open(os.path.join(here, "calls"), "a") as calls:
+    calls.write(" ".join(arguments) + "\\n")
+with open(os.path.join(here, "environments"), "a") as environments:
+    environments.write(json.dumps({key: os.environ.get(key) for key in (
+        "ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_AVD_HOME", "ANDROID_SERIAL",
+        "BANKSMAN_LEASE")}) + "\\n")
+with open(os.path.join(here, "pids"), "a") as pids:
+    pids.write(f"{os.getpid()}\\n")
+behavior = json.load(open(os.path.join(here, "behavior.json")))
+avd = arguments[arguments.index("-avd") + 1]
+serial = "emulator-" + arguments[arguments.index("-port") + 1]
+print(f"INFO | starting {avd} as {serial}", flush=True)
+if behavior.get("exit") is not None:
+    print(behavior.get("say", "ERROR | the fake emulator fails"), flush=True)
+    sys.exit(behavior["exit"])
+
+
+def change(present, booted=False):
+    # As adb sees the emulator: listed while it runs, offline until its boot completes.
+    with open(os.path.join(tools, "answers.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        path = os.path.join(tools, "answers.json")
+        answers = json.load(open(path))
+        devices = answers.get("devices", "List of devices attached\\n").splitlines()
+        devices = [line for line in devices if not line.startswith(serial + "\\t")]
+        for key in [key for key in answers if key.startswith(f"-s {serial} ")]:
+            del answers[key]
+        if present:
+            devices.append(f"{serial}\\t{'device' if booted else 'offline'}")
+            answers[f"-s {serial} emu avd name"] = behavior.get("name", avd) + "\\r\\nOK\\r\\n"
+        if booted:
+            answers[f"-s {serial} shell getprop sys.boot_completed"] = "1\\n"
+            answers[f"-s {serial} shell dumpsys account"] = "  Accounts: 0\\n"
+        answers["devices"] = "\\n".join(devices) + "\\n"
+        with open(path + ".tmp", "w") as file:
+            json.dump(answers, file)
+        os.replace(path + ".tmp", path)
+
+
+def end(signum=None, frame=None):
+    change(False)
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN if behavior.get("ignore_term") else end)
+if behavior.get("listed", True):
+    change(True)
+boot = behavior.get("boot", 0)
+begun = time.monotonic()
+booted = False
+while time.monotonic() < begun + behavior.get("life", 60):
+    if boot is not None and not booted and time.monotonic() >= begun + boot:
+        change(True, booted=True)
+        booted = True
+    time.sleep(0.05)
+end()
+"""
+
+
 class FakeSdk:
     """An Android SDK whose adb answers from a table that the test sets, and an AVD home.
 
-    No test runs the real adb. The fake records each call in `calls`.
+    No test runs the real adb or a real emulator. The fake adb records each call in `calls`. The
+    fake emulator records its arguments, its environment, and its pid; it answers the fake adb as
+    an emulator that boots, until SIGTERM or its life ends, as `emulator_behaves` sets.
     """
 
     def __init__(self, root: Path, avds=()) -> None:
@@ -198,6 +274,12 @@ class FakeSdk:
         adb = tools / "adb"
         adb.write_text(f"#!{sys.executable}\n{FAKE_ADB}")
         adb.chmod(0o755)
+        emulators = self.sdk / "emulator"
+        emulators.mkdir()
+        emulator = emulators / "emulator"
+        emulator.write_text(f"#!{sys.executable}\n{FAKE_EMULATOR}")
+        emulator.chmod(0o755)
+        self.emulator_behaves()
         self.avd_home.mkdir(parents=True)
         for name in avds:
             directory = self.avd_home / f"{name}.avd"
@@ -224,6 +306,44 @@ class FakeSdk:
 
     def config(self) -> str:
         return f'[android]\nsdk = "{self.sdk}"\navd_home = "{self.avd_home}"\n'
+
+    def emulator_behaves(self, **behavior) -> None:
+        """Set how the next fake emulators behave: `boot`, the seconds until the boot completes,
+        or None for never; `exit` and `say` to fail at once; `ignore_term`; `listed`, whether adb
+        lists it at all; `name`, the AVD name that its console gives; and `life` in seconds."""
+        (self.sdk / "emulator" / "behavior.json").write_text(json.dumps(behavior))
+
+    def emulator_calls(self) -> list[str]:
+        path = self.sdk / "emulator" / "calls"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def emulator_environments(self) -> list[dict]:
+        path = self.sdk / "emulator" / "environments"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def emulator_pids(self) -> list[int]:
+        path = self.sdk / "emulator" / "pids"
+        return [int(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def start_emulator(self, avd: str, port: int, **behavior) -> subprocess.Popen:
+        """Start a fake emulator as a person or a project script does, outside banksman."""
+        if behavior:
+            self.emulator_behaves(**behavior)
+        return subprocess.Popen(
+            [str(self.sdk / "emulator" / "emulator"), "-avd", avd, "-port", str(port)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def stop_emulators(self) -> None:
+        """End the fake emulators of this SDK that still run: the test started them, also
+        through banksman."""
+        fake = str(self.sdk / "emulator" / "emulator")
+        for pid, process in Machine().commands().items():
+            if fake in process.arguments:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
 
 
 FAKE_ANDROID = """\

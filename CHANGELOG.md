@@ -221,6 +221,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   may run it, so the text always matches the installed banksman, and the operator can save it
   as a skill. The examples in the documentation now wait 5 minutes, less than the longest time
   for which Claude Code lets a command of its Bash tool run.
+- `acquire --start` and `run --where --start` start emulators too. For a granted AVD of the
+  `android-emulator` preset that does not run, banksman chooses a free console port from 5554
+  to 5584 and records its serial in the booting lease before the start, under the lock of the
+  lease store, so two starts at the same time never get the same serial. It runs
+  `emulator -avd <name> -port <port>` with the options of the new kind key `start_args` in a
+  session of its own, and grants the emulator when its boot has completed, under the boot
+  deadline. A start that fails, or that does not complete in time, ends the emulator and gives
+  the lease back. An AVD also counts as running when the process list has its emulator, also
+  in the first seconds of a start that adb does not see yet. A release leaves the emulator
+  running; the reaper ends the emulator of a void lease only when banksman started it, by
+  SIGTERM and then SIGKILL to that process only. banksman records the emulators that it
+  knows in `~/.local/state/banksman/emulator`, and the output of each start in a log there.
+- Unmanaged instances. An emulator or a remote device that runs, but that banksman did not
+  start and did not see run when a lease of it ended, has the new state `unmanaged` in
+  `status`. A request does not get it, and waits for it as for a resource in use, unless the
+  new kind key `unmanaged` is `"grant"`; then it comes after the instances that banksman
+  knows. When a lease ends, banksman records the instance that runs then, so an emulator that
+  a holder started under its lease is free afterwards, not unmanaged. The lease schema and
+  the output schema do not change; `status --json` has the new state value `unmanaged`.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

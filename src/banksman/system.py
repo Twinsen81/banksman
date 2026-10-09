@@ -10,7 +10,7 @@ import os
 import sys
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -38,6 +38,9 @@ class Process:
     # The executable as the process list shows it: a full path on macOS, and the program name,
     # at most 15 characters, on Linux.
     program: str = ""
+    # The command line, only from `commands`. On macOS, ps joins the arguments with spaces, so an
+    # argument with a space becomes several here.
+    arguments: tuple[str, ...] = ()
 
 
 class System(Protocol):
@@ -55,6 +58,9 @@ class System(Protocol):
 
     def process_table(self) -> dict[int, Process]:
         """Map every process that runs now, zombies excluded, to its parent, group, and start."""
+
+    def commands(self) -> dict[int, Process]:
+        """Map every process that runs now, zombies excluded, to its process and command line."""
 
     def signal(self, pid: int, signum: int) -> None:
         """Send a signal to one process."""
@@ -97,6 +103,11 @@ class Machine:
 
     def process_table(self) -> dict[int, Process]:
         table = _table_from_proc() if _LINUX else _table_from_ps()
+        _check_visible(table)
+        return table
+
+    def commands(self) -> dict[int, Process]:
+        table = _commands_from_proc() if _LINUX else _commands_from_ps()
         _check_visible(table)
         return table
 
@@ -181,6 +192,23 @@ def _table_from_proc() -> dict[int, Process]:
     return table
 
 
+def _commands_from_proc() -> dict[int, Process]:
+    table = {}
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        process = _read_stat(int(name))
+        if process is None:
+            continue
+        try:
+            raw = Path(f"/proc/{name}/cmdline").read_bytes()
+        except OSError:
+            continue
+        arguments = tuple(part.decode(errors="replace") for part in raw.split(b"\0") if part)
+        table[process.pid] = replace(process, arguments=arguments)
+    return table
+
+
 def _read_stat(pid: int) -> Process | None:
     try:
         line = Path(f"/proc/{pid}/stat").read_text()
@@ -229,6 +257,22 @@ def _table_from_ps() -> dict[int, Process]:
             started = " ".join(fields[4 : 4 + _LSTART_FIELDS])
             program = fields[4 + _LSTART_FIELDS] if len(fields) > 4 + _LSTART_FIELDS else ""
             table[pid] = Process(pid=pid, ppid=ppid, pgid=pgid, started=started, program=program)
+    return table
+
+
+def _commands_from_ps() -> dict[int, Process]:
+    table = {}
+    output = _ps(["-ww", "-A", "-o", "pid=,ppid=,pgid=,stat=,lstart=,command="])
+    for line in output.splitlines():
+        fields = line.split(None, 4 + _LSTART_FIELDS)
+        if len(fields) < 4 + _LSTART_FIELDS or not all(field.isdigit() for field in fields[:3]):
+            continue
+        if fields[3].startswith("Z"):
+            continue
+        pid, ppid, pgid = (int(field) for field in fields[:3])
+        started = " ".join(fields[4 : 4 + _LSTART_FIELDS])
+        arguments = tuple(fields[4 + _LSTART_FIELDS].split()) if len(fields) > 9 else ()
+        table[pid] = Process(pid, ppid, pgid, started, arguments=arguments)
     return table
 
 
