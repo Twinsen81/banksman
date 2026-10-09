@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import json
 import os
+import shlex
 import signal
 import sys
 import time
@@ -14,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from importlib import resources
 
-from banksman import SCHEMA_VERSION, __version__, console, hooks
+from banksman import SCHEMA_VERSION, __version__, android, console, guard, hooks
 from banksman.assign import MAX_ACCOUNTS, MAX_PARTS
 from banksman.config import Config, Kind, load_config, parse_duration
 from banksman.discovery import Found, Instance, discover, serial_now, serials_seen
@@ -75,6 +76,10 @@ WATCH_SECONDS = 5
 # on Gradle 7.4 and later to take a build slot for every build.
 GRADLE_INIT_SCRIPT = "gradle-init.gradle"
 GRADLE_BUILD_SLOT_SCRIPT = "build-slot.gradle"
+# The adb wrapper that runs the adb guard, and the text in it that becomes the path of the real
+# adb.
+ADB_SHIM_SCRIPT = "adb-shim.sh"
+ADB_SHIM_PATH = "@ADB@"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -323,6 +328,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="the command and its arguments, after --",
     )
 
+    guard_command = commands.add_parser(
+        "guard",
+        help="check an adb call against the leases, and print the adb to run; the wrapper that"
+        " admin adb-shim prints runs it",
+        allow_abbrev=False,
+    )
+    # Only for the help: main gives the arguments of guard to the guard as they are, because
+    # argparse would read the arguments of adb as its own.
+    guard_command.add_argument("tool", choices=["adb"], help="the program that the call runs")
+    guard_command.add_argument(
+        guard.FALLBACK_OPTION,
+        metavar="PATH",
+        help="the adb to run when the configuration names no sdk or cannot be read",
+    )
+    guard_command.add_argument(
+        "arguments",
+        nargs=argparse.REMAINDER,
+        metavar="-- ARGUMENT",
+        help="the arguments of the call, after --",
+    )
+
     admin = commands.add_parser("admin", help="commands for the operator", allow_abbrev=False)
     admin_commands = admin.add_subparsers(
         dest="admin_command", metavar="<command>", required=True
@@ -369,6 +395,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the build-slot part that the init script applies; save it as"
         " ~/.gradle/banksman/build-slot.gradle",
+    )
+    admin_commands.add_parser(
+        "adb-shim",
+        help="print the optional adb wrapper that runs the adb guard; save it as adb in a"
+        " directory that is first on the PATH of the agents",
+        allow_abbrev=False,
     )
     return parser
 
@@ -1370,6 +1402,17 @@ def _cmd_admin_gradle_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_admin_adb_shim(args: argparse.Namespace) -> int:
+    # banksman does not install the wrapper itself: the operator chooses where it goes on the
+    # PATH.
+    adb = android.adb_path(load_config().android)
+    if not os.path.isfile(adb):
+        _warn(f"{adb} does not exist. Set sdk in [android] to the Android SDK")
+    script = resources.files("banksman").joinpath(ADB_SHIM_SCRIPT).read_text(encoding="utf-8")
+    sys.stdout.write(script.replace(ADB_SHIM_PATH, shlex.quote(adb)))
+    return 0
+
+
 @dataclass
 class _Choice:
     """An instance or an account that discover shows, and whether it is selected."""
@@ -1715,12 +1758,16 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "admin release": _cmd_admin_release,
     "admin discover": _cmd_admin_discover,
     "admin gradle-init": _cmd_admin_gradle_init,
+    "admin adb-shim": _cmd_admin_adb_shim,
 }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["guard"]:
+        return guard.main(arguments[1:])
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     if args.command == "version":
         return _cmd_version(args)
     name = args.command if args.command != "admin" else f"admin {args.admin_command}"

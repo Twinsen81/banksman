@@ -1,6 +1,5 @@
 import sys
 
-from banksman.cli import main
+from banksman.launcher import main
 
 sys.exit(main())
-

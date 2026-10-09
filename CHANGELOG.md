@@ -153,10 +153,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the serial of an emulator that still boots. Lease files carry the serial, so their schema is
   now 6: lease files of an earlier banksman cannot be read after the upgrade, and
   `banksman admin release --force --resource <name>` frees their resources.
+- The optional adb guard. `banksman admin adb-shim` prints an `sh` wrapper that the operator
+  saves as `adb` in a directory first on the `PATH` of the agents. For every call, it runs
+  `banksman guard adb`, which only decides: it refuses an agent's device command with exit
+  status 3 when another holding leases the device, or prints the adb of the SDK of the
+  configuration, which the wrapper then runs in its own place. A call passes for a person, for a device without a lease, for the holding of the lease
+  id in `BANKSMAN_LEASE` or of an owner process above the caller, and for the hooks of the
+  `acquire` or the reaper that the lease names. The guard finds the device as adb does, from
+  `-t`, `-s`, `-d`, `-e`, `ANDROID_SERIAL`, or the only device, and for `adb emu` by the
+  console port or the only emulator. It also refuses `adb kill-server`, `adb reconnect offline`,
+  `adb disconnect` without an address, and `adb forward --remove-all` while an instance of
+  another holder runs. `strict = true` in the new `[guard]` table also refuses a
+  device that no lease of the caller has. The guard reads the lease files without the lock,
+  reads the process list and runs `adb devices` only when it must, and lets the call run with
+  a warning when it cannot decide. When the configuration names no `sdk` or cannot be read, the
+  guard names the adb that the wrapper saved, and when banksman cannot start or fails, the
+  wrapper runs that adb itself. The `banksman` command now starts the guard without loading
+  the rest of the command line.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex
-  that refuse `banksman admin`, and a text for the instructions of agents. Section 14 of the
+  that refuse `banksman admin`, and a text for the instructions of agents. Section 15 of the
   design has an example configuration for an Android project.
 - Design document ([docs/DESIGN.md](docs/DESIGN.md)), recorded decisions
   ([DECISIONS.md](DECISIONS.md)), security policy and threat model

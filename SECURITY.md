@@ -131,5 +131,19 @@ lease stops itself when the lease is lost, or the reaper stops it when the opera
 stopping on. A raw device command that an agent types, for example `adb -s <serial> ...`,
 is not registered and is not stopped. The lease id that scripts pass back is not a secret:
 it keeps a script of an earlier lease from acting on a newer one, and it is no protection
-against a process that reads the lease files. See the open questions in the design.
+against a process that reads the lease files.
+
+**The adb guard is a guardrail, not a boundary.** When the operator installs it (DESIGN.md,
+section 12), an `adb` wrapper on the `PATH` refuses an agent's device command on the device of
+another holder. It stops a careless agent or script, not a determined one: a call through the
+full path of adb, a tool that talks to the adb server itself, a second connection to an
+emulator, and a process that no agent process is above all pass, and the lease id that lets a
+call pass is the same token as for the scripts. The wrapper runs only a `banksman` in an
+absolute directory of the `PATH`, so a file in a project cannot stand in for it, and the wrapper
+runs the adb of the SDK of the configuration, or the adb that it saved, never one from the
+`PATH`. A refusal names the
+holder as `status` does, with the purpose, which is untrusted text, and with terminal control
+sequences removed. When banksman cannot decide, or cannot start, the call runs with a warning:
+the guard fails open, so a broken configuration or installation costs protection, not every
+device.
 

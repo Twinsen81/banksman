@@ -7,7 +7,8 @@ agents never use the same device at the same time, and a dead run never holds on
 > (lease files, void triggers, and the reaper), resource kinds as configuration, fencing,
 > discovery with the allowlist, holder identity, requests by properties, joint acquire with
 > accounts, the console (`status`, `watch`, and `log`), the supervised run (`banksman run`)
-> with a helper for the scripts of a project, and optional build slots for Gradle.
+> with a helper for the scripts of a project, optional build slots for Gradle, and an
+> optional adb guard.
 > `explain` and the queue of the callers that wait are not written yet. The design is in
 > [docs/DESIGN.md](docs/DESIGN.md).
 
@@ -47,6 +48,9 @@ resource, so an operator can also declare other resources, such as host ports or
   and when it will be free at the latest. Agents read the same data as JSON.
 - **Closed by default.** An agent can only get what the operator allows. A personal phone
   or emulator on the same machine is never offered.
+- **A guard for raw adb calls, when the operator wants it.** An optional `adb` wrapper on the
+  `PATH` refuses an agent's device command on a device that another holder leases, also when
+  a script or an agent calls adb without banksman.
 - **Knows no app.** banksman leases devices. What a run installs or clears on a device is
   the run's own business.
 - **Other resources, when the operator wants them.** A counted kind is a number of

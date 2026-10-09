@@ -2,12 +2,12 @@
 
 **Status:** the project scaffold, the lease core, kinds as configuration, fencing, discovery,
 holder identity, requests by properties, joint acquire with accounts, the console, the
-supervised run, the serial in the lease, and the optional build slots exist. Sections 3 to 9,
-11, and 14 are implemented, with
+supervised run, the serial in the lease, the optional build slots, and the optional adb guard
+exist. Sections 3 to 9, 11, 12, and 15 are implemented, with
 `banksman acquire`, `touch`, `release`, `reap`, `banksman whoami`, the commands that scripts
-run (`enter`, `check`, `leave`, and `run`), `banksman admin discover`,
-`banksman admin release --force`, and `banksman admin gradle-init`. Of section 10, `status`,
-`watch`, and `log` are implemented.
+run (`enter`, `check`, `leave`, and `run`), `banksman guard`, `banksman admin discover`,
+`banksman admin release --force`, `banksman admin gradle-init`, and `banksman admin adb-shim`.
+Of section 10, `status`, `watch`, and `log` are implemented.
 `explain` and the queue of the callers that wait are not implemented yet.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
@@ -332,7 +332,8 @@ not code.
   the serial is not known, so that `adb` without `-s` fails instead of acting on a device that
   adb chooses. Without `BANKSMAN_SERIAL`, the instance does not run, or its serial is not
   known; a hook that ends the instance exits with status 0 when it is gone, and checks that a
-  serial still names the instance before it acts on it.
+  serial still names the instance before it acts on it. A hook that runs adb runs it by its
+  full path too, because the adb guard can refuse an adb from the `PATH` (section 12).
   The hook runs in its own process group. banksman kills that group after 60 seconds, and
   also when the command that runs the hook ends first, for example because its caller
   stopped it, so that a hook never outlives its reaper. A reaper that ends in the middle
@@ -815,7 +816,114 @@ project's own build script.
   or a sync in an IDE. A build that runs another Gradle build in another daemon, and waits for
   it, needs two slots.
 
-## 12. Command line (sketch)
+## 12. Optional: the adb guard
+
+Fencing covers the scripts that register with a lease (section 4). A device command that does
+not register is not fenced: an agent that types `adb -s <serial> install ...`, a script of a
+project that does not use banksman yet, or a skill that the project has not changed. The adb
+guard refuses such a command when another holding leases the device. Like the build slots, it
+is a setup of the operator, and a project needs nothing for it.
+
+- **Setup.** `banksman admin adb-shim` prints a small `sh` wrapper. The operator saves it as
+  `adb` in a directory of its own, and puts that directory first on the `PATH` of the agents,
+  before the Android SDK:
+
+  ```sh
+  mkdir -p ~/.local/share/banksman/bin
+  banksman admin adb-shim > ~/.local/share/banksman/bin/adb
+  chmod +x ~/.local/share/banksman/bin/adb
+  ```
+
+  For every call, the wrapper runs `banksman guard adb --fallback-adb <saved adb> -- <arguments>`
+  as a child process that only decides: with exit status 0, it prints the path of the adb to
+  run, and with exit status 3, it refuses the call. The wrapper then runs that adb in its own
+  place, with the pid, the arguments, the terminal, and the environment of the call, and with
+  `BANKSMAN_GUARD=1` added. The adb server that a call starts keeps that variable, and nothing
+  reads it. The adb is the adb of the Android SDK of the configuration (section 8). When the
+  configuration names no `sdk`, or cannot be read, it is the adb that the wrapper saved when
+  banksman printed it, because the default SDK can be missing, or have an adb of another version,
+  which would restart the adb server. It is never an adb from the `PATH`. When the adb of the SDK
+  is a wrapper itself, that wrapper sees `BANKSMAN_GUARD` and stops, so the two never run each
+  other without end. The wrapper uses only a `banksman` in an absolute directory of the
+  `PATH`, so a file in a project cannot stand in for it. banksman does not install the wrapper
+  itself: the operator chooses where it goes. After an upgrade of banksman, or a change of `sdk`
+  in `[android]`, the operator saves it again. A wrapper on the `PATH` is better than a hook of
+  one agent that runs before each shell command: it also sees the adb calls inside scripts, and
+  it works the same for every agent.
+- **Which device.** The guard reads the command line as adb reads it. The device comes from
+  `-t`, then `-s`, then `-d` or `-e`, then `ANDROID_SERIAL`, and then it is the only device that
+  adb knows. `-s` also takes the other names that adb takes, such as `model:Pixel_8`, a USB
+  address, or a host without its port. For these names, for `-t`, `-d`, and `-e`, and for a
+  command that names no device, the guard asks `adb devices -l`. When adb would find no single
+  device, the call runs, and adb refuses it itself. `adb emu` has rules of its own, and the
+  guard follows them: it talks to the console of the emulator whose port is in the serial of
+  `-s` or `ANDROID_SERIAL`, and without one, to the only emulator, also when physical devices
+  are connected; it ignores `-t`, `-d`, and `-e`. A command that acts on no device, such as
+  `adb devices`, `adb connect`, or `adb forward --list`, always runs.
+- **The lease of the device.** A held lease that records the serial; a lease in another state
+  that records it, while no held lease records it, because discovery keeps the serial up to
+  date in held leases only (section 3); and a lease in any state whose resource is the serial,
+  as for a physical device. A lease file that cannot be read keeps its device out of use.
+- **Who may use the device.** The call runs when one of these is true:
+  - No agent process (section 9) is above the caller, for example for a person in a terminal.
+  - The device has no lease, and the guard is not strict.
+  - The lease is held, and its holding is the caller's: `BANKSMAN_LEASE` names a lease of the
+    holding, as `banksman run` sets it, or the owner process of a lease of the holding is above
+    the caller.
+  - The banksman process that the lease names is above the caller: the `acquire` that resets
+    the instance, or the reaper that takes it back. Their hooks act on the device, and a reaper
+    can run inside a command of another agent (section 5).
+
+  Otherwise the guard exits with status 3, the status of `check` for a lost lease, and runs no
+  adb. On standard error, it names the device, the state of its lease, and the holder as
+  `status` shows it. The purpose in it is untrusted text, as in `status`. When the lease belongs
+  to the caller's holding but is no longer held, for example because it drains, the guard says
+  that the lease is lost.
+- **Strict mode.** With `strict = true` in the `[guard]` table of the configuration, the guard
+  also refuses an agent's device command on a device that no lease of its holding has: a free
+  device, or a device that the inventory does not allow, such as a personal phone.
+
+  ```toml
+  [guard]
+  strict = true
+  ```
+
+- **Commands for every device.** `adb kill-server` stops the adb server, which disconnects
+  every device; `adb reconnect offline` resets the connection of every offline device, such as
+  an emulator that boots; `adb disconnect` without an address ends every connection over
+  TCP/IP; and `adb forward --remove-all` removes the port forwards of every device, also with
+  `-s`. The run that breaks is then not the run that gave the command. So the guard refuses
+  these commands for an agent while another holding has a held lease that records a serial,
+  that is, while an instance of another holder runs. `adb reconnect` and
+  `adb reconnect device` act on one device, like other device commands.
+- **Speed.** The guard runs before every adb call, and a UI test can make many. It reads the
+  lease files without the lock: every write replaces a whole file with a rename, so each file
+  that it reads is whole. It also reads the copies of the quarantines, so a quarantine counts
+  also after a restart emptied the state directory. It does not reap, and it runs no discovery.
+  It reads the process list only when the lease id in `BANKSMAN_LEASE` does not decide, and it
+  asks `adb devices` only when the command line does not name the device by a serial that a
+  lease has. On the Mac where it was measured, the wrapper and the guard together add about
+  35 ms to a call that needs no process list, and about 70 ms to one that needs it.
+- **When the guard fails.** When banksman cannot decide, for example because of an error in the
+  configuration, a lease file of a newer banksman, or a process list that the sandbox of an
+  agent hides, the call runs, and banksman says on standard error that the call is not checked.
+  When banksman cannot start, for example because its Python broke after an upgrade, or ends in
+  any other way, the wrapper runs the adb that it saved, and says the same. That is why the
+  wrapper runs adb itself: a wrapper that replaced itself with banksman could not fall back. A
+  broken guard that blocks every device is worse than a short time without protection. Without
+  `banksman` on the `PATH`, the wrapper runs the saved adb, and says the same. Ctrl-C during the
+  check ends the call.
+- **Limits.** The guard is a guardrail, not a security boundary. These do not pass through it: a
+  call through the full path of adb, such as the adb of Android Studio; a tool that talks to the
+  adb server itself, such as the connected tests of the Android Gradle plugin, for which the
+  `ANDROID_SERIAL` of `banksman run` names the leased device (section 4); and the emulator
+  console. A second connection to an emulator, with `adb connect` to its adb port, has another
+  serial, and the guard does not know that it is the same device. A process that no agent
+  process is above passes as a person's, for example a task that a Gradle daemon runs after an
+  earlier build started the daemon. The guard never acquires a lease itself: that would make it
+  a second way to get a device, and hide that two holders want the same one.
+
+## 13. Command line (sketch)
 
 `explain` does not exist yet. The rest exists.
 
@@ -839,10 +947,12 @@ banksman explain --where <attr><op><value> ...
 banksman log     [--since <time>] [--resource <name>] [--json] [--verbose]
 banksman reap
 banksman version [--json]
+banksman guard adb [--fallback-adb <path>] -- <adb argument> ...  # what the adb wrapper runs
 
 banksman admin discover [--kind <kind>] [--all] [--json] [--yes]
 banksman admin release --force --resource <name>
 banksman admin gradle-init [--build-slot]                          # optional build slots
+banksman admin adb-shim                                            # optional adb guard
 ```
 
 Commands that grant a resource print `KEY=value` lines, for example `RESOURCE=`, `SERIAL=`,
@@ -860,7 +970,7 @@ the command starts when the command has `{serial}` and the serial is not known.
 Every command that only an operator may run is under `banksman admin`, so that an agent's
 permission rules can refuse all of them with one pattern, including ones added later.
 
-## 13. The contract
+## 14. The contract
 
 - Lease files and every JSON document carry a `schema` number. A caller refuses a schema
   it does not know, instead of guessing.
@@ -871,7 +981,7 @@ permission rules can refuse all of them with one pattern, including ones added l
   the command. So a machine has exactly one lease implementation, and two versions of the
   lease logic never write the same lease files.
 
-## 14. Using banksman from a project
+## 15. Using banksman from a project
 
 [PROJECTS.md](PROJECTS.md) has the helper, the stub for tests, and the rules for agents that
 this section names.
@@ -898,6 +1008,9 @@ this section names.
 - Refuse `banksman admin` in the permission rules of the agents. Without such a rule, an agent
   can widen what agents may use, or take a resource from another holder. The rule is a
   guardrail, not a security boundary.
+- When the operator installs the adb guard (section 12), `adb` exits with status 3 when an
+  agent acts on the device of another holder. An agent that uses the devices of its own leases
+  never sees it.
 
 An example configuration for a typical Android project, in `~/.config/banksman/config.toml`:
 
@@ -943,7 +1056,7 @@ banksman acquire --as phone --where kind=emulator --where form=phone \
 banksman run --where kind=sdk --wait 10m --for "create an AVD" -- avdmanager create avd ...
 ```
 
-## 15. Roadmap
+## 16. Roadmap
 
 Done:
 
@@ -967,6 +1080,8 @@ Done:
   the scripts and agents of a project.
 - The serial in the lease, from discovery only, for `status`, the hooks, and `banksman run`,
   with `ANDROID_SERIAL` and the placeholders `{serial}` and `{resource}`.
+- The optional adb guard: an adb wrapper that refuses an agent's device command on the device
+  of another holding, and commands that disconnect every device.
 
 Next:
 
@@ -974,7 +1089,7 @@ Next:
 - Keeping a lease while an agent waits for a person, and getting the same resource back
   after a lease ends.
 
-## 16. Open questions
+## 17. Open questions
 
 - Does each agent run its shell commands in their own process group? That decides how a
   script isolates the group that the reaper signals. Checked for Claude Code and Codex, both
@@ -996,9 +1111,9 @@ Next:
   start `ps`, because `ps` is a setuid program, and banksman needs `ps` to check owner
   processes. So banksman must run outside the agent's sandbox. Which setting does each agent
   need for that?
-- A raw `adb -s` call from an agent is not fenced, because only the scripts register as
-  users. An `adb` wrapper on `PATH`, or an agent hook that checks the lease before a device
-  command, would enforce it.
+- The adb guard reads the process list with `ps` when the lease id does not decide, and on
+  macOS that alone takes about 20 ms. Is the time that the guard adds a problem for a test that
+  calls adb many times? A direct read of the process table, with `sysctl`, would be faster.
 - Only a quarantined lease is kept outside `/tmp`. A void lease whose scripts still run, and
   that no command reaps, is kept only in `/tmp`. If no banksman command runs for 3 days, a
   cleaner of temporary files can delete it before it is quarantined. Should every lease with

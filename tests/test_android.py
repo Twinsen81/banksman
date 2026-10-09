@@ -4,7 +4,13 @@ from pathlib import Path
 import pytest
 
 from banksman import android
-from banksman.android import AndroidError, parse_accounts, parse_properties
+from banksman.android import (
+    AndroidError,
+    Transport,
+    parse_accounts,
+    parse_properties,
+    parse_transports,
+)
 from banksman.config import Android
 
 # No test runs adb. A fake answers each adb command that the presets run.
@@ -385,3 +391,28 @@ def test_a_program_that_leaves_a_process_running_does_not_keep_the_command_waiti
     )
     assert android.run_program([sys.executable, "-c", code], 2) == "List of devices attached\n"
 
+
+def test_the_devices_of_adb_devices_l():
+    text = (
+        "* daemon not running; starting now at tcp:5037\n"
+        "List of devices attached\n"
+        "R5CR1234ABC            device usb:1-1 product:e2sxxx model:SM_S926B device:e2s"
+        " transport_id:3\n"
+        "emulator-5554          offline transport_id:4\n"
+        "192.0.2.7:5555         device product:husky model:Pixel_8 device:husky transport_id:5\n"
+        "0A1B2C3D               no permissions (missing udev rules?) usb:1-2 transport_id:6\n"
+        "\n"
+    )
+    assert parse_transports(text) == [
+        Transport("R5CR1234ABC", "device", "usb:1-1", "e2sxxx", "SM_S926B", "e2s", "3"),
+        Transport("emulator-5554", "offline", transport_id="4"),
+        Transport("192.0.2.7:5555", "device", "", "husky", "Pixel_8", "husky", "5"),
+        Transport("0A1B2C3D", "no", "usb:1-2", transport_id="6"),
+    ]
+
+
+def test_the_devices_come_from_the_adb_server_that_the_call_names():
+    adb = FakeAdb({"-P 5038 devices -l": "List of devices attached\nemulator-5556 device\n"})
+    found = android.transports(Android(sdk=SDK), ("-P", "5038"), run=adb)
+    assert found == [Transport("emulator-5556", "device")]
+    assert adb.commands == [["-P", "5038", "devices", "-l"]]

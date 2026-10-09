@@ -40,10 +40,12 @@ from banksman.store import (
     Need,
     NotHeld,
     Store,
+    Snapshot,
     StoreError,
     Unreadable,
     default_quarantine_dir,
     default_state_dir,
+    peek,
 )
 from banksman.system import Machine
 
@@ -1620,3 +1622,67 @@ def test_observe_leaves_leases_that_are_not_held(store, system, state_dir):
     edit_lease(state_dir, "emu-1", drain)
     store.observe([seen("emu-1", "emulator-5554", 5.0)])
     assert lease_file(state_dir, "emu-1")["serial"] is None
+
+
+# Reading the leases without the lock, for the adb guard.
+
+
+def test_peek_reads_the_leases_while_another_process_holds_the_lock(
+    store, state_dir, quarantine_dir
+):
+    store.acquire("phone-1", "device", Holder(OWNER))
+    fd = os.open(state_dir / ".lock", os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        assert [lease.resource for lease in peek(state_dir, quarantine_dir).leases] == ["phone-1"]
+    finally:
+        os.close(fd)
+
+
+def test_peek_changes_nothing(state_dir, quarantine_dir, system):
+    store = failing(state_dir, system)
+    quarantine(store, system)
+    (state_dir / "phone-1.json").unlink()
+    (state_dir / ".lock").unlink()
+    (state_dir / ".tmp-left").write_text("")
+    # A quarantine whose file a cleaner deleted still counts, but only the next command that takes
+    # the lock restores it.
+    assert [lease.state for lease in peek(state_dir, quarantine_dir).leases] == [QUARANTINED]
+    assert sorted(os.listdir(state_dir)) == [".tmp-left"]
+
+
+def test_peek_prefers_the_file_in_the_state_directory(state_dir, quarantine_dir, system):
+    store = failing(state_dir, system)
+    quarantine(store, system)
+    edit_lease(state_dir, "phone-1", lambda data: data.update(owner=OTHER))
+    (lease,) = peek(state_dir, quarantine_dir).leases
+    assert lease.owner == OTHER
+
+
+def test_peek_without_a_state_directory_finds_no_leases(state_dir, quarantine_dir):
+    assert peek(state_dir, quarantine_dir) == Snapshot([], [])
+    assert not state_dir.exists()
+
+
+def test_peek_finds_a_quarantine_after_a_restart_emptied_the_state_directory(
+    state_dir, quarantine_dir, system
+):
+    quarantine(failing(state_dir, system), system)
+    shutil.rmtree(state_dir)
+    assert [lease.state for lease in peek(state_dir, quarantine_dir).leases] == [QUARANTINED]
+    assert not state_dir.exists()
+
+
+def test_peek_refuses_a_state_directory_that_others_can_write_to(store, state_dir, quarantine_dir):
+    store.acquire("phone-1", "device", Holder(OWNER))
+    state_dir.chmod(0o777)
+    with pytest.raises(StoreError, match="can write"):
+        peek(state_dir, quarantine_dir)
+
+
+def test_peek_shows_a_lease_file_that_cannot_be_read(store, state_dir, quarantine_dir):
+    store.acquire("phone-1", "device", Holder(OWNER))
+    (state_dir / "phone-2.json").write_text("{")
+    snapshot = peek(state_dir, quarantine_dir)
+    assert [lease.resource for lease in snapshot.leases] == ["phone-1"]
+    assert snapshot.unreadable == [Unreadable("phone-2", "the file is not valid JSON")]

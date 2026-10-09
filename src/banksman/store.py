@@ -11,7 +11,6 @@ import json
 import os
 import pwd
 import stat
-import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -913,48 +912,18 @@ class Store:
     def _read(self, resource: str) -> Lease | Unreadable | None:
         path = self._path(resource)
         try:
-            return self._load(path)
+            return _load(path)
         except FileNotFoundError:
             pass
         # A cleaner of temporary files can delete a quarantined lease after this command has
         # restored the missing ones. Its record still keeps the resource out of use.
         try:
-            return self._load(self.quarantine_dir / path.name)
+            return _load(self.quarantine_dir / path.name)
         except FileNotFoundError:
             return None
 
     def _scan(self) -> list[Lease | Unreadable]:
-        entries: list[Lease | Unreadable] = []
-        for name in sorted(os.listdir(self.directory)):
-            if name.startswith(".") or not name.endswith(_LEASE_SUFFIX):
-                continue
-            resource = name[: -len(_LEASE_SUFFIX)]
-            try:
-                entry = self._load(self.directory / name)
-            except FileNotFoundError:
-                continue
-            if isinstance(entry, Lease) and entry.resource != resource:
-                entry = Unreadable(resource, "the file name does not match the resource in the file")
-            entries.append(entry)
-        return entries
-
-    def _load(self, path: Path) -> Lease | Unreadable:
-        resource = path.name[: -len(_LEASE_SUFFIX)]
-        raw = _read_file(path)
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            return Unreadable(resource, "the file is not valid JSON")
-        schema = data.get("schema") if isinstance(data, dict) else None
-        if isinstance(schema, int) and not isinstance(schema, bool) and schema > SCHEMA_VERSION:
-            raise StoreError(
-                f"{path} has lease schema {schema}, but this banksman knows only schema "
-                f"{SCHEMA_VERSION}. Two banksman versions must not share one state directory."
-            )
-        try:
-            return Lease.from_json(data)
-        except LeaseFormatError as exc:
-            return Unreadable(resource, str(exc))
+        return _scan(self.directory)
 
     def _write(self, lease: Lease) -> Lease:
         name = self._path(lease.resource).name
@@ -1191,6 +1160,62 @@ def _other_reaper_runs(lease: Lease, running: dict[int, str], me: tuple[int, str
     return running.get(lease.reaper_pid) == lease.reaper_started
 
 
+def peek(directory: Path, quarantine_dir: Path) -> Snapshot:
+    """Read the lease files without the lock, and change nothing: no reaping, no restore.
+
+    Every write replaces a whole file with a rename, so each file that this reads is whole. But
+    the files can come from different moments, so the result is good for a check that refuses or
+    allows a command, never for a change to a lease.
+    """
+    # A quarantined lease whose file a cleaner of temporary files or a restart deleted still
+    # keeps its resource out of use, also when the whole state directory has gone. The file in the
+    # state directory comes last, so it wins.
+    places = [place for place in (quarantine_dir, directory) if os.path.lexists(place)]
+    for place in places:
+        _check_directory(place)
+    entries = {entry.resource: entry for place in places for entry in _scan(place)}
+    found = [entries[resource] for resource in sorted(entries)]
+    return Snapshot(
+        leases=[entry for entry in found if isinstance(entry, Lease)],
+        unreadable=[entry for entry in found if isinstance(entry, Unreadable)],
+    )
+
+
+def _scan(directory: Path) -> list[Lease | Unreadable]:
+    entries: list[Lease | Unreadable] = []
+    for name in sorted(os.listdir(directory)):
+        if name.startswith(".") or not name.endswith(_LEASE_SUFFIX):
+            continue
+        resource = name[: -len(_LEASE_SUFFIX)]
+        try:
+            entry = _load(directory / name)
+        except FileNotFoundError:
+            continue
+        if isinstance(entry, Lease) and entry.resource != resource:
+            entry = Unreadable(resource, "the file name does not match the resource in the file")
+        entries.append(entry)
+    return entries
+
+
+def _load(path: Path) -> Lease | Unreadable:
+    resource = path.name[: -len(_LEASE_SUFFIX)]
+    raw = _read_file(path)
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return Unreadable(resource, "the file is not valid JSON")
+    schema = data.get("schema") if isinstance(data, dict) else None
+    if isinstance(schema, int) and not isinstance(schema, bool) and schema > SCHEMA_VERSION:
+        raise StoreError(
+            f"{path} has lease schema {schema}, but this banksman knows only schema "
+            f"{SCHEMA_VERSION}. Two banksman versions must not share one state directory."
+        )
+    try:
+        return Lease.from_json(data)
+    except LeaseFormatError as exc:
+        return Unreadable(resource, str(exc))
+
+
 def _check_ownership(path: Path, info: os.stat_result) -> None:
     # The reaper can signal the processes that a lease names, so a lease that another user can
     # change could make it signal the owner's processes.
@@ -1223,6 +1248,8 @@ def _read_file(path: Path) -> bytes:
 
 
 def _replace_file(directory: Path, name: str, data: bytes) -> None:
+    import tempfile  # Not at the top: the adb guard imports this module for every adb call.
+
     fd, temp = tempfile.mkstemp(prefix=_TEMP_PREFIX, dir=directory)
     try:
         with os.fdopen(fd, "wb") as file:

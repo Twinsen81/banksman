@@ -114,6 +114,15 @@ class Android:
 
 
 @dataclass(frozen=True)
+class Guard:
+    """How the adb guard decides."""
+
+    # Also refuse an agent's device command on a device that no lease of its holding has, for
+    # example a free device, or a personal phone that the inventory does not allow.
+    strict: bool = False
+
+
+@dataclass(frozen=True)
 class Config:
     defaults: Timeouts = Timeouts()
     kinds: Mapping[str, Kind] = field(default_factory=dict)
@@ -121,6 +130,7 @@ class Config:
     # Patterns of the accounts that `admin discover` selects at first.
     account_preselect: tuple[str, ...] = ()
     android: Android = Android()
+    guard: Guard = Guard()
 
 
 def default_config_path() -> Path:
@@ -192,7 +202,7 @@ class _Invalid(Exception):
 
 
 def _config(data: dict[str, object]) -> Config:
-    _check_keys(data, None, ("defaults", "kinds", "holder", "accounts", "android"))
+    _check_keys(data, None, ("defaults", "kinds", "holder", "accounts", "android", "guard"))
     table = _table(data.get("defaults", {}), "defaults")
     _check_keys(table, "defaults", _TIMEOUT_KEYS)
     defaults = _timeouts(table, "defaults", Timeouts())
@@ -207,6 +217,7 @@ def _config(data: dict[str, object]) -> Config:
         holder=_holder(_table(data.get("holder", {}), "holder")),
         account_preselect=_patterns(accounts.get("preselect"), "accounts.preselect"),
         android=_android(_table(data.get("android", {}), "android")),
+        guard=_guard(_table(data.get("guard", {}), "guard")),
     )
 
 
@@ -246,6 +257,11 @@ def _android(table: dict[str, object]) -> Android:
         sdk=_directory(table.get("sdk"), "android.sdk"),
         avd_home=_directory(table.get("avd_home"), "android.avd_home"),
     )
+
+
+def _guard(table: dict[str, object]) -> Guard:
+    _check_keys(table, "guard", ("strict",))
+    return Guard(strict=_boolean(table.get("strict", False), "guard.strict"))
 
 
 def _directory(value: object, where: str) -> Path | None:

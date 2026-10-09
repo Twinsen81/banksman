@@ -33,7 +33,7 @@ Repository = "https://github.com/Twinsen81/banksman"
 test = ["pytest>=7"]
 
 [project.scripts]
-banksman = "banksman.cli:main"
+banksman = "banksman.launcher:main"
 
 [tool.hatch.version]
 path = "src/banksman/__init__.py"
