@@ -206,7 +206,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a holding, it starts one with the label. The caller chooses the label, so an agent that lost
   its lease id, for example after a compaction of its context, gets the same device again
   with the same command. `run`, `touch`, and `release` take `--holding` instead of `--lease`,
-  and `run --holding` needs `--resource` only when the holding has several resources. The new
+  and `run --holding` needs `--resource` only when the holding has several resources. A
+  holding that has a booting lease, for example of an `acquire` that a time limit stopped
+  during its reset, is not kept, by a label or by a lease id: the request waits as for a
+  resource in use, `run --holding` refuses it, and `release` gives it back. The new
   command `banksman held` lists the held leases of the agent process with their labels, lease
   ids, resources, and serials. `status --json --verbose` shows the label. Lease files carry the
   label, so the lease schema is now 8: lease files of an earlier banksman cannot be read after

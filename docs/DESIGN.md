@@ -794,6 +794,12 @@ agent, through its own agent process.
   Another agent can have chosen it, so `status --json` shows it only with `--verbose`, as the
   purpose. A label needs an owner process: without one, every caller of the user would share
   it.
+- A holding that has a booting lease is not kept, by a label or by a lease id, and the
+  request waits as for a resource in use. Only the `acquire` that starts or resets the instance
+  gives the lease to its holder, and it can have ended before it was done, for example when the
+  time limit of a tool stopped it. Then the instance can be reset only in part, so the lease
+  waits for its boot deadline, and `run --holding` refuses it with exit status 4.
+  `release --holding` gives it back at once.
 - After a restart of the agent, a label finds its holding only after a touch with a lease id
   has recorded the new agent process, as for `release --all`. When that touch gives the new
   process two holdings with one label, banksman refuses the label and names a lease of each

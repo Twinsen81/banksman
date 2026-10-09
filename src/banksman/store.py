@@ -305,6 +305,10 @@ class Store:
 
         A paid choice is granted only with `paid`, the acknowledgement of the cost, or when the
         caller keeps a lease on it.
+
+        A holding that has a booting lease is not kept, and the request waits as for a resource
+        in use: the acquire that starts or resets its instance has not given it to anybody yet,
+        and can have ended before it was done.
         """
         for need in needs:
             for choice in need.choices:
@@ -332,6 +336,8 @@ class Store:
                 kept = self._labelled(entries, holder.owner_pid, label)  # type: ignore[arg-type]
             else:
                 kept = {}
+            if any(lease.state == BOOTING for lease in kept.values()):
+                return None
             parts = [_part(need, held, taken, kept, paid) for need in needs]
             picks = assign(parts)
             if picks is None:

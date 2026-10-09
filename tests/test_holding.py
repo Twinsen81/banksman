@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 import pytest
-from helpers import SRC, age_lease, hook, table_rows, write_config
+from helpers import SRC, age_lease, edit_lease, hook, table_rows, write_config
 
 from banksman import __version__, cli
 from banksman.cli import main
@@ -397,3 +397,53 @@ def test_agents_may_run_the_guide(capsys):
         main(["admin", "agent-guide"])
     capsys.readouterr()
 
+
+
+# A holding whose lease is still booting: an acquire starts or resets its instance, or ended
+# before it was done, for example because the time limit of the agent's tool stopped it.
+
+
+def test_a_holding_with_a_booting_lease_is_not_kept(store, agents):
+    holder = Holder(OWNER, owner_pid=101)
+    reset = [Need((Choice("emu-1", "emulator", reset=True),))]
+    (booting,) = store.grant(reset, holder, label="tests")
+    assert booting.lease.state == "booting"
+    # Neither by the label nor by the lease id: the acquire that resets it gave it to nobody yet.
+    assert store.grant(reset, holder, label="tests") is None
+    assert store.grant(reset, holder, keep=booting.lease.lease_id) is None
+    store.ready("emu-1", booting.lease.lease_id)
+    (kept,) = store.grant(reset, holder, label="tests")
+    assert (kept.kept, kept.lease.state) == (True, "ready")
+
+
+def interrupted(state_dir, resource):
+    """Change a lease into a booting lease whose acquire ended before its reset was done."""
+    ended = subprocess.Popen([sys.executable, "-c", "pass"])
+    ended.wait()
+
+    def change(data):
+        data.update(state="booting", reaper_pid=ended.pid, reaper_started="gone")
+        data["awake"]["boot_deadline"] = data["awake"]["touched"] + 5 * 60
+
+    edit_lease(state_dir, resource, change)
+
+
+def test_an_interrupted_reset_is_neither_kept_nor_run_and_release_gives_it_back(
+    capsys, config_path, state_dir
+):
+    configure(config_path)
+    _, first, _ = acquire(capsys, "--holding", "tests", "--where", "form=phone", *ME)
+    interrupted(state_dir, "qa_phone")
+    status, values, err = acquire(capsys, "--holding", "tests", "--where", "form=phone", *ME)
+    assert status == cli.EXIT_BUSY
+    assert values == {}
+    assert "qa_phone of the kept holding is still booting" in err
+    done = run_in_child("--holding", "tests", *ME, "--", "true")
+    assert done.returncode == cli.EXIT_BUSY
+    assert "qa_phone of the holding tests is still booting" in done.stderr
+    # The acquire that reset it has ended, so a release frees the resource at once.
+    assert main(["release", "--holding", "tests", *ME]) == 0
+    assert capsys.readouterr().out == "Released qa_phone: it is free.\n"
+    status, again, _ = acquire(capsys, "--holding", "tests", "--where", "form=phone", *ME)
+    assert (status, again["RESOURCE"], again["KEPT"]) == (0, "qa_phone", "false")
+    assert again["LEASE"] != first["LEASE"]

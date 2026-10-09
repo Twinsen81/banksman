@@ -51,6 +51,7 @@ from banksman.inventory import (
     save_inventory,
 )
 from banksman.lease import (
+    BOOTING,
     LABEL,
     QUARANTINED,
     READY,
@@ -1037,6 +1038,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if args.holding is not None:
             owner = _owner_process(config, args.owner_pid)
             named = _labelled(store, owner, args.holding, args.resource, one=True)
+            if named.state == BOOTING:
+                # Only the acquire that starts or resets the instance gives the lease to its
+                # holder, so a command must not use the instance before that.
+                raise Busy(
+                    f"{named.resource} of the holding {args.holding} is still booting: {_BOOTING}."
+                    f" Wait until it is ready, or give it back with banksman release --holding"
+                    f" {args.holding}"
+                )
             resource, lease_id = named.resource, named.lease_id
         # A lease that is lost runs no discovery.
         lease = store.check(resource, lease_id)
@@ -1276,13 +1285,14 @@ def _acquire(
                 ]
             )
             raise BanksmanError(_no_match(parts, found.candidates))
+        holding: dict[str, Lease] = {}
+        if keep is not None:
+            holding = store.holding(keep)
+        elif label is not None:
+            holding = store.labelled(holder.owner_pid, label)  # type: ignore[arg-type]
         # A paid resource takes part only when the caller acknowledges the cost, or keeps a
         # lease on it. The store checks that again under its lock.
-        kept: set[str] = set()
-        if not paid and keep is not None:
-            kept = set(store.holding(keep))
-        elif not paid and label is not None:
-            kept = set(store.labelled(holder.owner_pid, label))  # type: ignore[arg-type]
+        kept = set() if paid else set(holding)
 
         def offered(resource: str, costs: bool) -> bool:
             return paid or not costs or resource in kept
@@ -1292,6 +1302,10 @@ def _acquire(
             for candidates in found.candidates
         ]
         payable = _payable(found.candidates, usable)
+        # The store does not keep a holding while a lease of it boots.
+        booting = sorted(each.resource for each in holding.values() if each.state == BOOTING)
+        notes = [_paid_note(payable)] if payable else []
+        notes += [_booting_note(booting)] if booting else []
         unpaid = [
             Need(
                 tuple(each for each in need.choices if offered(each.resource, each.paid)),
@@ -1315,7 +1329,7 @@ def _acquire(
             break
         left = give_up - machine.clock()
         if left <= 0:
-            _print_notes([_paid_note(payable)] if payable else [])
+            _print_notes(notes)
             raise Busy(_busy(parts, usable, still=bool(wait)))
         owner_started = _owner_still_runs(machine, holder.owner_pid, owner_started)
         if not waiting:
@@ -1328,7 +1342,7 @@ def _acquire(
                 ),
                 file=sys.stderr,
             )
-            _print_notes([_paid_note(payable)] if payable else [])
+            _print_notes(notes)
             waiting = True
         machine.sleep(min(POLL_SECONDS, left))
     # A kept remote device that is not connected now is connected again first, so that a
@@ -1458,6 +1472,20 @@ def _paid_note(payable: Mapping[str, int]) -> str:
     return (
         f"paid resources match too: {_paid_counts(payable)}. banksman offers them only with"
         " --paid, after the user agreed to the cost"
+    )
+
+
+# Why a lease of a holding boots, for the messages about a holding that is not ready.
+_BOOTING = (
+    "another acquire starts or resets its instance, or ended before it was done, for example"
+    " because the time limit of a tool stopped it"
+)
+
+
+def _booting_note(resources: Sequence[str]) -> str:
+    return (
+        f"{', '.join(resources)} of the kept holding is still booting: {_BOOTING}. The request"
+        " waits until the lease is ready or void, and banksman release gives it back now"
     )
 
 
