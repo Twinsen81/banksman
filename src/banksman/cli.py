@@ -21,12 +21,22 @@ from banksman import (
     __version__,
     android,
     console,
+    emulator,
     guard,
     hooks,
     remote,
 )
 from banksman.assign import MAX_ACCOUNTS, MAX_PARTS
-from banksman.config import ANDROID_REMOTE, Config, Kind, load_config, parse_duration
+from banksman.config import (
+    ANDROID_EMULATOR,
+    ANDROID_REMOTE,
+    SKIP,
+    STARTED,
+    Config,
+    Kind,
+    load_config,
+    parse_duration,
+)
 from banksman.discovery import (
     KIND,
     PAID,
@@ -572,8 +582,8 @@ def _start_argument(parser: argparse.ArgumentParser, prefix: str) -> None:
     parser.add_argument(
         "--start",
         action="store_true",
-        help=f"{prefix}start a granted instance that does not run, such as a remote device,"
-        " and grant it when it runs",
+        help=f"{prefix}start a granted instance that does not run, such as an emulator or a"
+        " remote device, and grant it when it runs",
     )
 
 
@@ -671,16 +681,15 @@ def _recorder() -> Record:
 def _take_back(config: Config) -> TakeBack:
     def take_back(lease: Lease) -> bool:
         kind = config.kinds.get(lease.kind)
+        # banksman ends only an instance that it started, and a hook of the kind runs after that.
+        failure = None
         if kind is not None and kind.preset == ANDROID_REMOTE and lease.handle is not None:
-            # banksman ends only a reservation that it created, and a hook of the kind runs
-            # after that.
-            failure = remote.take_back(kind, config.android, lease.handle)
-            if failure is not None:
-                print(
-                    clean(f"banksman: cannot take back {lease.resource}: {failure}"),
-                    file=sys.stderr,
-                )
-                return False
+            failure = remote.take_back(kind, config.android, lease.resource, lease.handle)
+        elif kind is not None and kind.preset == ANDROID_EMULATOR:
+            failure = emulator.take_back(kind, lease.resource)
+        if failure is not None:
+            print(clean(f"banksman: cannot take back {lease.resource}: {failure}"), file=sys.stderr)
+            return False
         if kind is not None and kind.on_void is not None:
             # The hook can end the instance by its serial. The serial in the lease can be old,
             # and an emulator takes the lowest free port, so another instance can have it now.
@@ -1141,10 +1150,13 @@ def _give_back_after_run(lease: Lease) -> None:
     # The reaper first, as for banksman release, so that a lease that became void is taken back
     # with the hooks of the current configuration. The lease can be lost already.
     try:
-        store, _ = _reaped_store()
-        for each, drained in store.release_holding(lease.lease_id):
+        config = load_config()
+        store, _ = _reaped_store(config)
+        released = store.release_holding(lease.lease_id)
+        for each, drained in released:
             if drained is not None:
                 _warn(_released(each.resource, drained))
+        _adopt(config, [each for each, _ in released])
     except NotHeld:
         pass
     except (BanksmanError, OSError) as exc:
@@ -1304,8 +1316,10 @@ def _acquire(
         payable = _payable(found.candidates, usable)
         # The store does not keep a holding while a lease of it boots.
         booting = sorted(each.resource for each in holding.values() if each.state == BOOTING)
+        in_use = sorted({each.resource for need in needs for each in need.choices if each.in_use})
         notes = [_paid_note(payable)] if payable else []
         notes += [_booting_note(booting)] if booting else []
+        notes += [_unmanaged_note(in_use)] if in_use else []
         unpaid = [
             Need(
                 tuple(each for each in need.choices if offered(each.resource, each.paid)),
@@ -1489,6 +1503,15 @@ def _booting_note(resources: Sequence[str]) -> str:
     )
 
 
+def _unmanaged_note(resources: Sequence[str]) -> str:
+    return (
+        f"{', '.join(resources)} runs, but banksman did not start it, so a person or another"
+        " program can use it, and banksman does not grant it: banksman status shows it as"
+        " unmanaged. banksman grants it when it no longer runs, or when the operator sets"
+        ' unmanaged = "grant" for its kind'
+    )
+
+
 def _owner_still_runs(machine: Machine, owner_pid: int | None, started: str | None) -> str | None:
     """Return the start time of the owner process of a request that waits, or raise when that
     process has ended.
@@ -1518,15 +1541,17 @@ def _choice(candidate: Candidate, config: Config, start: bool) -> Choice:
     # The holder starts an instance that does not run, unless the caller asks banksman with
     # --start and banksman can start the kind. A lease is booting only while banksman starts its
     # instance or the on_acquire hook resets it, so that a caller that dies in the middle loses
-    # the lease at the boot deadline.
+    # the lease at the boot deadline. An instance that banksman did not start can be the
+    # emulator of a person, so a request gets it only when its kind says so.
     return Choice(
         candidate.resource,
         candidate.kind,
         kind.timeouts,
         reset=kind.on_acquire is not None,
         accounts=candidate.accounts or (),
-        start=start and candidate.cold and kind.preset == ANDROID_REMOTE,
+        start=start and candidate.cold and kind.preset in STARTED,
         paid=candidate.paid,
+        in_use=candidate.unmanaged and kind.unmanaged == SKIP,
     )
 
 
@@ -1567,7 +1592,10 @@ def _prepare(
         for grant in granted:
             if not grant.kept:
                 _give_back(store, grant.lease)
-        raise BanksmanError(f"{exc} while the request was reset; {given_back} given back") from None
+        raise BanksmanError(
+            f"{exc} while the instances of the request were started or reset; {given_back} given"
+            " back"
+        ) from None
     except BaseException:
         for grant in granted:
             if not grant.kept:
@@ -1580,9 +1608,28 @@ def _start(store: Store, config: Config, lease: Lease, given_back: str) -> Lease
     """Start the instance of a new booting lease, and return the lease with its serial."""
     kind = config.kinds[lease.kind]
     assert lease.boot_deadline is not None
-    clock = console.Clock(store.system.clock(), store.system.wall_clock())
     # The on_acquire hook needs its time before the boot deadline too.
     reset = hooks.HOOK_TIMEOUT_SECONDS if kind.on_acquire is not None else 0
+    if kind.preset == ANDROID_EMULATOR:
+        try:
+            serial = emulator.start(
+                kind,
+                config.android,
+                lease.resource,
+                deadline=lease.boot_deadline - reset,
+                claim=lambda serials: _claim(store, lease, serials),
+                system=store.system,
+                clock=store.system.clock,
+                sleep=store.system.sleep,
+            ).serial
+        except NotHeld:
+            raise
+        except BanksmanError as exc:
+            raise BanksmanError(
+                f"cannot start {lease.resource}: {exc}; {given_back} given back"
+            ) from None
+        return store.started(lease.resource, lease.lease_id, serial=serial)
+    clock = console.Clock(store.system.clock(), store.system.wall_clock())
     try:
         started = remote.start(
             kind,
@@ -1601,6 +1648,12 @@ def _start(store: Store, config: Config, lease: Lease, given_back: str) -> Lease
     return store.started(
         lease.resource, lease.lease_id, handle=started.handle, serial=started.serial
     )
+
+
+def _claim(store: Store, lease: Lease, serials: Sequence[str]) -> str:
+    serial = store.claim_serial(lease.resource, lease.lease_id, serials).serial
+    assert serial is not None
+    return serial
 
 
 def _give_back(store: Store, lease: Lease) -> None:
@@ -1757,11 +1810,15 @@ def _cmd_release(args: argparse.Namespace) -> int:
         owner = _owner_process(config, args.owner_pid)
         lease_id = _labelled(store, owner, args.holding, args.resource).lease_id
     if args.resource is not None:
+        given = store.holding(lease_id).get(args.resource)
         print(clean(_released(args.resource, store.release(args.resource, lease_id))))
+        _adopt(config, [given] if given is not None else [])
         return 0
     if not args.all:
-        for lease, drained in store.release_holding(lease_id):
+        released = store.release_holding(lease_id)
+        for lease, drained in released:
             print(clean(_released(lease.resource, drained)))
+        _adopt(config, [lease for lease, _ in released])
         return 0
     owner = _owner_process(config, args.owner_pid)
     if owner is None:
@@ -1772,9 +1829,30 @@ def _cmd_release(args: argparse.Namespace) -> int:
     released = store.release_all(owner)
     for lease, drained in released:
         print(clean(_released(lease.resource, drained)))
+    _adopt(config, [lease for lease, _ in released])
     if not released:
         print(f"Process {owner} holds no lease.")
     return 0
+
+
+def _adopt(config: Config, leases: Sequence[Lease]) -> None:
+    """Record each instance that still runs when its lease ends, for the presets that start
+    their instances, so that it is not unmanaged when it is free.
+
+    The holder started it under the lease, or banksman did. A failure only leaves the instance
+    unmanaged, so it does not fail the release.
+    """
+    for lease in leases:
+        kind = config.kinds.get(lease.kind)
+        if kind is None or kind.preset not in STARTED:
+            continue
+        try:
+            if kind.preset == ANDROID_EMULATOR:
+                emulator.adopt(kind, lease.resource)
+            elif lease.handle is not None:
+                remote.adopt(kind, lease.resource, lease.handle)
+        except BanksmanError as exc:
+            _warn(f"cannot record that {lease.resource} runs, so it is unmanaged now: {exc}")
 
 
 def _labelled(

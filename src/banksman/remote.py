@@ -14,14 +14,11 @@ tool. What the tool prints and what its files hold is untrusted, so every value 
 from __future__ import annotations
 
 import contextlib
-import fcntl
-import json
 import math
 import os
 import pwd
 import re
 import signal
-import stat
 import subprocess
 import tempfile
 import time
@@ -32,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from banksman import android, hooks
+from banksman import android, hooks, records
 from banksman.config import Android, Kind
 from banksman.errors import BanksmanError
 from banksman.lease import RESOURCE_NAME
@@ -48,7 +45,6 @@ FILE_SCHEMA = 1
 # The service ends a reservation at the latest this long after its creation.
 MAX_RESERVATION_SECONDS = 3 * 60 * 60
 _MAX_OUTPUT = 1024 * 1024
-_MAX_FILE = 1024 * 1024
 _MAX_CONNECTIONS_FILE = 64 * 1024
 _MAX_LINE = 300
 _POLL_SECONDS = 0.2
@@ -56,7 +52,6 @@ _POLL_SECONDS = 0.2
 _ADB_WAIT_SECONDS = 15.0
 _ADB_POLL_SECONDS = 0.5
 _KILL_WAIT_SECONDS = 5.0
-_LOCK_WAIT_SECONDS = 10.0
 _CONNECTIONS_FILE = "active-connections.properties"
 _CODENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _HANDLE = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
@@ -478,10 +473,7 @@ def changing_sessions(
     Two starts of different models can run at the same time, and each writes the file. The
     records of reservations that have ended go.
     """
-    directory = _directory()
-    lock = directory / f".{kind.name}-sessions.lock"
-    fd = _take_lock(lock)
-    try:
+    with records.locked(default_remote_dir() / f".{kind.name}-sessions.lock", RemoteError):
         sessions = load_sessions(kind)
         yield sessions
         now = clock()
@@ -490,8 +482,6 @@ def changing_sessions(
             _sessions_path(kind),
             {"schema": FILE_SCHEMA, "sessions": [_session_json(each) for each in kept]},
         )
-    finally:
-        os.close(fd)
 
 
 # Discovery.
@@ -586,6 +576,29 @@ def discover(
                 instance.update(android.signed_in(settings, serial))
         instances.append(instance)
     return {"schema": android.DISCOVER_SCHEMA, "instances": instances, "notes": notes}, shown
+
+
+def unmanaged(kind: Kind, document: Document) -> set[str]:
+    """Return the connected models of a discover document whose reservation banksman did not
+    start, adopt at a start, or see live when a lease of the model ended."""
+    try:
+        known = set(load_sessions(kind))
+    except RemoteError:
+        # discover notes it. Without the record, no device counts as one that banksman knows.
+        known = set()
+    return {
+        instance["name"]
+        for instance in document["instances"]
+        if instance["facts"].get("running") is True and instance["facts"].get("handle") not in known
+    }
+
+
+def adopt(kind: Kind, resource: str, handle: str, clock: Callable[[], float] = time.time) -> None:
+    """Record the reservation of a lease that ends while banksman has no record of it: the
+    holder reserved the model by hand. banksman did not create it, so the reaper never ends it."""
+    with changing_sessions(kind, clock) as sessions:
+        if handle not in sessions:
+            sessions[handle] = Session(handle, resource, created=False, at=clock())
 
 
 # The tool: the catalogue, the reservations, and the lifecycle of a reservation.
@@ -771,18 +784,22 @@ def remove(kind: Kind, settings: Android, handle: str, *, run: Run | None = None
 def take_back(
     kind: Kind,
     settings: Android,
+    resource: str,
     handle: str,
     *,
     run: Run | None = None,
     clock: Callable[[], float] = time.time,
 ) -> str | None:
-    """End the reservation of a void lease, when banksman created it.
+    """End the reservation of a void lease, when banksman created it. A reservation that it has
+    no record of is recorded as one that it did not create, as at a release.
 
     Return None when the reservation is gone or is not banksman's to end, or why that cannot be
     confirmed.
     """
     try:
         session = load_sessions(kind).get(handle)
+        if session is None:
+            adopt(kind, resource, handle, clock)
     except RemoteError as exc:
         return str(exc)
     if session is None or not session.created:
@@ -935,84 +952,9 @@ def _sessions_path(kind: Kind) -> Path:
     return default_remote_dir() / f"{kind.name}-sessions.json"
 
 
-def _directory() -> Path:
-    directory = default_remote_dir()
-    try:
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    except OSError as exc:
-        raise RemoteError(f"cannot create {directory}: {exc.strerror}") from exc
-    _check_owner(directory, os.lstat(directory), directory=True)
-    return directory
-
-
-def _check_owner(path: Path, info: os.stat_result, *, directory: bool = False) -> None:
-    # The file of the reservations decides which reservations the reaper ends, so a file that
-    # another user can change could make banksman end that user's choice of reservations.
-    kind_ok = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
-    if not kind_ok:
-        raise RemoteError(f"{path} is not a {'directory' if directory else 'regular file'}")
-    if info.st_uid != os.geteuid():
-        raise RemoteError(f"{path} belongs to another user")
-    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise RemoteError(f"group or others can write to {path}")
-
-
 def _read(path: Path) -> object | None:
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise RemoteError(f"cannot open {path}: {exc.strerror}") from exc
-    with os.fdopen(fd, "rb") as file:
-        _check_owner(path, os.fstat(file.fileno()))
-        data = file.read(_MAX_FILE + 1)
-    if len(data) > _MAX_FILE:
-        raise RemoteError(f"{path} is larger than {_MAX_FILE} bytes")
-    try:
-        return json.loads(data)
-    except (ValueError, UnicodeDecodeError):
-        raise RemoteError(f"{path} is not valid JSON") from None
+    return records.read(path, RemoteError)
 
 
 def _write(path: Path, document: Mapping[str, object]) -> None:
-    directory = _directory()
-    data = (json.dumps(document, indent=2) + "\n").encode()
-    try:
-        fd, temp = tempfile.mkstemp(prefix=".tmp-", dir=directory)
-    except OSError as exc:
-        raise RemoteError(f"cannot write {path}: {exc.strerror}") from exc
-    try:
-        with os.fdopen(fd, "wb") as file:
-            file.write(data)
-        # rename is atomic: a reader sees the old file or the new one.
-        os.replace(temp, path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temp)
-        raise
-
-
-def _take_lock(path: Path) -> int:
-    try:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    except OSError as exc:
-        raise RemoteError(f"cannot open {path}: {exc.strerror}") from exc
-    try:
-        _check_owner(path, os.fstat(fd))
-        give_up = time.monotonic() + _LOCK_WAIT_SECONDS
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return fd
-            except BlockingIOError:
-                # The lock is held for milliseconds, but not while its holder is stopped.
-                if time.monotonic() >= give_up:
-                    raise RemoteError(
-                        f"another banksman process has held {path} for more than"
-                        f" {_LOCK_WAIT_SECONDS:g} s; it can be stopped or hung"
-                    ) from None
-                time.sleep(0.01)
-    except BaseException:
-        os.close(fd)
-        raise
+    records.write(path, document, RemoteError)

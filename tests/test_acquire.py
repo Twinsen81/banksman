@@ -684,7 +684,8 @@ def test_a_lease_lost_while_the_request_is_reset_gives_back_every_new_lease(
     assert (status, values) == (1, {})
     assert err == (
         "banksman: the lease on build-0 is void: nothing touched the lease for the idle timeout"
-        " while the request was reset; the new leases are given back\n"
+        " while the instances of the request were started or reset; the new leases are given"
+        " back\n"
     )
     assert leases() == {}
 

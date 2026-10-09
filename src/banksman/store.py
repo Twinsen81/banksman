@@ -115,6 +115,9 @@ class Choice:
     # Each use costs money, so only a request that acknowledges the cost gets the resource,
     # unless the caller keeps a lease on it.
     paid: bool = False
+    # A person or a program outside banksman uses the instance, so it is not granted, as one with
+    # a lease, unless the caller keeps a lease on it.
+    in_use: bool = False
 
 
 @dataclass(frozen=True)
@@ -444,7 +447,12 @@ class Store:
             return self._owned(self._scan(), owner_pid)
 
     def started(
-        self, resource: str, lease_id: str, *, handle: str, serial: str | None = None
+        self,
+        resource: str,
+        lease_id: str,
+        *,
+        handle: str | None = None,
+        serial: str | None = None,
     ) -> Lease:
         """Record what the start of the instance of a lease found: the id of its reservation as
         soon as the start knows it, and then its serial.
@@ -454,12 +462,40 @@ class Store:
         only while the lease is held, as a discovery records it.
         """
         with self._lock():
-            lease = self._write(replace(self._current(resource, lease_id), handle=handle))
+            lease = self._current(resource, lease_id)
+            if handle is not None:
+                lease = self._write(replace(lease, handle=handle))
             if serial is None or lease.state not in HELD:
                 return lease
-            seen = SerialSeen(resource, lease.kind, serial, self.system.clock(), handle)
+            seen = SerialSeen(resource, lease.kind, serial, self.system.clock(), lease.handle)
             _, serials = self._see(self._scan(), [seen])
             return serials.get(resource, lease)
+
+    def claim_serial(self, resource: str, lease_id: str, serials: Sequence[str]) -> Lease:
+        """Record in a held lease the first of `serials` that no other held lease of this boot
+        records, before the start of its instance, and return the lease.
+
+        Two starts that choose from the same free addresses, such as the console ports of
+        emulators, then never get the same one, and the serial is known from the start.
+        """
+        with self._lock():
+            lease = self._held(resource, lease_id)
+            boot_id = self.system.boot_id()
+            taken = {
+                entry.serial
+                for entry in self._scan()
+                if isinstance(entry, Lease)
+                and entry.resource != resource
+                and entry.state in HELD
+                and entry.boot_id == boot_id
+            }
+            serial = next((each for each in serials if each not in taken), None)
+            if serial is None:
+                raise BanksmanError(
+                    f"every free address for {resource} is recorded by another lease, whose start"
+                    " has not taken it yet"
+                )
+            return self._write(replace(lease, serial=serial, serial_seen=self.system.clock()))
 
     def ready(self, resource: str, lease_id: str) -> Lease:
         """End the boot or the reset of an instance: the holder may use it now."""
@@ -1177,7 +1213,7 @@ def _part(
             tuple(account for account in choice.accounts if account not in taken),
         )
         for choice in need.choices
-        if choice.resource not in held and (paid or not choice.paid)
+        if choice.resource not in held and not choice.in_use and (paid or not choice.paid)
     )
     return Part(tuple(options), need.accounts)
 

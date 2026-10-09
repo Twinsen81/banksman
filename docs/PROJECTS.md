@@ -42,7 +42,8 @@ banksman run --lease "$LEASE" --resource "$RESOURCE" -- ./gradlew connectedCheck
   was lost.
 - When the command ends while processes that it started still run in its group, banksman
   waits for them, because they can still use the resource. A process that must outlive the
-  command, such as an emulator, must not start inside it: start it before `banksman run`.
+  command, such as an emulator, must not start inside it: start it before `banksman run`, or
+  let banksman start it with `--start` (see "Emulators that banksman starts" below).
 - banksman fences only the processes in the group. A daemon that the command uses runs outside
   it, such as the Gradle daemon or the adb server, and so does a process on the device, such
   as a test that instrumentation started. After a lost lease, a build or a test that the
@@ -133,7 +134,8 @@ error, gives the lease back in a trap: `trap banksman_release EXIT`.
 A wait must be shorter than the time limit of the shell tool of the agent that runs the
 script. Claude Code stops a command of its Bash tool after 2 minutes unless the agent gives a
 longer timeout, and after 10 minutes at most, so an example that waits 15 minutes is stopped
-before its wait ends. A run of tests that takes longer runs in the background of the tool.
+before its wait ends. With `--start`, the boot of an emulator comes after the wait. A run of
+tests that takes longer runs in the background of the tool.
 
 A script that is given a lease keeps it. When `BANKSMAN_LEASE` is set when the script starts,
 for example because an agent runs `BANKSMAN_LEASE=<id> ./scripts/ui-tests.sh`,
@@ -146,6 +148,37 @@ uses that lease in the same way, and the lease keeps the run as its owner proces
 
 The helper reads only a grant with one part. A script that needs several resources at the same
 time calls `banksman acquire` with `--as` itself.
+
+## Emulators that banksman starts
+
+With `--start`, `acquire` and `run --where` start a granted emulator that does not run, and
+grant it when its boot has completed (DESIGN.md, section 8). The project then needs no script
+that starts an emulator detached, finds its serial, and waits for the boot, and no lock
+between its worktrees: banksman chooses the console port before the start, so `SERIAL` is
+always the serial of this emulator, also when other agents start emulators at the same time.
+
+```sh
+banksman acquire --holding ui-tests --where form=phone --start --for "UI tests" --wait 3m
+```
+
+- The options of the emulator, such as `-no-window` or `-no-snapshot-save`, are `start_args`
+  of the kind in the configuration of the operator, the same for every caller.
+- `acquire` lasts until the boot completes, at most the `boot_timeout` of the kind, after its
+  wait. Keep `--wait` and `boot_timeout` together shorter than the time limit of the shell
+  tool of the agent, for example `--wait 3m` with a `boot_timeout` of 4 minutes for a limit of
+  10 minutes, or run `acquire` in the background of the tool. When the tool stops `acquire`
+  during the boot, the lease stays `booting` until the boot deadline, a new request of the
+  same holding waits for it, and the reaper then ends the emulator.
+- A release leaves the emulator running, so the next request gets it without a boot. The
+  reaper ends an emulator that banksman started when its lease becomes void.
+- A preparation of the device that is not an app setup, such as a setting of the system, stays
+  in an `on_acquire` hook of the kind. App setup stays in the scripts of the project.
+
+A script that starts the emulator itself, as without `--start`, keeps working: when its lease
+ends, banksman records the emulator that runs, so the next request can get it. But an emulator
+that a person or a script starts outside a lease is `unmanaged`, and a request does not get it
+(DESIGN.md, section 6). `banksman status` shows it. An operator who shares such emulators on
+purpose sets `unmanaged = "grant"` for the kind.
 
 ## Testing the scripts both ways
 

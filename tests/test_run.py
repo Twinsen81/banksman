@@ -583,7 +583,9 @@ def android_sdk(tmp_path, config_path):
     sdk = FakeSdk(tmp_path, avds=("qa_phone",))
     write_config(
         config_path,
-        f"[holder]\nagents = []\n{sdk.config()}[kinds.emulator]\npreset = \"android-emulator\"\n",
+        f"[holder]\nagents = []\n{sdk.config()}[kinds.emulator]\npreset = \"android-emulator\"\n"
+        # The tests start the fake emulators themselves, as a person would.
+        'unmanaged = "grant"\n',
     )
     save_inventory(Inventory(kinds={"emulator": Decisions(allowed=("qa_phone",))}))
     return sdk

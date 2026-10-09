@@ -860,6 +860,73 @@ def test_a_release_keeps_the_reservation_for_the_next_request(capsys, config_pat
     assert cli.calls().count("device remote create tokay/34 --connect") == 1
 
 
+# Devices that banksman did not start.
+
+
+def test_a_connection_that_banksman_did_not_make_is_unmanaged_and_in_use(
+    capsys, config_path, sdk, cli
+):
+    configure(config_path, sdk, cli)
+    save_catalogue()
+    # A person reserved and connected the model by hand.
+    cli.connected({SECOND: 50066})
+    adb_lists(sdk, [50066], {50066: OPPO_GETPROP})
+    assert main(["status", "--json"]) == 0
+    shown = {each["resource"]: each for each in json.loads(capsys.readouterr().out)["resources"]}
+    assert (shown["OP573DL1:34"]["state"], shown["OP573DL1:34"]["handle"]) == ("unmanaged", SECOND)
+    assert shown["tokay:34"]["state"] == "free"
+    status, _, err = acquire(capsys, "--where", "codename=OP573DL1", "--paid", "--start")
+    assert status == 4
+    assert "OP573DL1:34 runs, but banksman did not start it" in err
+    assert not any("create" in call for call in cli.calls())
+
+
+def test_with_grant_a_connection_that_banksman_did_not_make_is_granted(
+    capsys, config_path, sdk, cli
+):
+    configure(config_path, sdk, cli, remote_keys='unmanaged = "grant"\n')
+    save_catalogue()
+    cli.connected({SECOND: 50066})
+    adb_lists(sdk, [50066], {50066: OPPO_GETPROP})
+    status, values, err = acquire(capsys, "--where", "codename=OP573DL1", "--paid")
+    assert (status, values["SERIAL"], values["HANDLE"]) == (0, "localhost:50066", SECOND), err
+
+
+def test_a_release_records_the_reservation_that_the_holder_made(capsys, config_path, sdk, cli):
+    configure(config_path, sdk, cli)
+    save_catalogue()
+    adb_lists(sdk, [])
+    status, values, err = acquire(capsys, "--where", "codename=OP573DL1", "--paid")
+    assert (status, values["STATE"]) == (0, "ready"), err
+    # The holder reserves the model by hand, and banksman sees the connection while it holds it.
+    cli.connected({SECOND: 50066})
+    adb_lists(sdk, [50066], {50066: OPPO_GETPROP})
+    assert main(["status"]) == 0
+    assert leases()["OP573DL1:34"].handle == SECOND
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    capsys.readouterr()
+    assert sessions()[SECOND].created is False
+    status, again, err = acquire(capsys, "--where", "codename=OP573DL1", "--paid")
+    assert (status, again["HANDLE"]) == (0, SECOND), err
+
+
+def test_a_void_lease_records_a_reservation_that_banksman_has_no_record_of(
+    capsys, config_path, sdk, cli, state_dir
+):
+    configure(config_path, sdk, cli)
+    save_catalogue()
+    adb_lists(sdk, [])
+    status, values, err = acquire(capsys, "--where", "codename=OP573DL1", "--paid")
+    assert status == 0, err
+    cli.connected({SECOND: 50066})
+    adb_lists(sdk, [50066], {50066: OPPO_GETPROP})
+    assert main(["status"]) == 0
+    edit_lease(state_dir, "OP573DL1:34", lambda data: data["awake"].update(hard_deadline=0))
+    assert main(["reap"]) == 0
+    assert not any("remove" in call for call in cli.calls())
+    assert sessions()[SECOND].created is False
+
+
 def test_start_and_paid_need_where_in_run(capsys, config_path, sdk, cli):
     configure(config_path, sdk, cli)
     for flag in ("--paid", "--start"):

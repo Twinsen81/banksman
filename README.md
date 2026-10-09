@@ -8,7 +8,8 @@ agents never use the same device at the same time, and a dead run never holds on
 > discovery with the allowlist, holder identity, requests by properties, joint acquire with
 > accounts, the console (`status`, `watch`, and `log`), the supervised run (`banksman run`)
 > with a helper for the scripts of a project, optional build slots for Gradle, an optional
-> adb guard, paid remote devices of Android Device Streaming that banksman reserves on
+> adb guard, emulators that banksman starts on `--start` and never gives away when somebody
+> else started them, paid remote devices of Android Device Streaming that banksman reserves on
 > `--start`, holdings that an agent names with a label, and a guide for agents.
 > `explain` and the queue of the callers that wait are not written yet. The design is in
 > [docs/DESIGN.md](docs/DESIGN.md).
@@ -48,7 +49,11 @@ resource, so an operator can also declare other resources, such as host ports or
 - **One view of everything.** `banksman status` shows every resource, who holds it, why,
   and when it will be free at the latest. Agents read the same data as JSON.
 - **Closed by default.** An agent can only get what the operator allows. A personal phone
-  or emulator on the same machine is never offered.
+  or emulator on the same machine is never offered, and an allowed emulator that a person
+  started outside banksman is not given to an agent.
+- **Starts emulators, when asked.** With `--start`, banksman starts a granted emulator that
+  does not run, on a port that it chooses before the boot, so two parallel starts never mix
+  up their serials. It ends only the emulators that it started.
 - **A guard for raw adb calls, when the operator wants it.** An optional `adb` wrapper on the
   `PATH` refuses an agent's device command on a device that another holder leases, also when
   a script or an agent calls adb without banksman.

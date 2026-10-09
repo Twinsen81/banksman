@@ -21,7 +21,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from banksman import android, hooks, remote
+from banksman import android, emulator, hooks, remote
 from banksman.config import ANDROID_DEVICE, ANDROID_EMULATOR, ANDROID_REMOTE, Config, Kind
 from banksman.errors import BanksmanError
 from banksman.lease import RESOURCE_NAME, SerialSeen
@@ -63,6 +63,10 @@ class Instance:
     # accounts is not offered for work that needs an account.
     accounts: tuple[str, ...] | None = None
     note: str | None = None
+    # It runs, but banksman did not start it, and did not see it run when a lease of it ended:
+    # a person or a program outside banksman uses it. Only the presets that start their
+    # instances know it.
+    unmanaged: bool = False
 
 
 @dataclass(frozen=True)
@@ -87,14 +91,16 @@ def discover(kind: Kind, config: Config, *, accounts: bool = True) -> Found:
     """
     try:
         if kind.preset == ANDROID_EMULATOR:
-            document = android.emulators(config.android, accounts=accounts)
-            return parse(kind.name, document, paid=kind.paid)
+            document, unmanaged = emulator.discover(kind, config.android, accounts=accounts)
+            return _unmanaged(parse(kind.name, document, paid=kind.paid), unmanaged)
         if kind.preset == ANDROID_DEVICE:
             document = android.devices(config.android, accounts=accounts)
             return parse(kind.name, document, paid=kind.paid)
         if kind.preset == ANDROID_REMOTE:
             document, shown = remote.discover(kind, config.android, accounts=accounts)
-            found = parse(kind.name, document, paid=kind.paid)
+            found = _unmanaged(
+                parse(kind.name, document, paid=kind.paid), remote.unmanaged(kind, document)
+            )
             shown_notes = tuple(note_text(note) for note in shown)
             return replace(found, notes=(*shown_notes, *found.notes), shown=shown_notes)
     except BanksmanError as exc:
@@ -107,6 +113,14 @@ def discover(kind: Kind, config: Config, *, accounts: bool = True) -> Found:
     except (ValueError, UnicodeDecodeError):
         return _failed(kind.name, "the discover hook printed text that is not JSON")
     return parse(kind.name, document, paid=kind.paid)
+
+
+def _unmanaged(found: Found, names: set[str]) -> Found:
+    instances = tuple(
+        replace(instance, unmanaged=True) if instance.name in names else instance
+        for instance in found.instances
+    )
+    return replace(found, instances=instances)
 
 
 def serial_of(facts: Mapping[str, FactValue]) -> str | None:

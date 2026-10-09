@@ -149,6 +149,26 @@ def test_a_remote_kind_needs_the_tool_and_a_project_and_is_paid(config_path):
     assert (loaded.kinds["cheap"].paid, loaded.kinds["farm"].paid) == (False, True)
 
 
+def test_an_emulator_kind_has_the_options_of_its_starts_and_skips_unmanaged_emulators(
+    config_path,
+):
+    write_config(
+        config_path,
+        '[android]\ncli = "/opt/android-cli/android"\n'
+        '[kinds.emulator]\npreset = "android-emulator"\n'
+        'start_args = ["-no-window", "-no-snapshot-save"]\n'
+        '[kinds.shared]\npreset = "android-emulator"\nunmanaged = "grant"\n'
+        '[kinds.remote]\npreset = "android-remote"\nproject = "p"\nunmanaged = "grant"\n',
+    )
+    kinds = load_config().kinds
+    assert kinds["emulator"].start_args == ("-no-window", "-no-snapshot-save")
+    assert [kinds[name].unmanaged for name in ("emulator", "shared", "remote")] == [
+        "skip",
+        "grant",
+        "grant",
+    ]
+
+
 def test_a_remote_kind_without_the_path_of_the_tool_says_how_to_find_it(config_path):
     write_config(config_path, '[kinds.remote]\npreset = "android-remote"\nproject = "p"\n')
     with pytest.raises(ConfigError, match="android.cli: .* Run `command -v android`"):
@@ -313,6 +333,15 @@ def test_text_that_is_not_a_duration_is_refused(text):
         ("[kinds.remote]\npreset = 'android-remote'\nproject = 'a/b'", "kinds.remote.project"),
         ("[kinds.device]\npreset = 'android-device'\nproject = 'p'", "kinds.device.project"),
         ("[kinds.build]\ncount = 1\npaid = 'yes'", "kinds.build.paid"),
+        ("[kinds.device]\npreset = 'android-device'\nstart_args = []", "kinds.device.start_args"),
+        ("[kinds.e]\npreset = 'android-emulator'\nstart_args = '-no-window'", "kinds.e.start_args"),
+        ("[kinds.e]\npreset = 'android-emulator'\nstart_args = ['']", "kinds.e.start_args"),
+        ("[kinds.e]\npreset = 'android-emulator'\nstart_args = ['-port']", "kinds.e.start_args"),
+        ("[kinds.e]\npreset = 'android-emulator'\nstart_args = ['-avd']", "kinds.e.start_args"),
+        ("[kinds.e]\npreset = 'android-emulator'\nstart_args = ['@x']", "kinds.e.start_args"),
+        ("[kinds.e]\npreset = 'android-emulator'\nunmanaged = 'yes'", "kinds.e.unmanaged"),
+        ("[kinds.device]\npreset = 'android-device'\nunmanaged = 'skip'", "kinds.device.unmanaged"),
+        ("[kinds.build]\ncount = 1\nunmanaged = 'grant'", "kinds.build.unmanaged"),
         ("[android]\nadb = '/opt/adb'", "android.adb"),
         ("[guard]\nstrict = 'yes'", "guard.strict"),
         ("[guard]\nstrictly = true", "guard.strictly"),

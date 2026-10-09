@@ -24,8 +24,9 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
   runs), and `LEASE` (the lease id).
 - Ask for properties with `--where`, such as `form=tablet`, `'api>=33'`, or `avd=<name>`.
   `banksman status` shows the devices that exist, and who holds them.
-- A granted emulator may not run yet. Start it when it does not run, and use it when it runs
-  already.
+- Add `--start` to get a device that runs: banksman then starts a granted emulator that does
+  not run, and prints the grant when its boot has completed. Without `--start`, a granted
+  emulator may not run yet: start it yourself when it does not run.
 - `banksman held` lists the holdings of your agent process, with their labels, lease ids,
   devices, and serials. It also lists the holdings of the other subagents of your session: use
   only your own label.
@@ -73,6 +74,10 @@ banksman release --holding login-tests
   command after 2 minutes unless you give it a longer timeout, and after 10 minutes at most.
 - Keep every `--wait` shorter than that limit, and give the tool a timeout that is longer than
   the wait, for example `--wait 5m` with a timeout of 6 minutes.
+- With `--start`, the boot of an emulator comes after the wait, and can take some minutes.
+  Keep the wait short, for example `--wait 3m` with a timeout of 10 minutes. When the tool
+  stops the command during the boot, the request with the same label waits until the boot
+  deadline has passed.
 - Run a command that takes longer, such as a long test run under `banksman run`, in the
   background of your tool. When the tool stops `banksman run`, banksman stops the command too.
 
@@ -81,8 +86,8 @@ banksman release --holding login-tests
 - Some devices cost money for each use, such as remote devices, and banksman offers them only
   with `--paid`. Before you use `--paid`, tell the user that the device is paid, and get a yes.
 - Write `--paid` right after `acquire` or `run`, for example
-  `banksman acquire --paid --holding login-tests --where kind=remote --start`. `--start`
-  reserves and connects a remote device, which adds about a minute to the command.
+  `banksman acquire --paid --holding login-tests --where kind=remote --start`. For a remote
+  device, `--start` reserves and connects it, which adds about a minute to the command.
 - A holding that you keep with `--holding` needs no new `--paid`.
 
 ## Other rules

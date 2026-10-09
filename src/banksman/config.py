@@ -24,6 +24,14 @@ ANDROID_EMULATOR = "android-emulator"
 ANDROID_DEVICE = "android-device"
 ANDROID_REMOTE = "android-remote"
 PRESETS = (ANDROID_EMULATOR, ANDROID_DEVICE, ANDROID_REMOTE)
+# The presets whose instances banksman starts on --start, and so can tell from the instances that
+# something else started.
+STARTED = (ANDROID_EMULATOR, ANDROID_REMOTE)
+# What a request may get of an instance that runs, but that banksman did not start: nothing, as
+# for an instance in use, or the instance, after the ones that banksman started.
+SKIP = "skip"
+GRANT = "grant"
+UNMANAGED = (SKIP, GRANT)
 # The agents whose commands banksman recognizes. Each is the last part of the path of the
 # agent's executable, as the process list shows it.
 DEFAULT_AGENTS = ("claude", "codex")
@@ -36,6 +44,8 @@ _KIND_KEYS = (
     *_SOURCE_KEYS,
     "preselect",
     "project",
+    "start_args",
+    "unmanaged",
     "paid",
     "rank",
     "on_acquire",
@@ -53,6 +63,9 @@ _DURATION = re.compile(r"([0-9]{1,7})([smh])")
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 60 * 60}
 _OFF = "off"
 _DEFAULT_RANKS = {ANDROID_DEVICE: 1, ANDROID_REMOTE: 2}
+# The options of the emulator command that banksman sets itself on a start.
+_OWN_OPTIONS = ("-avd", "-port", "-ports")
+_MAX_START_ARGS = 100
 
 
 class ConfigError(BanksmanError):
@@ -91,6 +104,12 @@ class Kind:
     paid: bool = False
     # The Google Cloud project of the android-remote preset.
     project: str | None = None
+    # The options of the emulator command, after -avd and -port, when banksman starts an AVD of
+    # the android-emulator preset.
+    start_args: tuple[str, ...] = ()
+    # SKIP or GRANT, for an instance of a preset in STARTED that runs, but that banksman did not
+    # start and did not see run when a lease of it ended.
+    unmanaged: str = SKIP
 
     @property
     def discovered(self) -> bool:
@@ -359,6 +378,19 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
             )
     elif project is not None:
         raise _Invalid(f"{where}.project", f"applies only to the {ANDROID_REMOTE} preset")
+    if "start_args" in table and preset != ANDROID_EMULATOR:
+        raise _Invalid(f"{where}.start_args", f"applies only to the {ANDROID_EMULATOR} preset")
+    unmanaged = table.get("unmanaged", SKIP)
+    if "unmanaged" in table and preset not in STARTED:
+        raise _Invalid(
+            f"{where}.unmanaged", f"applies only to the {' and '.join(STARTED)} presets"
+        )
+    if unmanaged not in UNMANAGED:
+        raise _Invalid(
+            f"{where}.unmanaged",
+            f'must be "{SKIP}", which never grants an instance that banksman did not start, or'
+            f' "{GRANT}"',
+        )
     # Physical devices are scarcer than emulators, and a remote device costs money, so a request
     # that does not name a kind gets an emulator first, then a physical device, then a remote
     # device.
@@ -377,7 +409,30 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
         preselect=preselect,
         paid=_boolean(table.get("paid", preset == ANDROID_REMOTE), f"{where}.paid"),
         project=project,  # type: ignore[arg-type]
+        start_args=_start_args(table.get("start_args"), f"{where}.start_args"),
+        unmanaged=unmanaged,  # type: ignore[arg-type]
     )
+
+
+def _start_args(value: object, where: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if (
+        not isinstance(value, list)
+        or len(value) > _MAX_START_ARGS
+        or not all(isinstance(part, str) and part and "\x00" not in part for part in value)
+    ):
+        raise _Invalid(
+            where,
+            f'must be a list of at most {_MAX_START_ARGS} options of the emulator command, such as'
+            ' ["-no-window", "-no-snapshot-save"]',
+        )
+    for part in value:
+        # banksman chooses the AVD and the console port itself, so that it knows the serial
+        # before the boot.
+        if part in _OWN_OPTIONS or part.startswith("@"):
+            raise _Invalid(where, f"banksman sets {part} itself; leave it out")
+    return tuple(value)
 
 
 def _check_unique_instances(kinds: Mapping[str, Kind]) -> None:
