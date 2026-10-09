@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from banksman import SCHEMA_VERSION, fencing
+from banksman import LEASE_SCHEMA, fencing
 from banksman.assign import Option, Part, assign
 from banksman.errors import BanksmanError
 from banksman.history import (
@@ -1205,10 +1205,10 @@ def _load(path: Path) -> Lease | Unreadable:
     except ValueError:
         return Unreadable(resource, "the file is not valid JSON")
     schema = data.get("schema") if isinstance(data, dict) else None
-    if isinstance(schema, int) and not isinstance(schema, bool) and schema > SCHEMA_VERSION:
+    if isinstance(schema, int) and not isinstance(schema, bool) and schema > LEASE_SCHEMA:
         raise StoreError(
             f"{path} has lease schema {schema}, but this banksman knows only schema "
-            f"{SCHEMA_VERSION}. Two banksman versions must not share one state directory."
+            f"{LEASE_SCHEMA}. Two banksman versions must not share one state directory."
         )
     try:
         return Lease.from_json(data)

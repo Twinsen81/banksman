@@ -9,7 +9,7 @@ from datetime import datetime
 import pytest
 from helpers import drain, edit_lease, hook, table_rows, write_config
 
-from banksman import SCHEMA_VERSION, cli, console
+from banksman import OUTPUT_SCHEMA, cli, console
 from banksman.cli import main
 from banksman.history import Event, Process
 from banksman.inventory import Decisions, Inventory, save_inventory
@@ -50,7 +50,7 @@ def configure(config_path):
 def status_json(capsys, *arguments):
     assert main(["status", "--json", *arguments]) == 0
     shown = json.loads(capsys.readouterr().out)
-    assert shown["schema"] == SCHEMA_VERSION
+    assert shown["schema"] == OUTPUT_SCHEMA
     return {each["resource"]: each for each in shown["resources"]}
 
 
@@ -290,7 +290,7 @@ def test_log_shows_who_held_a_resource(capsys, config_path, tmp_path, monkeypatc
 
     assert main(["log", "--json"]) == 0
     shown = json.loads(capsys.readouterr().out)
-    assert (shown["schema"], shown["skipped"]) == (SCHEMA_VERSION, 0)
+    assert (shown["schema"], shown["skipped"]) == (OUTPUT_SCHEMA, 0)
     events = shown["events"]
     assert [(event["event"], event["resource"]) for event in events] == [
         ("acquire", "qa_phone"),

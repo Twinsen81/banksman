@@ -170,6 +170,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guard names the adb that the wrapper saved, and when banksman cannot start or fails, the
   wrapper runs that adb itself. The `banksman` command now starts the guard without loading
   the rest of the command line.
+- Two schema numbers. The lease schema is the version of the lease file format, and it
+  changes on every change of the format, as before. The output schema is the version of the
+  JSON that the commands print and of the lines of the log. A new field does not change it,
+  and a reader ignores the fields that it does not know. It changes when a field is removed
+  or renamed, or changes its type or its meaning. Both are 6 now, so a reader of schema 6
+  sees no change. `banksman version` shows both numbers, and `version --json` has the new
+  field `lease_schema`. `banksman log` also reads the lines of schema 5 again, so the history
+  from before the upgrade to schema 6 is back. The test suite records the shape of every JSON
+  document, so a change of the output fails the tests until its shape is recorded.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

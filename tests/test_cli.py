@@ -8,7 +8,7 @@ from contextlib import suppress
 import pytest
 from helpers import SRC, age_lease, edit_lease, hook, reap_in_child, table_rows, write_config
 
-from banksman import SCHEMA_VERSION, __version__
+from banksman import LEASE_SCHEMA, OUTPUT_SCHEMA, __version__
 from banksman.cli import main
 from banksman.lease import Holder
 from banksman.store import Store
@@ -19,14 +19,20 @@ OWNER = "/work/tree-a"
 
 def test_version_json(capsys):
     assert main(["version", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"schema": SCHEMA_VERSION, "version": __version__}
+    assert json.loads(capsys.readouterr().out) == {
+        "schema": OUTPUT_SCHEMA,
+        "version": __version__,
+        "lease_schema": LEASE_SCHEMA,
+    }
 
 
 def test_version_flag(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["--version"])
     assert exc.value.code == 0
-    assert capsys.readouterr().out.strip() == f"banksman {__version__} (schema {SCHEMA_VERSION})"
+    assert capsys.readouterr().out.strip() == (
+        f"banksman {__version__} (output schema {OUTPUT_SCHEMA}, lease schema {LEASE_SCHEMA})"
+    )
 
 
 def leases_shown(capsys, *arguments):
@@ -39,7 +45,7 @@ def leases_shown(capsys, *arguments):
 def test_status_json_is_an_empty_pool(capsys):
     assert main(["status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
-        "schema": SCHEMA_VERSION,
+        "schema": OUTPUT_SCHEMA,
         "resources": [],
         "notes": [],
     }
@@ -100,7 +106,7 @@ def test_whoami_shows_the_holder(capsys, tmp_path, monkeypatch):
     assert main(["whoami", "--json"]) == 0
     shown = json.loads(capsys.readouterr().out)
     assert (shown["schema"], shown["owner"], shown["issue"]) == (
-        SCHEMA_VERSION,
+        OUTPUT_SCHEMA,
         str(tree.resolve()),
         "abc-12",
     )
@@ -137,7 +143,7 @@ def test_reap_reports_what_it_took_back(capsys, state_dir):
     age_lease(state_dir, "phone-1", 21 * 60)
     assert main(["reap", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
-        "schema": SCHEMA_VERSION,
+        "schema": OUTPUT_SCHEMA,
         "reaped": [
             {
                 "resource": "phone-1",

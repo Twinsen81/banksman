@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from importlib import resources
 
-from banksman import SCHEMA_VERSION, __version__, android, console, guard, hooks
+from banksman import LEASE_SCHEMA, OUTPUT_SCHEMA, __version__, android, console, guard, hooks
 from banksman.assign import MAX_ACCOUNTS, MAX_PARTS
 from banksman.config import Config, Kind, load_config, parse_duration
 from banksman.discovery import Found, Instance, discover, serial_now, serials_seen
@@ -62,7 +62,9 @@ from banksman.store import (
 )
 from banksman.system import Machine
 
-VERSION_LINE = f"banksman {__version__} (schema {SCHEMA_VERSION})"
+VERSION_LINE = (
+    f"banksman {__version__} (output schema {OUTPUT_SCHEMA}, lease schema {LEASE_SCHEMA})"
+)
 # A script that gets this exit status has lost its lease, and must stop using the resource.
 EXIT_LOST = 3
 # Every resource that matches is in use, also after the wait. A caller can treat this as a busy
@@ -642,7 +644,9 @@ def _reaped_json(reaped: Reaped) -> dict[str, object]:
 
 def _cmd_version(args: argparse.Namespace) -> int:
     if args.json:
-        _print_json({"schema": SCHEMA_VERSION, "version": __version__})
+        _print_json(
+            {"schema": OUTPUT_SCHEMA, "version": __version__, "lease_schema": LEASE_SCHEMA}
+        )
     else:
         print(VERSION_LINE)
     return 0
@@ -694,7 +698,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         shown = console.status_json(
             status.resources, status.notes, status.clock, status.running, verbose=args.verbose
         )
-        _print_json({"schema": SCHEMA_VERSION, **shown})
+        _print_json({"schema": OUTPUT_SCHEMA, **shown})
     else:
         print(_status_text(status))
     return 0
@@ -742,7 +746,7 @@ def _cmd_log(args: argparse.Namespace) -> int:
     if args.json:
         _print_json(
             {
-                "schema": SCHEMA_VERSION,
+                "schema": OUTPUT_SCHEMA,
                 "events": [console.event_json(event, verbose=args.verbose) for event in events],
                 "skipped": skipped,
             }
@@ -763,7 +767,7 @@ def _cmd_whoami(args: argparse.Namespace) -> int:
     if args.json:
         _print_json(
             {
-                "schema": SCHEMA_VERSION,
+                "schema": OUTPUT_SCHEMA,
                 "owner": holder.owner,
                 "owner_pid": holder.owner_pid,
                 "agent": holder.agent,
@@ -790,7 +794,7 @@ def _cmd_whoami(args: argparse.Namespace) -> int:
 def _cmd_reap(args: argparse.Namespace) -> int:
     _, reaped = _reaped_store()
     if args.json:
-        _print_json({"schema": SCHEMA_VERSION, "reaped": [_reaped_json(item) for item in reaped]})
+        _print_json({"schema": OUTPUT_SCHEMA, "reaped": [_reaped_json(item) for item in reaped]})
         return 0
     for item in reaped:
         reason = VOID_REASONS.get(item.lease.void_reason or "", "the lease was void")
@@ -1270,7 +1274,7 @@ def _print_grant(
     if as_json:
         _print_json(
             {
-                "schema": SCHEMA_VERSION,
+                "schema": OUTPUT_SCHEMA,
                 "parts": [
                     {
                         "part": part.name,
@@ -1524,7 +1528,7 @@ def _cmd_admin_discover(args: argparse.Namespace) -> int:
     if args.json:
         _print_json(
             {
-                "schema": SCHEMA_VERSION,
+                "schema": OUTPUT_SCHEMA,
                 "inventory_path": str(path),
                 "written": write,
                 "instances": [_instance_json(choice) for choice in instances],
