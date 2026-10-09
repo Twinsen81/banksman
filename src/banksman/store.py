@@ -48,6 +48,7 @@ from banksman.lease import (
     User,
     check_names,
     check_resource,
+    is_label,
     void_reason,
 )
 from banksman.system import OUTSIDE_SANDBOX, System
@@ -277,6 +278,7 @@ class Store:
         reset_time: float = 0.0,
         seen: Iterable[SerialSeen] = (),
         paid: bool = False,
+        label: str | None = None,
     ) -> list[Granted] | None:
         """Grant a resource for every need, all or nothing, or return None while that cannot be
         done because resources or accounts are in use.
@@ -291,6 +293,10 @@ class Store:
         resource is never granted, also not to the same owner, because several agents can work
         in one worktree.
 
+        With `label` instead of `keep`, the holding with that label whose owner process is the
+        holder's owner process comes first in the same way. Without one, the new leases start a
+        holding with that label.
+
         When a choice needs a reset or a start, every new lease of the request is booting and
         names this process until the caller marks it ready, so that no other process frees it
         while the resets and the starts run. They run one after another, and `reset_time` is
@@ -303,6 +309,8 @@ class Store:
         for need in needs:
             for choice in need.choices:
                 check_names(choice.resource, choice.kind, holder)
+        if label is not None:
+            _check_label(label, holder.owner_pid)
         seen = tuple(seen)
         with self._lock():
             entries, serials = self._see(self._scan(), seen)
@@ -316,13 +324,25 @@ class Store:
                 if isinstance(entry, Lease)
                 for account in entry.accounts
             }
-            kept = {} if keep is None else self._holding(entries, keep)
+            # The label is looked up under the lock, so that two requests of one agent process with
+            # the same label never start two holdings.
+            if keep is not None:
+                kept = self._holding(entries, keep)
+            elif label is not None:
+                kept = self._labelled(entries, holder.owner_pid, label)  # type: ignore[arg-type]
+            else:
+                kept = {}
             parts = [_part(need, held, taken, kept, paid) for need in needs]
             picks = assign(parts)
             if picks is None:
                 return None
-            # A request that keeps no lease starts a holding of its own.
-            holding = next(iter(kept.values())).holding if kept else uuid.uuid4().hex
+            # A request that keeps no lease starts a holding of its own. The new leases of a kept
+            # holding get its label.
+            if kept:
+                first = next(iter(kept.values()))
+                holding, label = first.holding, first.label
+            else:
+                holding = uuid.uuid4().hex
             choices = [
                 next(each for each in need.choices if each.resource == pick.resource)
                 for need, pick in zip(needs, picks)
@@ -345,7 +365,14 @@ class Store:
                     continue
                 state = BOOTING if resets or starts else READY
                 lease = self._new_lease(
-                    choice.resource, choice.kind, holder, state, choice.timeouts, expect, holding
+                    choice.resource,
+                    choice.kind,
+                    holder,
+                    state,
+                    choice.timeouts,
+                    expect,
+                    holding,
+                    label,
                 )
                 lease = replace(lease, accounts=pick.accounts)
                 if resets or starts:
@@ -397,6 +424,18 @@ class Store:
         """Return the valid held leases of the holding of this lease, by resource."""
         with self._lock():
             return self._holding(self._scan(), lease_id)
+
+    def labelled(self, owner_pid: int, label: str) -> dict[str, Lease]:
+        """Return the valid held leases of the holding with this label whose owner process is
+        `owner_pid`, by resource."""
+        _check_label(label, owner_pid)
+        with self._lock():
+            return self._labelled(self._scan(), owner_pid, label)
+
+    def held_by(self, owner_pid: int) -> list[Lease]:
+        """Return the valid held leases whose owner process is `owner_pid`."""
+        with self._lock():
+            return self._owned(self._scan(), owner_pid)
 
     def started(
         self, resource: str, lease_id: str, *, handle: str, serial: str | None = None
@@ -788,6 +827,7 @@ class Store:
         timeouts: Timeouts,
         expect: float | None,
         holding: str | None = None,
+        label: str | None = None,
     ) -> Lease:
         now = self.system.clock()
         wall = self.system.wall_clock()
@@ -817,6 +857,7 @@ class Store:
             idle_timeout=timeouts.idle_timeout,
             owner_grace=timeouts.owner_grace,
             drain_timeout=timeouts.drain_timeout,
+            label=label,
         )
 
     def _current(self, resource: str, lease_id: str) -> Lease:
@@ -852,6 +893,42 @@ class Store:
             None,
         )
         return {} if named is None else self._held_leases(entries, named.holding)
+
+    def _labelled(
+        self, entries: Sequence[Lease | Unreadable], owner_pid: int, label: str
+    ) -> dict[str, Lease]:
+        """Return the valid held leases of the holding with this label whose owner process is
+        `owner_pid`, by resource."""
+        leases = [lease for lease in self._owned(entries, owner_pid) if lease.label == label]
+        holdings = sorted({lease.holding for lease in leases})
+        if len(holdings) > 1:
+            # For example after a restart of the agent, when a touch with a lease id moved an
+            # earlier holding with the same label to the new agent process. banksman does not
+            # choose one of them for the caller.
+            ids = ", ".join(
+                next(lease.lease_id for lease in leases if lease.holding == holding)
+                for holding in holdings
+            )
+            raise BanksmanError(
+                f"process {owner_pid} has {len(holdings)} holdings with the label {label}, with"
+                f" the leases {ids}: give the id of one of them with --lease instead"
+            )
+        return {lease.resource: lease for lease in leases}
+
+    def _owned(self, entries: Sequence[Lease | Unreadable], owner_pid: int) -> list[Lease]:
+        """Return the valid held leases whose owner process is `owner_pid`."""
+        started = self._start_time(owner_pid)
+        boot_id = self.system.boot_id()
+        now = self.system.clock()
+        return [
+            entry
+            for entry in entries
+            if isinstance(entry, Lease)
+            and entry.state in HELD
+            and (entry.owner_pid, entry.owner_started) == (owner_pid, started)
+            and void_reason(entry, boot_id=boot_id, now=now, running={owner_pid: started})
+            is None
+        ]
 
     def _held_leases(
         self, entries: Sequence[Lease | Unreadable], holding: str
@@ -1097,6 +1174,17 @@ def _part(
         if choice.resource not in held and (paid or not choice.paid)
     )
     return Part(tuple(options), need.accounts)
+
+
+def _check_label(label: str, owner_pid: int | None) -> None:
+    if not is_label(label):
+        raise BanksmanError(
+            f"not a valid label: {label!r}. A label starts with a letter or a digit, has only"
+            " letters, digits, '.', '_', and '-', and has at most 64 characters"
+        )
+    if owner_pid is None:
+        # Without an owner process, every caller of the user would share the label.
+        raise BanksmanError("a label needs an owner process: the agent process, or --owner-pid")
 
 
 def satisfiable(needs: Sequence[Need]) -> bool:

@@ -337,14 +337,16 @@ def test_a_mutex_runs_one_command_at_a_time(state_dir, config_path, tmp_path):
     assert not (state_dir / "sdk-0.json").exists()
 
 
+RUN_NEEDS = "run needs one of --lease and --resource, --holding, or --where, and only one"
+
+
 @pytest.mark.parametrize(
     "arguments, message",
     [
-        (["--", "true"], "run needs --lease and --resource, or --where, but not both"),
-        (
-            ["--lease", "x", "--where", "kind=sdk", "--", "true"],
-            "run needs --lease and --resource, or --where, but not both",
-        ),
+        (["--", "true"], RUN_NEEDS),
+        (["--lease", "x", "--where", "kind=sdk", "--", "true"], RUN_NEEDS),
+        (["--lease", "x", "--holding", "tests", "--", "true"], RUN_NEEDS),
+        (["--holding", "tests", "--where", "kind=sdk", "--", "true"], RUN_NEEDS),
         (["--lease", "x", "--", "true"], "run --lease needs --resource, the leased resource"),
         (
             ["--lease", "x", "--resource", "r", "--wait", "1m", "--", "true"],
@@ -352,7 +354,11 @@ def test_a_mutex_runs_one_command_at_a_time(state_dir, config_path, tmp_path):
         ),
         (
             ["--where", "kind=sdk", "--resource", "r", "--", "true"],
-            "run --resource needs --lease; with --where, banksman chooses it",
+            "run --resource needs --lease or --holding; with --where, banksman chooses it",
+        ),
+        (
+            ["--lease", "x", "--resource", "r", "--owner-pid", "1", "--", "true"],
+            "run --owner-pid needs --where or --holding",
         ),
         (
             ["--lease", "x", "--resource", "r"],

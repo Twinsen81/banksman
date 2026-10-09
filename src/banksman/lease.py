@@ -42,6 +42,10 @@ ISSUE = re.compile(r"[A-Za-z0-9#][A-Za-z0-9._#/-]{0,63}")
 # The last part of the path of an agent's executable, such as claude or codex.
 PROGRAM_NAME = re.compile(r"[A-Za-z0-9._+-]{1,64}")
 SESSION = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+# The name that a caller gives a holding, such as login-tests. An agent writes it, and other
+# agents can read it, so it has only characters that cannot carry escape sequences, and it can be
+# printed as a KEY=value line.
+LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 MAX_PURPOSE_LENGTH = 200
 # The most accounts that one lease can list.
 MAX_LEASE_ACCOUNTS = 100
@@ -200,6 +204,9 @@ class Lease:
     # performed, never from the holder. A lease keeps it while the device is not connected, so
     # that banksman can connect the device again, or end the reservation.
     handle: str | None = None
+    # The name that the caller gave the holding with --holding. Every lease of a holding has the
+    # same label, and the agent process finds its holding by it.
+    label: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -234,6 +241,7 @@ class Lease:
             "longest_quiet": self.longest_quiet,
             "serial": self.serial,
             "handle": self.handle,
+            "label": self.label,
             "users": [user.to_json() for user in self.users],
             "accounts": list(self.accounts),
             "void_reason": self.void_reason,
@@ -285,6 +293,7 @@ class Lease:
             serial=_get(data, "serial", _optional(_is_resource)),
             serial_seen=_get(awake, "serial_seen", _optional(_is_number)),
             handle=_get(data, "handle", _optional(_is_resource)),
+            label=_get(data, "label", _optional(is_label)),
             users=tuple(User.from_json(user) for user in users),
             accounts=tuple(accounts),
             void_reason=_get(data, "void_reason", _optional(_is_void_reason)),
@@ -456,6 +465,10 @@ def _is_issue(value: object) -> bool:
 
 def _is_program_name(value: object) -> bool:
     return isinstance(value, str) and PROGRAM_NAME.fullmatch(value) is not None
+
+
+def is_label(value: object) -> bool:
+    return isinstance(value, str) and LABEL.fullmatch(value) is not None
 
 
 def _is_session(value: object) -> bool:

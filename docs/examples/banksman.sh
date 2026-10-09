@@ -2,7 +2,7 @@
 # it is not. Copy this file into your project, and source it from the scripts that use a device:
 #
 #     . "$(dirname "$0")/banksman.sh"
-#     banksman_acquire --where form=phone --for "UI tests" --wait 15m || exit
+#     banksman_acquire --where form=phone --for "UI tests" --wait 5m || exit
 #     status=0
 #     banksman_run ./gradlew connectedCheck || status=$?
 #     banksman_release

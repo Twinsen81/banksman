@@ -8,8 +8,8 @@ agents never use the same device at the same time, and a dead run never holds on
 > discovery with the allowlist, holder identity, requests by properties, joint acquire with
 > accounts, the console (`status`, `watch`, and `log`), the supervised run (`banksman run`)
 > with a helper for the scripts of a project, optional build slots for Gradle, an optional
-> adb guard, and paid remote devices of Android Device Streaming that banksman reserves on
-> `--start`.
+> adb guard, paid remote devices of Android Device Streaming that banksman reserves on
+> `--start`, holdings that an agent names with a label, and a guide for agents.
 > `explain` and the queue of the callers that wait are not written yet. The design is in
 > [docs/DESIGN.md](docs/DESIGN.md).
 
@@ -60,7 +60,8 @@ resource, so an operator can also declare other resources, such as host ports or
   use of a counted kind. It is not part of the device setup, and a project does not need it.
 - **Optional.** Scripts that call banksman behave exactly as before on a machine where it
   is not installed. [docs/PROJECTS.md](docs/PROJECTS.md) has a helper that a project copies,
-  a stub for its tests, and permission rules for its agents.
+  a stub for its tests, and permission rules for its agents, and `banksman agent-guide` prints
+  a guide for the agents in the format of a skill.
 
 ## Requirements
 

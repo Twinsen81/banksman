@@ -705,3 +705,28 @@ def test_parts_that_are_not_valid_are_a_usage_error(capsys, arguments, problem):
         main(["acquire", *arguments])
     assert exc.value.code == 2
     assert problem in capsys.readouterr().err
+
+
+def test_test_accounts_of_a_server_can_be_a_kind_that_is_leased_with_a_device(
+    capsys, config_path
+):
+    # The accounts of a test server are not signed in on a device, so a project lists them as the
+    # instances of a kind, and leases one with its device.
+    configure(
+        config_path,
+        extra="[kinds.test-account]\n"
+        'instances = ["qa+1@example.test", "qa+2@example.test"]\n',
+    )
+    request = ["--as", "phone", "--where", "kind=emulator", "--where", "api>=33"]
+    request += ["--as", "account", "--where", "kind=test-account"]
+    status, first, _ = acquire(capsys, *request)
+    assert status == 0
+    assert (first["PHONE_RESOURCE"], first["ACCOUNT_RESOURCE"]) == ("qa_phone", "qa+1@example.test")
+    status, second, _ = acquire(capsys, *request)
+    assert status == 0
+    assert (second["PHONE_RESOURCE"], second["ACCOUNT_RESOURCE"]) == (
+        "qa_tablet",
+        "qa+2@example.test",
+    )
+    status, _, _ = acquire(capsys, *request)
+    assert status == cli.EXIT_BUSY

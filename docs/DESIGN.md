@@ -4,8 +4,9 @@
 holder identity, requests by properties, joint acquire with accounts, the console, the
 supervised run, the serial in the lease, the optional build slots, and the optional adb guard
 exist. Sections 3 to 9, 11, 12, and 15 are implemented, with
-`banksman acquire`, `touch`, `release`, `reap`, `banksman whoami`, the commands that scripts
-run (`enter`, `check`, `leave`, and `run`), `banksman guard`, `banksman admin discover`,
+`banksman acquire`, `touch`, `release`, `reap`, `banksman whoami`, `banksman held`,
+`banksman agent-guide`, the commands that scripts run (`enter`, `check`, `leave`, and `run`),
+`banksman guard`, `banksman admin discover`,
 `banksman admin release --force`, `banksman admin gradle-init`, and `banksman admin adb-shim`.
 Of section 10, `status`, `watch`, and `log` are implemented.
 `explain` and the queue of the callers that wait are not implemented yet.
@@ -390,13 +391,13 @@ Quote the clauses in a shell, because `>` and `<` redirect:
 
 ```
 banksman acquire --where form=tablet --where 'api>=33' \
-                 --for "verify the tablet layout" --expect 20m --wait 15m
+                 --for "verify the tablet layout" --expect 20m --wait 5m
 ```
 
 When several resources match, banksman chooses in a fixed order:
 
-1. A resource of the caller's holding, if the caller passes the lease id with `--lease` and
-   the resource still matches. The lease is touched, and it records the caller's agent
+1. A resource of the caller's holding, if the caller passes the lease id with `--lease`, or
+   the label of the holding with `--holding` (section 9), and the resource still matches. The lease is touched, and it records the caller's agent
    process as its owner process, unless its owner process still runs and started the
    caller, as `banksman run` does for a script that it runs (section 9).
 2. A resource that costs nothing before a paid one, whatever the ranks are (section 5).
@@ -406,15 +407,16 @@ When several resources match, banksman chooses in a fixed order:
    of a start.
 5. The resource name.
 
-`acquire` without `--lease` never grants a held resource, also not to the same worktree:
+`acquire` without `--lease` or `--holding` never grants a held resource, also not to the same
+worktree:
 several agents can work in one worktree at the same time, so only the lease id tells their
 holdings apart (section 9).
 
 - **The grant.** `acquire` prints `KEY=value` lines: `RESOURCE`, `KIND`, `LEASE` (the lease
   id that the scripts pass back), `STATE`, `KEPT` (`true` for a lease of the caller's holding
-  that `--lease` kept, otherwise `false`), `SERIAL` when the lease records it, `HANDLE` when the
-  lease records the id of a reservation (section 3), and `ACCOUNTS` when the request asks for
-  accounts (section 7). A kept lease can have another id than the
+  that `--lease` or `--holding` kept, otherwise `false`), `SERIAL` when the lease records it,
+  `HANDLE` when the lease records the id of a reservation (section 3), and `ACCOUNTS` when the
+  request asks for accounts (section 7). A kept lease can have another id than the
   one that the caller passed, because each lease of a holding has its own id. Each value has only the characters of a
   resource name, so that a shell script can use it as it is: a serial with other characters
   is not printed. With `--json`, it prints a list `parts` with the same values for each part
@@ -426,7 +428,7 @@ holdings apart (section 9).
   match in use also says how many paid resources would match. With `--paid`, paid resources
   take part, after every resource that costs nothing. `--paid` is an acknowledgement, not a
   filter: `--where paid=true` asks for a paid resource. A lease that the caller keeps with
-  `--lease` needs no new acknowledgement. The store checks the acknowledgement again under its
+  `--lease` or `--holding` needs no new acknowledgement. The store checks the acknowledgement again under its
   lock, so a kept lease that ends meanwhile cannot let a new paid lease through. `status` marks
   a paid kind as `remote (paid)`, and `status --json` carries `paid` for each resource. The
   permission rules of the agents can ask the user before every `--paid` (section 15).
@@ -487,7 +489,7 @@ holdings apart (section 9).
 
   ```
   banksman acquire --as phone --where form=phone --accounts 1 \
-                   --as tablet --where form=tablet --for "verify the sign-in" --wait 15m
+                   --as tablet --where form=tablet --for "verify the sign-in" --wait 5m
   PHONE_RESOURCE=R5CR1234ABC
   PHONE_KIND=device
   PHONE_LEASE=4f1c2b0e9d7a4c55a0f3e6b1c2d3e4f5
@@ -524,7 +526,8 @@ holdings apart (section 9).
   `--lease <id>` first keeps the leases of that holding that still match its parts. While
   the holding has a held lease, the new leases of the request join it, each with a new id,
   so that a script or a cleanup of an earlier lease of the same resource never acts on the
-  new lease.
+  new lease. A holding can also have a label, which names it instead of a lease id
+  (section 9); its new leases get the label too.
 - **Accounts.** Some resources are useful only together with a scarcer thing that lives on
   them, such as a device with a signed-in account. `--accounts N` asks for a resource on
   which at least N allowed accounts are signed in now, and leases N of them with it, in the
@@ -767,7 +770,34 @@ agent, through its own agent process.
 - `release --all` gives back only the leases whose owner process is the caller's agent
   process, so it acts for one agent. After a restart of the agent, it finds a lease only
   after a touch has recorded the new agent process; until then, the lease ends by its
-  timeouts.
+  timeouts. A subagent runs its commands in the agent process of its session (section 17), so
+  `release --all` also gives back the leases of the other subagents of the session.
+
+- **Named holdings.** An agent must keep the lease id between its commands. But the shell tool
+  of an agent does not keep variables from one command to the next, a compaction of the
+  context of the agent can drop the id, and a subagent does not see the context of its parent.
+  So the caller can give its holding a label: `acquire --holding <label>` keeps the holding of
+  the caller's agent process that has this label, as `--lease` keeps the holding of a lease
+  id, and otherwise starts a holding with the label. `run`, `touch`, and `release` take
+  `--holding` instead of `--lease`; `run --holding` needs `--resource` only when the holding
+  has several resources. `banksman held` lists the held leases of the agent process, with
+  their labels, lease ids, resources, and serials. The label is looked up under the lock of the
+  lease store, so two requests of one agent process with the same label never start two
+  holdings.
+- The caller chooses the label, and banksman does not derive it. banksman cannot tell the
+  subagents of one session apart: in Claude Code and in Codex, they run their commands in one
+  agent process (section 17). So two subagents that give the same label share one holding,
+  and so one device. A label names the task, such as `login-tests`, and the guide for agents
+  says so (section 15).
+- A label has 1 to 64 letters, digits, and the characters `.`, `_`, and `-`, and starts with a
+  letter or a digit, so that it carries no escape sequence and can be printed as it is.
+  Another agent can have chosen it, so `status --json` shows it only with `--verbose`, as the
+  purpose. A label needs an owner process: without one, every caller of the user would share
+  it.
+- After a restart of the agent, a label finds its holding only after a touch with a lease id
+  has recorded the new agent process, as for `release --all`. When that touch gives the new
+  process two holdings with one label, banksman refuses the label and names a lease of each
+  holding, instead of choosing one.
 
 - banksman reads the branch from the `HEAD` file of the worktree, and runs no `git`
   process. A detached `HEAD` has no branch, so the directory name is the fallback.
@@ -1062,20 +1092,26 @@ is a setup of the operator, and a project needs nothing for it.
 
 ```
 banksman acquire [--as <part>] [--where <attr><op><value> ...] [--accounts <n>] ...
-                 [--for <text>] [--expect <duration>] [--wait <duration>] [--lease <id>]
-                 [--paid] [--start] [--issue <id>] [--owner-pid <pid>] [--json]
+                 [--for <text>] [--expect <duration>] [--wait <duration>]
+                 [--lease <id> | --holding <label>] [--paid] [--start] [--issue <id>]
+                 [--owner-pid <pid>] [--json]
 banksman enter   --resource <name> --lease <id> --pid <pid> [--pgid <pgid>]  # check, touch, register
 banksman check   --resource <name> --lease <id>                    # touch; exit 0: yours, 3: lost
 banksman leave   --resource <name> --lease <id> --pid <pid>
 banksman run     --lease <id> --resource <name> -- <command> ...   # in a group of its own, fenced
+banksman run     --holding <label> [--resource <name>] [--owner-pid <pid>] -- <command> ...
 banksman run     --where <attr><op><value> ... [--accounts <n>] [--for <text>] [--expect <duration>]
                  [--wait <duration>] [--paid] [--start] [--issue <id>] [--owner-pid <pid>]
                  -- <command> ...
-banksman touch   --lease <id> [--resource <name>] [--expect <duration>] [--owner-pid <pid>]
-banksman release --lease <id> [--resource <name>]                  # the holding, or one resource
+banksman touch   (--lease <id> | --holding <label>) [--resource <name>] [--expect <duration>]
+                 [--owner-pid <pid>]
+banksman release (--lease <id> | --holding <label>) [--resource <name>]
+                 [--owner-pid <pid>]                               # the holding, or one resource
 banksman release --all [--owner-pid <pid>]                         # the leases of this agent
+banksman held    [--owner-pid <pid>] [--json]                      # the holdings of this agent
 banksman status  [--json] [--verbose]
 banksman whoami  [--json]
+banksman agent-guide                                               # the guide for agents
 banksman watch   [--interval <duration>]
 banksman explain --where <attr><op><value> ...
 banksman log     [--since <time>] [--resource <name>] [--json] [--verbose]
@@ -1093,7 +1129,8 @@ Commands that grant a resource print `KEY=value` lines, for example `RESOURCE=`,
 `HANDLE=`, `ACCOUNTS=`, and `LEASE=`, the lease id that the scripts pass back, so that a shell
 script can read them.
 With `--json` they print JSON instead. Exit status 1 is an error, 2 a usage error, 3 a lease
-that is lost, and 4 a request whose matching resources are all in use. `run` exits with the
+that is lost, also a label that names no held holding of the agent process, and 4 a request
+whose matching resources are all in use. `run` exits with the
 status of its command, unless banksman fails before the command starts or the lease is lost.
 
 In the command of `banksman run`, each argument that is exactly `{serial}` becomes the serial
@@ -1147,7 +1184,15 @@ this section names.
   `{serial}` is the serial, and for a kind with an Android preset, `ANDROID_SERIAL` names the
   leased device, also for the connected tests of the Android Gradle plugin.
 - Keep the lease id that `acquire` prints. Pass it to the scripts, and back to `acquire` with
-  `--lease` to keep the same resource.
+  `--lease` to keep the same resource. An agent gives its holding a label with `--holding`
+  instead, and names the holding with the label in later commands (section 9).
+- Give the agents the guide that `banksman agent-guide` prints. It is in the format of a
+  skill, and agents may run the command, so the text always matches the installed banksman.
+  The instructions of the project then only add what is its own, such as the scripts that take
+  the serial.
+- Keep every wait shorter than the time limit of the shell tool of the agent. Claude Code
+  stops a command of its Bash tool after 10 minutes at most, so a longer `--wait` is stopped
+  before it ends. A long run of tests under `banksman run` runs in the background of the tool.
 - Start the granted instance when it does not run, and handle one that already runs:
   discovery can miss an emulator that is still starting. Start it before `banksman run`, not
   inside it: `run` waits for every process that its command leaves in its group.
@@ -1204,8 +1249,8 @@ mutex with `banksman run`:
 
 ```sh
 banksman acquire --as phone --where kind=emulator --where form=phone \
-                 --as port --where kind=port --for "UI tests" --wait 15m
-banksman run --where kind=sdk --wait 10m --for "create an AVD" -- avdmanager create avd ...
+                 --as port --where kind=port --for "UI tests" --wait 5m
+banksman run --where kind=sdk --wait 5m --for "create an AVD" -- avdmanager create avd ...
 ```
 
 ## 16. Roadmap
@@ -1238,6 +1283,9 @@ Done:
   that `admin discover` fetches, paid kinds and `--paid`, and `acquire --start`, which
   reserves, connects, and extends a remote device, with the reservation id in the lease, a
   new connection in `run`, and a take-back that ends only what banksman created.
+- Named holdings: `--holding <label>` for `acquire`, `run`, `touch`, and `release`, and
+  `held`; and the guide for agents, which `banksman agent-guide` prints in the format of a
+  skill.
 
 Next:
 
@@ -1260,6 +1308,13 @@ Next:
   sessions, whether one agent process serves several sessions of an app, and whether the
   Codex background server keeps running after its session ends. `banksman whoami` shows
   what banksman finds in each setup.
+- Can banksman tell the subagents of one session apart? Checked with Claude Code 2.1 and with
+  the Codex command-line tool 0.159: no. A subagent runs its commands in the agent process of
+  its parent, and `banksman whoami` shows the same agent process for both. Claude Code gives a
+  subagent the same `CLAUDE_CODE_SESSION_ID` as its parent and no value of its own. Codex gives
+  it the same `CODEX_SESSION_ID` and its own `CODEX_THREAD_ID`. So the label of a holding is
+  what tells subagents apart (section 9). Should banksman scope labels by `CODEX_THREAD_ID` for
+  Codex, although Claude Code has no such value?
 - Is the idle timeout longer than the longest silent period of a legitimate run, for
   example a cold build that also waits for a build slot? The log records the longest time
   between two touches of each lease that its holder released (section 10).

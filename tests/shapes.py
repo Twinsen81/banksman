@@ -46,6 +46,7 @@ LEASE = {
     "users": [USER],
     "accounts": [str],
     "purpose?": TEXT,
+    "label?": TEXT,
 }
 EVENT = {
     "at": NUMBER,
@@ -109,6 +110,21 @@ SHAPES: dict[str, Any] = {
         "agent": TEXT,
         "issue": TEXT,
         "session": TEXT,
+    },
+    "held": {
+        "schema": int,
+        "owner_pid": int,
+        "leases": [
+            {
+                "label": TEXT,
+                "lease_id": str,
+                "resource": str,
+                "kind": str,
+                "state": str,
+                "serial": TEXT,
+                "handle": TEXT,
+            }
+        ],
     },
     "reap": {
         "schema": int,

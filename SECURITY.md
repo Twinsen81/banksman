@@ -73,7 +73,9 @@ between agents. The JSON that agents read by default carries only validated fiel
 purpose appears in the human console, and in JSON only with `--verbose`. banksman removes
 terminal control sequences from all output and limits the length of the purpose. The other
 holder fields have fixed character sets: an issue id has only letters, digits, and `#._/-`,
-so a branch name that anybody can choose gives a valid issue id or none.
+so a branch name that anybody can choose gives a valid issue id or none. The label that an
+agent gives its holding with `--holding` has only letters, digits, and `._-`, and JSON shows it
+to other agents only with `--verbose`, as the purpose.
 
 **The log is history, not evidence.** `~/.local/state/banksman/log.jsonl` keeps the holder of
 every lease, the purpose included. banksman creates it with mode `0600` in a directory with
@@ -147,7 +149,9 @@ lease stops itself when the lease is lost, or the reaper stops it when the opera
 stopping on. A raw device command that an agent types, for example `adb -s <serial> ...`,
 is not registered and is not stopped. The lease id that scripts pass back is not a secret:
 it keeps a script of an earlier lease from acting on a newer one, and it is no protection
-against a process that reads the lease files.
+against a process that reads the lease files. For the same reason, `banksman held` shows the
+lease ids of an agent process to every caller that names that process, and a label is no
+protection either: any process of the user can name the agent process with `--owner-pid`.
 
 **The adb guard is a guardrail, not a boundary.** When the operator installs it (DESIGN.md,
 section 12), an `adb` wrapper on the `PATH` refuses an agent's device command on the device of
