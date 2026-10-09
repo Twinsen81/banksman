@@ -6,13 +6,14 @@ JSON show the same thing.
 
 from __future__ import annotations
 
+import math
 import os
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from banksman.discovery import FactValue, serial_of
+from banksman.discovery import ENDS, FactValue, handle_of, serial_of
 from banksman.history import ACQUIRE, FORCE_RELEASE, QUARANTINE, RELEASE, VOID, Event
 from banksman.lease import DRAINING, VOID_REASONS, Lease, User, free_by
 from banksman.request import Search
@@ -40,6 +41,12 @@ class Resource:
     error: str | None = None
     # The serial in the lease, or for a resource without a lease, the one that discovery found.
     serial: str | None = None
+    # Each use costs money.
+    paid: bool = False
+    # The id of the reservation of a remote device, from the lease or from discovery.
+    handle: str | None = None
+    # When that reservation ends, in wall-clock time, when discovery knows it.
+    ends: float | None = None
 
 
 @dataclass(frozen=True)
@@ -57,37 +64,47 @@ class Clock:
         return self.wall + (awake - self.awake)
 
 
-def resources(snapshot: Snapshot, found: Search) -> list[Resource]:
+def resources(snapshot: Snapshot, found: Search, paid: Collection[str] = ()) -> list[Resource]:
     """Return every resource that agents may use or that has a lease file.
 
     `found` is a search with one part without clauses: every permitted resource that is present
     now. A resource that discovery finds but that the operator does not permit is never shown,
-    because it can be personal, also to the agents that read the JSON.
+    because it can be personal, also to the agents that read the JSON. `paid` names the kinds
+    whose use costs money.
     """
     present = {candidate.resource: candidate for candidate in found.candidates[0]}
     absent = {name: kind for kind, name in found.absent}
     shown: dict[str, Resource] = {}
     for lease in snapshot.leases:
         candidate = present.get(lease.resource)
+        facts = candidate.facts if candidate is not None else {}
         shown[lease.resource] = Resource(
             lease.resource,
             lease.kind,
             lease.state,
             present=candidate is not None,
-            facts=_shown(candidate.facts) if candidate is not None else {},
+            facts=_shown(facts),
             lease=lease,
             serial=lease.serial,
+            paid=lease.kind in paid,
+            handle=lease.handle or handle_of(facts),
+            ends=_ends(facts),
         )
     for entry in snapshot.unreadable:
         candidate = present.get(entry.resource)
+        facts = candidate.facts if candidate is not None else {}
+        kind = candidate.kind if candidate is not None else absent.get(entry.resource)
         shown[entry.resource] = Resource(
             entry.resource,
-            candidate.kind if candidate is not None else absent.get(entry.resource),
+            kind,
             UNREADABLE,
             present=candidate is not None,
-            facts=_shown(candidate.facts) if candidate is not None else {},
+            facts=_shown(facts),
             error=entry.error,
-            serial=serial_of(candidate.facts) if candidate is not None else None,
+            serial=serial_of(facts),
+            paid=kind in paid,
+            handle=handle_of(facts),
+            ends=_ends(facts),
         )
     for name, candidate in present.items():
         if name not in shown:
@@ -98,15 +115,33 @@ def resources(snapshot: Snapshot, found: Search) -> list[Resource]:
                 True,
                 _shown(candidate.facts),
                 serial=serial_of(candidate.facts),
+                paid=candidate.paid,
+                handle=handle_of(candidate.facts),
+                ends=_ends(candidate.facts),
             )
     for name, kind in absent.items():
         if name not in shown:
-            shown[name] = Resource(name, kind, ABSENT, False)
+            shown[name] = Resource(name, kind, ABSENT, False, paid=kind in paid)
     return sorted(shown.values(), key=lambda each: (each.kind is None, each.kind or "", each.name))
 
 
 def _shown(facts: Mapping[str, FactValue]) -> dict[str, FactValue]:
     return {name: facts[name] for name in SHOWN_FACTS if name in facts}
+
+
+def _ends(facts: Mapping[str, FactValue]) -> float | None:
+    # A discover hook can set the fact to any text, so only a valid time counts.
+    text = facts.get(ENDS)
+    if not isinstance(text, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return None
+    value = moment.timestamp()
+    return value if math.isfinite(value) else None
 
 
 def owner_pids(items: Sequence[Resource]) -> list[int]:
@@ -141,7 +176,14 @@ def _resource_json(
         "kind": item.kind,
         "state": item.state,
         "present": item.present,
+        "paid": item.paid,
         "serial": item.serial,
+        "handle": item.handle,
+        # When the reservation of a remote device ends. "in" counts wall-clock time, because
+        # the service ends the reservation also while the machine sleeps.
+        "ends": None
+        if item.ends is None
+        else {"at": utc(item.ends), "in": round(item.ends - clock.wall)},
         "facts": dict(item.facts),
         "lease": None if item.lease is None else lease_json(item.lease, clock, running, verbose),
     }
@@ -164,6 +206,7 @@ def lease_json(
         "issue": lease.issue,
         "session": lease.session,
         "serial": lease.serial,
+        "handle": lease.handle,
         "acquired_at": utc(lease.acquired_at),
         "touched_at": utc(lease.touched_at),
         "free_by": None
@@ -234,11 +277,12 @@ def status_rows(
         lease = item.lease
         facts = [str(item.facts[name]) if name in item.facts else NONE for name in SHOWN_FACTS]
         serial = item.serial or NONE
+        kind = item.kind or NONE
+        if item.paid:
+            kind = f"{kind} (paid)"
         if lease is None:
             holder = NONE if item.error is None else f"lease file: {item.error}"
-            rows.append(
-                [item.name, item.kind or NONE, serial, *facts, item.state, *[NONE] * 6, holder]
-            )
+            rows.append([item.name, kind, serial, *facts, item.state, *[NONE] * 6, holder])
             continue
         ends = free_by(lease, running)
         times = [NONE, NONE, NONE]
@@ -251,7 +295,7 @@ def status_rows(
         rows.append(
             [
                 item.name,
-                lease.kind,
+                kind,
                 serial,
                 *facts,
                 lease.state,

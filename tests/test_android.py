@@ -109,6 +109,28 @@ def test_a_device_has_its_facts_and_its_google_accounts():
     ]
 
 
+def test_a_port_forward_is_not_offered_as_a_device():
+    adb = FakeAdb({"devices": "List of devices attached\nlocalhost:49920\tdevice\n"})
+    document = android.devices(Android(sdk=SDK), run=adb)
+    assert document["instances"] == []
+    assert document["notes"] == [
+        "localhost:49920 is a port forward, so it is not offered as a device; a kind with the"
+        " android-remote preset offers it"
+    ]
+    assert adb.commands == [["devices"]]
+
+
+def test_a_remote_device_keeps_a_form_that_its_properties_do_not_name():
+    adb = FakeAdb({"-s localhost:49920 shell getprop": "[ro.product.device]: [gts9wifi]\n"})
+    settings = Android(sdk=SDK)
+    assert android.describe(settings, "localhost:49920", form=None, run=adb) == {
+        "codename": "gts9wifi"
+    }
+    tablet = "[ro.build.characteristics]: [tablet,nosdcard]\n"
+    adb = FakeAdb({"-s localhost:49920 shell getprop": tablet})
+    assert android.describe(settings, "localhost:49920", form=None, run=adb) == {"form": "tablet"}
+
+
 def test_the_manufacturer_can_come_from_the_vendor_properties():
     adb = FakeAdb(
         {

@@ -35,11 +35,18 @@ def test_a_valid_document():
         (
             Instance(
                 "R5CR1234ABC",
-                {"form": "phone", "api": 35, "rooted": False, "model": "Pixel 7", "kind": "device"},
+                {
+                    "form": "phone",
+                    "api": 35,
+                    "rooted": False,
+                    "model": "Pixel 7",
+                    "kind": "device",
+                    "paid": False,
+                },
                 ("qa@example.test",),
                 "slow",
             ),
-            Instance("R5CR5678DEF", {"kind": "device"}),
+            Instance("R5CR5678DEF", {"kind": "device", "paid": False}),
         ),
         ("one device is unauthorized",),
     )
@@ -51,12 +58,13 @@ def test_the_kind_fact_is_always_the_kind():
 
 
 def test_a_hook_cannot_set_the_attributes_that_banksman_sets():
-    facts = {"account": True, "tag": "lab", "form": "phone"}
-    found = parse("device", document({"name": "a", "facts": facts}))
-    assert found.instances[0].facts == {"form": "phone", "kind": "device"}
+    facts = {"account": True, "tag": "lab", "paid": False, "form": "phone"}
+    found = parse("device", document({"name": "a", "facts": facts}), paid=True)
+    assert found.instances[0].facts == {"form": "phone", "kind": "device", "paid": True}
     assert found.notes == (
         "a: banksman sets the fact account itself, so it is left out",
         "a: banksman sets the fact tag itself, so it is left out",
+        "a: banksman sets the fact paid itself, so it is left out",
     )
 
 
@@ -82,7 +90,7 @@ def test_instances_that_are_not_valid_are_left_out_without_showing_their_names()
         ),
     )
     assert [instance.name for instance in found.instances] == ["a"]
-    assert found.instances[0].facts == {"kind": "device"}
+    assert found.instances[0].facts == {"kind": "device", "paid": False}
     assert "escape" not in " ".join(found.notes)
     assert "instructions" not in " ".join(found.notes)
     assert found.notes[-1] == "a is listed twice; only the first is used"
@@ -100,7 +108,7 @@ def test_facts_that_are_not_valid_are_left_out():
         "list": ["a"],
     }
     found = parse("device", document({"name": "a", "facts": facts}))
-    assert found.instances[0].facts == {"form": "phone", "kind": "device"}
+    assert found.instances[0].facts == {"form": "phone", "kind": "device", "paid": False}
     assert len(found.notes) == len(facts) - 1
 
 
@@ -159,7 +167,7 @@ def test_a_preset_returns_the_same_document(monkeypatch):
     monkeypatch.setattr(android, "devices", lambda settings, accounts: documents["devices"])
     emulator = discovery.discover(Kind("emulator", preset="android-emulator"), Config())
     device = discovery.discover(Kind("device", preset="android-device"), Config())
-    assert emulator.instances[0].facts == {"api": 35, "kind": "emulator"}
+    assert emulator.instances[0].facts == {"api": 35, "kind": "emulator", "paid": False}
     assert device.instances[0].accounts == ()
 
 

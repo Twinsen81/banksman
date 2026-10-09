@@ -224,3 +224,100 @@ class FakeSdk:
 
     def config(self) -> str:
         return f'[android]\nsdk = "{self.sdk}"\navd_home = "{self.avd_home}"\n'
+
+
+FAKE_ANDROID = """\
+import json, os, sys, time
+here = os.path.dirname(os.path.abspath(__file__))
+arguments = sys.argv[1:]
+with open(os.path.join(here, "calls"), "a") as calls:
+    calls.write(" ".join(arguments) + "\\n")
+# The options that every call gets do not choose the answer.
+key = " ".join(
+    argument for argument in arguments if not argument.startswith(("--project=", "--sdk="))
+)
+answers = json.load(open(os.path.join(here, "answers.json")))
+answer = answers.get(key)
+if answer is None:
+    # A key that ends in * matches every call that starts with the rest of it.
+    answer = next(
+        (
+            value
+            for pattern, value in answers.items()
+            if pattern.endswith("*") and key.startswith(pattern[:-1])
+        ),
+        None,
+    )
+if answer is None:
+    sys.stderr.write("Error: INVALID_ARGUMENT: the fake has no answer for this call\\n")
+    sys.exit(1)
+for index, chunk in enumerate(answer.get("chunks", [])):
+    if index:
+        time.sleep(answer.get("pause", 0))
+    sys.stdout.write(chunk)
+    sys.stdout.flush()
+for path, text in answer.get("append", {}).items():
+    with open(path, "a") as file:
+        file.write(text)
+if answer.get("err"):
+    sys.stderr.write(answer["err"])
+sys.exit(answer.get("status", 0))
+"""
+
+
+class FakeAndroidCli:
+    """An android command line tool that answers from a table that the test sets.
+
+    No test runs the real tool or calls the network. The fake records each call in `calls`, and
+    chooses the answer by the arguments without --project and --sdk; a key that ends in *
+    matches by its start. An answer prints its chunks
+    with a pause between them, appends text to files, as the daemon of a connection writes its
+    line into the properties file, and exits with its status.
+    """
+
+    PROJECT = "my-project"
+
+    def __init__(self, root: Path) -> None:
+        self.directory = root / "android-cli"
+        self.directory.mkdir(parents=True)
+        self.path = self.directory / "android"
+        self.path.write_text(f"#!{sys.executable}\n{FAKE_ANDROID}")
+        self.path.chmod(0o755)
+        self.state = root / "android-cli-state"
+        self.state.mkdir()
+        self.answer({})
+
+    @property
+    def connections_file(self) -> Path:
+        return self.state / "active-connections.properties"
+
+    def answer(self, answers) -> None:
+        (self.directory / "answers.json").write_text(json.dumps(answers))
+
+    def connected(self, ports) -> None:
+        """Write the properties file as the daemons write it for these reservations."""
+        lines = "".join(
+            f"projects/{self.PROJECT}/deviceSessions/session-{handle}={port}\n"
+            for handle, port in ports.items()
+        )
+        self.connections_file.write_text(f"#Fri Oct 09 09:44:08 CEST 2026\n{lines}")
+
+    def calls(self) -> list[str]:
+        path = self.directory / "calls"
+        if not path.exists():
+            return []
+        # Every call names the project and the SDK; the tests compare the rest.
+        return [
+            " ".join(
+                word for word in line.split() if not word.startswith(("--project=", "--sdk="))
+            )
+            for line in path.read_text().splitlines()
+        ]
+
+    def full_calls(self) -> list[str]:
+        path = self.directory / "calls"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def config(self) -> str:
+        """The lines of [android] that name the tool and its files."""
+        return f'cli = "{self.path}"\ncli_state = "{self.state}"\n'

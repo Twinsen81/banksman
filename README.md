@@ -7,8 +7,9 @@ agents never use the same device at the same time, and a dead run never holds on
 > (lease files, void triggers, and the reaper), resource kinds as configuration, fencing,
 > discovery with the allowlist, holder identity, requests by properties, joint acquire with
 > accounts, the console (`status`, `watch`, and `log`), the supervised run (`banksman run`)
-> with a helper for the scripts of a project, optional build slots for Gradle, and an
-> optional adb guard.
+> with a helper for the scripts of a project, optional build slots for Gradle, an optional
+> adb guard, and paid remote devices of Android Device Streaming that banksman reserves on
+> `--start`.
 > `explain` and the queue of the callers that wait are not written yet. The design is in
 > [docs/DESIGN.md](docs/DESIGN.md).
 

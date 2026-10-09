@@ -108,6 +108,12 @@ class Choice:
     reset: bool = False
     # The allowed accounts that are signed in on the instance now, in the order of choice.
     accounts: tuple[str, ...] = ()
+    # The caller starts the instance, which does not run, before the holder uses it. The lease
+    # is booting until then, as for a reset.
+    start: bool = False
+    # Each use costs money, so only a request that acknowledges the cost gets the resource,
+    # unless the caller keeps a lease on it.
+    paid: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,7 +177,7 @@ def default_quarantine_dir() -> Path:
         return Path(state_dir).with_name(f"{Path(state_dir).name}-quarantine")
     # Outside /tmp: cleaners of temporary files delete old files there, and macOS empties it at
     # boot, but a quarantine lasts until a person releases it.
-    return _lasting_dir(QUARANTINE_DIR_ENV) / "quarantine"
+    return lasting_dir(QUARANTINE_DIR_ENV) / "quarantine"
 
 
 def default_log_path() -> Path:
@@ -183,10 +189,10 @@ def default_log_path() -> Path:
         return Path(state_dir).with_name(f"{Path(state_dir).name}-log.jsonl")
     # Outside /tmp, as the quarantines: the history must outlive restarts and cleaners of
     # temporary files.
-    return _lasting_dir(LOG_ENV) / "log.jsonl"
+    return lasting_dir(LOG_ENV) / "log.jsonl"
 
 
-def _lasting_dir(variable: str) -> Path:
+def lasting_dir(variable: str) -> Path:
     # The home directory comes from the user database, as for the configuration file, so that
     # every caller of one user finds the same files.
     try:
@@ -270,6 +276,7 @@ class Store:
         expect: float | None = None,
         reset_time: float = 0.0,
         seen: Iterable[SerialSeen] = (),
+        paid: bool = False,
     ) -> list[Granted] | None:
         """Grant a resource for every need, all or nothing, or return None while that cannot be
         done because resources or accounts are in use.
@@ -284,10 +291,14 @@ class Store:
         resource is never granted, also not to the same owner, because several agents can work
         in one worktree.
 
-        When a choice needs a reset, every new lease of the request is booting and names this
-        process until the caller marks it ready, so that no other process frees it while the
-        resets run. The resets run one after another, and `reset_time` is the longest that one
-        takes, so each boot deadline also counts that time for every reset of the request.
+        When a choice needs a reset or a start, every new lease of the request is booting and
+        names this process until the caller marks it ready, so that no other process frees it
+        while the resets and the starts run. They run one after another, and `reset_time` is
+        the longest that one reset takes, so each boot deadline also counts that time for every
+        reset of the request, and the boot timeout of every other start.
+
+        A paid choice is granted only with `paid`, the acknowledgement of the cost, or when the
+        caller keeps a lease on it.
         """
         for need in needs:
             for choice in need.choices:
@@ -306,7 +317,7 @@ class Store:
                 for account in entry.accounts
             }
             kept = {} if keep is None else self._holding(entries, keep)
-            parts = [_part(need, held, taken, kept) for need in needs]
+            parts = [_part(need, held, taken, kept, paid) for need in needs]
             picks = assign(parts)
             if picks is None:
                 return None
@@ -316,7 +327,9 @@ class Store:
                 next(each for each in need.choices if each.resource == pick.resource)
                 for need, pick in zip(needs, picks)
             ]
-            resets = sum(choice.reset for choice in choices if choice.resource not in kept)
+            new = [choice for choice in choices if choice.resource not in kept]
+            resets = sum(choice.reset for choice in new)
+            starts = [choice for choice in new if choice.start]
             granted: list[tuple[str, tuple[str, ...], bool]] = []
             for choice, pick in zip(choices, picks):
                 current = kept.get(pick.resource)
@@ -330,17 +343,19 @@ class Store:
                     serials[lease.resource] = self._write(lease)
                     granted.append((lease.resource, pick.accounts, True))
                     continue
-                state = BOOTING if resets else READY
+                state = BOOTING if resets or starts else READY
                 lease = self._new_lease(
                     choice.resource, choice.kind, holder, state, choice.timeouts, expect, holding
                 )
                 lease = replace(lease, accounts=pick.accounts)
-                if resets:
+                if resets or starts:
                     me = os.getpid()
+                    others = sum(each.timeouts.boot_timeout for each in starts if each != choice)
                     lease = replace(
                         lease,
                         boot_deadline=lease.touched
                         + choice.timeouts.boot_timeout
+                        + others
                         + resets * reset_time,
                         reaper_pid=me,
                         reaper_started=self._start_time(me),
@@ -377,6 +392,29 @@ class Store:
         with self._lock():
             _, serials = self._see(self._scan(), seen)
         return serials
+
+    def holding(self, lease_id: str) -> dict[str, Lease]:
+        """Return the valid held leases of the holding of this lease, by resource."""
+        with self._lock():
+            return self._holding(self._scan(), lease_id)
+
+    def started(
+        self, resource: str, lease_id: str, *, handle: str, serial: str | None = None
+    ) -> Lease:
+        """Record what the start of the instance of a lease found: the id of its reservation as
+        soon as the start knows it, and then its serial.
+
+        The id is recorded in any state of the lease, so that the reaper can end the
+        reservation also when the lease became void during the start. The serial is recorded
+        only while the lease is held, as a discovery records it.
+        """
+        with self._lock():
+            lease = self._write(replace(self._current(resource, lease_id), handle=handle))
+            if serial is None or lease.state not in HELD:
+                return lease
+            seen = SerialSeen(resource, lease.kind, serial, self.system.clock(), handle)
+            _, serials = self._see(self._scan(), [seen])
+            return serials.get(resource, lease)
 
     def ready(self, resource: str, lease_id: str) -> Lease:
         """End the boot or the reset of an instance: the holder may use it now."""
@@ -1036,9 +1074,11 @@ class Store:
                 _replace_file(self.directory, name, _read_file(self.quarantine_dir / name))
 
 
-def _part(need: Need, held: set[str], taken: set[str], kept: dict[str, Lease]) -> Part:
+def _part(
+    need: Need, held: set[str], taken: set[str], kept: dict[str, Lease], paid: bool
+) -> Part:
     """Return the options of a need that the caller can get now: its own kept leases first,
-    then the resources that have no lease."""
+    then the resources that have no lease. A paid resource without a kept lease needs `paid`."""
     options = []
     for choice in need.choices:
         current = kept.get(choice.resource)
@@ -1054,7 +1094,7 @@ def _part(need: Need, held: set[str], taken: set[str], kept: dict[str, Lease]) -
             tuple(account for account in choice.accounts if account not in taken),
         )
         for choice in need.choices
-        if choice.resource not in held
+        if choice.resource not in held and (paid or not choice.paid)
     )
     return Part(tuple(options), need.accounts)
 
@@ -1105,7 +1145,12 @@ def _see_serial(leases: dict[str, Lease], seen: SerialSeen) -> set[str]:
         leases[other.resource] = replace(other, serial=None, serial_seen=seen.at)
         changed.add(other.resource)
     if lease is not None:
-        leases[lease.resource] = replace(lease, serial=seen.serial, serial_seen=seen.at)
+        # A handle stays when discovery does not report one: the reservation can outlive the
+        # connection of its device.
+        handle = seen.handle if seen.handle is not None else lease.handle
+        leases[lease.resource] = replace(
+            lease, serial=seen.serial, serial_seen=seen.at, handle=handle
+        )
         changed.add(lease.resource)
     return changed
 

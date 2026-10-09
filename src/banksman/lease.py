@@ -65,6 +65,8 @@ class SerialSeen:
     serial: str | None
     # When the discovery started, in awake time.
     at: float
+    # The id of the reservation of a remote device, when discovery knows it.
+    handle: str | None = None
 
 
 @dataclass(frozen=True)
@@ -194,6 +196,10 @@ class Lease:
     # When the discovery that set or cleared the serial started, in awake time. A discovery that
     # started earlier is out of date, and does not change the serial.
     serial_seen: float | None = None
+    # The id of the reservation of a remote device, from discovery or from a start that banksman
+    # performed, never from the holder. A lease keeps it while the device is not connected, so
+    # that banksman can connect the device again, or end the reservation.
+    handle: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -227,6 +233,7 @@ class Lease:
             "drain_timeout": self.drain_timeout,
             "longest_quiet": self.longest_quiet,
             "serial": self.serial,
+            "handle": self.handle,
             "users": [user.to_json() for user in self.users],
             "accounts": list(self.accounts),
             "void_reason": self.void_reason,
@@ -277,6 +284,7 @@ class Lease:
             longest_quiet=_get(data, "longest_quiet", _is_seconds),
             serial=_get(data, "serial", _optional(_is_resource)),
             serial_seen=_get(awake, "serial_seen", _optional(_is_number)),
+            handle=_get(data, "handle", _optional(_is_resource)),
             users=tuple(User.from_json(user) for user in users),
             accounts=tuple(accounts),
             void_reason=_get(data, "void_reason", _optional(_is_void_reason)),

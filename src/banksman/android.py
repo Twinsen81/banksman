@@ -3,7 +3,7 @@
 This is the only module that runs `adb`. Discovery only reads: it lists the devices, reads
 system properties and the accounts of a device, asks a running emulator for its AVD name, and
 reads the AVD files. Each preset returns the same document that a discover hook prints. The adb
-guard lists the devices here too.
+guard, and the preset for remote devices, use adb through this module too.
 """
 
 from __future__ import annotations
@@ -40,6 +40,9 @@ FACTS = (
 _MAX_OUTPUT = 1024 * 1024
 _MAX_INI_FILE = 64 * 1024
 _EMULATOR_PREFIX = "emulator-"
+# The serial of a device that a program forwards to the adb server from a port on this machine,
+# such as a remote device of Android Device Streaming.
+FORWARDED_PREFIX = "localhost:"
 _PROPERTY = re.compile(r"^\[([^\]]+)\]: \[(.*)\]$")
 _ACCOUNTS_HEADER = re.compile(r"^\s*Accounts: [0-9]+\s*$")
 _ACCOUNT = re.compile(r"^\s*Account \{name=(?P<name>.*), type=(?P<type>[^,}]*)\}\s*$")
@@ -135,6 +138,14 @@ def devices(settings: Android, run: Run | None = None, *, accounts: bool = True)
     for serial, state in listed:
         if serial.startswith(_EMULATOR_PREFIX):
             continue
+        # Such a device has no USB address, and it gets another port on every connection, so
+        # it would come back under another name each time.
+        if serial.startswith(FORWARDED_PREFIX):
+            notes.append(
+                f"{serial} is a port forward, so it is not offered as a device; a kind with the"
+                " android-remote preset offers it"
+            )
+            continue
         if state != "device":
             notes.append(f"{serial} is {state}, so it is not offered")
             continue
@@ -152,6 +163,25 @@ def devices(settings: Android, run: Run | None = None, *, accounts: bool = True)
             instance.update(found)
         instances.append(instance)
     return {"schema": DISCOVER_SCHEMA, "instances": instances, "notes": notes}
+
+
+def describe(
+    settings: Android, serial: str, *, form: str | None = "phone", run: Run | None = None
+) -> Document:
+    """Return the facts that the system properties of a connected device give.
+
+    `form` is the form when the properties do not name one.
+    """
+    run = run_program if run is None else run
+    getprop = run(_adb(adb_path(settings), serial, "shell", "getprop"), ADB_TIMEOUT_SECONDS)
+    return _device_facts(getprop, form)
+
+
+def signed_in(settings: Android, serial: str, run: Run | None = None) -> Document:
+    """Return the accounts of a connected device as a discover document gives them: the list,
+    or None and a note."""
+    run = run_program if run is None else run
+    return _accounts(run, adb_path(settings), serial)
 
 
 def transports(
@@ -308,7 +338,7 @@ def _accounts(run: Run, adb: str, serial: str) -> Document:
     return {"accounts": accounts} if note is None else {"accounts": accounts, "note": note}
 
 
-def _device_facts(getprop: str) -> Document:
+def _device_facts(getprop: str, form: str | None = "phone") -> Document:
     properties = parse_properties(getprop)
     facts: Document = {}
     # The manufacturer as the device gives it, for example "samsung" or "Google". A marketing
@@ -327,12 +357,13 @@ def _device_facts(getprop: str) -> Document:
     if properties.get("ro.product.cpu.abi"):
         facts["abi"] = properties["ro.product.cpu.abi"]
     characteristics = properties.get("ro.build.characteristics", "")
-    for word, form in (("watch", "watch"), ("tablet", "tablet"), ("tv", "tv")):
+    for word, named in (("watch", "watch"), ("tablet", "tablet"), ("tv", "tv")):
         if word in characteristics.split(","):
-            facts["form"] = form
+            facts["form"] = named
             break
     else:
-        facts["form"] = "phone"
+        if form is not None:
+            facts["form"] = form
     return facts
 
 

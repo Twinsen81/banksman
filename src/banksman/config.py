@@ -22,7 +22,8 @@ MAX_COUNT = 1000
 MAX_RANK = 1000
 ANDROID_EMULATOR = "android-emulator"
 ANDROID_DEVICE = "android-device"
-PRESETS = (ANDROID_EMULATOR, ANDROID_DEVICE)
+ANDROID_REMOTE = "android-remote"
+PRESETS = (ANDROID_EMULATOR, ANDROID_DEVICE, ANDROID_REMOTE)
 # The agents whose commands banksman recognizes. Each is the last part of the path of the
 # agent's executable, as the process list shows it.
 DEFAULT_AGENTS = ("claude", "codex")
@@ -34,6 +35,8 @@ _SOURCE_KEYS = ("count", "instances", "discover", "preset")
 _KIND_KEYS = (
     *_SOURCE_KEYS,
     "preselect",
+    "project",
+    "paid",
     "rank",
     "on_acquire",
     "on_void",
@@ -42,10 +45,14 @@ _KIND_KEYS = (
 )
 _MAX_PATTERNS = 100
 _MAX_PATTERN_LENGTH = 256
+# A Google Cloud project id, also a domain-scoped one such as example.com:my-project. It becomes
+# an argument of the android command line tool, and a part of the names in its files.
+_PROJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _DURATION = re.compile(r"([0-9]{1,7})([smh])")
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 60 * 60}
 _OFF = "off"
+_DEFAULT_RANKS = {ANDROID_DEVICE: 1, ANDROID_REMOTE: 2}
 
 
 class ConfigError(BanksmanError):
@@ -80,6 +87,10 @@ class Kind:
     # Name patterns of the instances that `admin discover` selects at first. They give no
     # access by themselves: only the inventory does.
     preselect: tuple[str, ...] = ()
+    # Each use of an instance costs money, so a request gets one only with --paid.
+    paid: bool = False
+    # The Google Cloud project of the android-remote preset.
+    project: str | None = None
 
     @property
     def discovered(self) -> bool:
@@ -107,10 +118,15 @@ class HolderRules:
 
 @dataclass(frozen=True)
 class Android:
-    """Where the Android presets find the SDK and the emulators. None means the default place."""
+    """Where the Android presets find the SDK, the emulators, and the android command line tool.
+    None means the default place."""
 
     sdk: Path | None = None
     avd_home: Path | None = None
+    # The android command line tool, which reserves remote devices. It has no default place.
+    cli: Path | None = None
+    # Where that tool keeps its files about the connections to remote devices.
+    cli_state: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -211,12 +227,21 @@ def _config(data: dict[str, object]) -> Config:
     _check_unique_instances(kinds)
     accounts = _table(data.get("accounts", {}), "accounts")
     _check_keys(accounts, "accounts", ("preselect",))
+    android = _android(_table(data.get("android", {}), "android"))
+    remote = next((kind for kind in kinds.values() if kind.preset == ANDROID_REMOTE), None)
+    if remote is not None and android.cli is None:
+        raise _Invalid(
+            "android.cli",
+            f"kind {remote.name} uses the {ANDROID_REMOTE} preset, which needs the path of the"
+            " android command line tool. Run `command -v android`, and put the path that it"
+            " prints here",
+        )
     return Config(
         defaults=defaults,
         kinds=kinds,
         holder=_holder(_table(data.get("holder", {}), "holder")),
         account_preselect=_patterns(accounts.get("preselect"), "accounts.preselect"),
-        android=_android(_table(data.get("android", {}), "android")),
+        android=android,
         guard=_guard(_table(data.get("guard", {}), "guard")),
     )
 
@@ -252,10 +277,13 @@ def _holder(table: dict[str, object]) -> HolderRules:
 
 
 def _android(table: dict[str, object]) -> Android:
-    _check_keys(table, "android", ("sdk", "avd_home"))
+    _check_keys(table, "android", ("sdk", "avd_home", "cli", "cli_state"))
     return Android(
-        sdk=_directory(table.get("sdk"), "android.sdk"),
-        avd_home=_directory(table.get("avd_home"), "android.avd_home"),
+        sdk=_absolute_path(table.get("sdk"), "android.sdk"),
+        avd_home=_absolute_path(table.get("avd_home"), "android.avd_home"),
+        # Not a program that the PATH finds, for the same reason as the SDK.
+        cli=_absolute_path(table.get("cli"), "android.cli"),
+        cli_state=_absolute_path(table.get("cli_state"), "android.cli_state"),
     )
 
 
@@ -264,10 +292,10 @@ def _guard(table: dict[str, object]) -> Guard:
     return Guard(strict=_boolean(table.get("strict", False), "guard.strict"))
 
 
-def _directory(value: object, where: str) -> Path | None:
+def _absolute_path(value: object, where: str) -> Path | None:
     if value is None:
         return None
-    # The same reason as for a hook program: every caller must find the same directory.
+    # The same reason as for a hook program: every caller must find the same file.
     if not isinstance(value, str) or "\x00" in value or not os.path.isabs(value):
         raise _Invalid(where, "must be an absolute path")
     return Path(value)
@@ -320,9 +348,21 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
             f"{where}.preselect",
             "applies only to a kind whose instances come from discover or a preset",
         )
-    # Physical devices are scarcer than emulators, so a request that does not name a kind gets
-    # an instance of another kind first.
-    rank = table.get("rank", 1 if preset == ANDROID_DEVICE else 0)
+    project = table.get("project")
+    if preset == ANDROID_REMOTE:
+        if not isinstance(project, str) or _PROJECT.fullmatch(project) is None:
+            raise _Invalid(
+                f"{where}.project",
+                f"the {ANDROID_REMOTE} preset needs the id of the Google Cloud project, such as"
+                " \"my-project\": 1 to 64 letters, digits, and the characters '.', '_', ':',"
+                " and '-'",
+            )
+    elif project is not None:
+        raise _Invalid(f"{where}.project", f"applies only to the {ANDROID_REMOTE} preset")
+    # Physical devices are scarcer than emulators, and a remote device costs money, so a request
+    # that does not name a kind gets an emulator first, then a physical device, then a remote
+    # device.
+    rank = table.get("rank", _DEFAULT_RANKS.get(preset, 0))  # type: ignore[arg-type]
     return Kind(
         name=name,
         timeouts=_timeouts(table, where, defaults),
@@ -335,6 +375,8 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
         discover=discover,
         preset=preset,  # type: ignore[arg-type]
         preselect=preselect,
+        paid=_boolean(table.get("paid", preset == ANDROID_REMOTE), f"{where}.paid"),
+        project=project,  # type: ignore[arg-type]
     )
 
 
