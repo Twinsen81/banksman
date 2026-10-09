@@ -81,11 +81,12 @@ leases instead.
 - **States.** `booting`, then `ready`, then `draining`, then released. A resource that
   cannot be taken back safely becomes `quarantined`, and stays out of use until a person
   runs `banksman admin release --force`.
-- **Lease before start.** banksman starts nothing. A run takes the lease before it starts the
-  instance, so an instance that is still starting always has a lease, and cannot be
-  mistaken for an orphan. A lease is `booting` only while the kind's `on_acquire` hook
-  resets the instance (section 5), with its own deadline, so that a caller that ends in the
-  middle frees the resource soon.
+- **Lease before start.** A run takes the lease before it starts the instance, so an instance
+  that is still starting always has a lease, and cannot be mistaken for an orphan. banksman
+  starts an instance only on `--start`, and only for a kind that it can start (section 6). A
+  lease is `booting` only while banksman starts the instance, or the kind's `on_acquire` hook
+  resets it (section 5), with its own deadline, so that a caller that ends in the middle frees
+  the resource soon.
 - **Void triggers.** A lease is void when any of these is true. The defaults are starting
   values, to be tuned by measurement. The operator can change each of them in the
   configuration, for all kinds or for one kind (section 5). A lease keeps the values that
@@ -123,20 +124,21 @@ leases instead.
   boot, so the boot id also keeps the deadlines of two boots apart.
 - **Reaping in two steps.** Under the lock, the reaper marks a void lease `draining`, which
   fails every ownership check, and records its own pid and start time in the lease. Outside
-  the lock, it ends the instance with the kind's `on_void` hook (section 5), and stops the
-  registered scripts if stopping is on (section 4). Then, under the lock again, and only if
+  the lock, it ends the instance: a reservation that banksman created for a remote device
+  (section 8), then the kind's `on_void` hook (section 5). It also stops the registered
+  scripts if stopping is on (section 4). Then, under the lock again, and only if
   the file still holds the same lease, it deletes the lease when every registered script has
   ended. Otherwise the lease drains until its scripts end, and later commands check them
   again. Only one reaper takes a lease back: another reaper leaves a `draining` lease alone
   while the reaper named in it runs, and finishes it only after that reaper has ended. So a
-  late take-back never acts on a newer lease. A lease whose instance `acquire` resets names
-  that process in the same way (section 6): when the lease becomes void during the reset, it
-  drains, and it is taken back only after that process has ended. So a take-back never runs
-  next to a reset.
+  late take-back never acts on a newer lease. A lease whose instance `acquire` starts or resets
+  names that process in the same way (section 6): when the lease becomes void during the start
+  or the reset, it drains, and it is taken back only after that process has ended. So a
+  take-back never runs next to a start or a reset.
 - **The serial.** A lease of an instance that runs records its serial: the address that tools
-  such as adb use, for example `emulator-5554`. Only discovery sets it (section 8), never the
-  holder, because `banksman run` and the hooks act on this address, and a wrong one would make
-  them act on the instance of another holder. Every command that runs discovery records what
+  such as adb use, for example `emulator-5554`. Only discovery (section 8), or a start that
+  banksman performs (section 6), sets it, never the holder, because `banksman run` and the hooks
+  act on this address, and a wrong one would make them act on the instance of another holder. Every command that runs discovery records what
   it finds in the held leases of the kind: `acquire`, `run`, `status`, and `watch`. A serial
   that discovery reports is recorded. An instance that reports no serial and does not run loses
   its serial, because an emulator takes the lowest free console port, and the next emulator
@@ -149,6 +151,10 @@ leases instead.
   not a touch. `banksman run` gives its command only a serial that its own discovery confirms
   before the command starts: a discovery that fails cannot tell whether another instance has
   the serial by now.
+- **The handle.** A lease of a remote device (section 8) also records the id of its
+  reservation, its handle. Discovery or a start that banksman performs sets it, never the
+  holder. Discovery never clears it: the reservation can outlive the connection of its device,
+  and banksman uses the handle to connect the device again, or to end the reservation.
 - **Damaged lease files.** A lease file with a newer lease schema stops every command,
   because two versions of banksman must not share one state directory. A lease file that
   cannot be read keeps its resource out of use, and `status` shows it. Other resources are
@@ -262,8 +268,13 @@ not code.
   because each resource has one lease file. Counted kinds need no hooks.
 - **Rank.** When a request matches instances of several kinds, the kind with the lower `rank`
   is chosen first (section 6). A rank is a whole number from 0 to 1000. It is 0 by default,
-  and 1 for a kind with the `android-device` preset, because physical devices are usually
-  scarcer than emulators.
+  1 for a kind with the `android-device` preset, because physical devices are usually
+  scarcer than emulators, and 2 for a kind with the `android-remote` preset.
+- **Paid kinds.** `paid = true` marks a kind whose every use costs money, such as the remote
+  devices of a cloud service. A request gets a paid resource only with `--paid`, and only
+  after every resource that costs nothing (section 6). It is false by default, and true by
+  default for the `android-remote` preset; the operator can set it either way. banksman knows
+  no price: it marks the kind as paid, and the lease bounds how long a use lasts.
 - **Timeouts.** `[defaults]` sets the timeouts of section 3 for every kind, and a kind can
   set its own. A duration is a whole number and a unit: `90s`, `20m`, or `3h`.
   `idle_timeout = "off"` turns the idle timeout off, for example for build slots. An
@@ -306,7 +317,8 @@ not code.
 - **`on_void`** is a command that ends a void instance, for example one that kills an
   emulator. The reaper runs it when it takes back a void lease of the kind. Only a declared
   hook lets the reaper end an instance: banksman ships no such command, and without one the
-  reaper ends nothing. If the hook exits with status 0, the instance is gone. If it fails,
+  reaper ends nothing, with one exception: the reaper ends the reservation of a remote device
+  that banksman itself created with `--start` (section 8), and then runs the hook. If the hook exits with status 0, the instance is gone. If it fails,
   does not end in time, or cannot start, the lease is quarantined. The reaper reads the hook
   from the current configuration, not from the lease, so when the operator removes a hook,
   it stops at once, also for leases that are already void. The serial in the lease can be old,
@@ -327,7 +339,8 @@ not code.
   reaps, and a program that one caller's `PATH` finds can be missing for another caller.
   banksman runs it without a shell, in the directory `/`, with no input, and with
   `BANKSMAN_RESOURCE` and `BANKSMAN_KIND` in its environment, and it discards the output.
-  `BANKSMAN_SERIAL` is set when the serial of the instance is known. A hook of a kind with an
+  `BANKSMAN_SERIAL` is set when the serial of the instance is known, and `BANKSMAN_HANDLE`
+  when the lease records the id of a reservation (section 3). A hook of a kind with an
   Android preset also gets `ANDROID_SERIAL`: the serial, or a value that no device has while
   the serial is not known, so that `adb` without `-s` fails instead of acting on a device that
   adb chooses. Without `BANKSMAN_SERIAL`, the instance does not run, or its serial is not
@@ -354,11 +367,11 @@ A run asks for what it needs, not for a resource by name.
 
 - **Facts** come from the kind's `discover` hook or preset (section 8), and an agent cannot
   set them: `form` (phone, tablet, watch), `api`, `image`, `abi`, `manufacturer`, `model`,
-  `codename`, `display_name`, `avd`, `serial`, and `running` (whether the instance runs
-  now). banksman sets three attributes itself, and a hook cannot set them: `kind`; `account`,
-  which is true when an allowed account is signed in on the instance now, false when its
-  accounts are known and none of them is allowed, and missing when its accounts are not
-  known; and `tag`.
+  `codename`, `display_name`, `avd`, `serial`, `running` (whether the instance runs now), and,
+  for a remote device, `handle` and `ends`. banksman sets four attributes itself, and a hook
+  cannot set them: `kind`; `paid`, from the kind (section 5); `account`, which is true when an
+  allowed account is signed in on the instance now, false when its accounts are known and none
+  of them is allowed, and missing when its accounts are not known; and `tag`.
 - **Tags** come from the operator, who assigns them in the inventory with name patterns
   (section 8). A tag gives no access.
 - A request is an AND of `--where` clauses. The operators are `=`, `!=`, `~` (a glob, with `*`
@@ -386,11 +399,12 @@ When several resources match, banksman chooses in a fixed order:
    the resource still matches. The lease is touched, and it records the caller's agent
    process as its owner process, unless its owner process still runs and started the
    caller, as `banksman run` does for a script that it runs (section 9).
-2. A kind with a lower `rank` (section 5). So a request that does not name a kind gets an
-   emulator before a physical device.
-3. An instance that runs before one that does not run, which saves the time and the memory
+2. A resource that costs nothing before a paid one, whatever the ranks are (section 5).
+3. A kind with a lower `rank` (section 5). So a request that does not name a kind gets an
+   emulator before a physical device, and a physical device before a remote one.
+4. An instance that runs before one that does not run, which saves the time and the memory
    of a start.
-4. The resource name.
+5. The resource name.
 
 `acquire` without `--lease` never grants a held resource, also not to the same worktree:
 several agents can work in one worktree at the same time, so only the lease id tells their
@@ -398,16 +412,38 @@ holdings apart (section 9).
 
 - **The grant.** `acquire` prints `KEY=value` lines: `RESOURCE`, `KIND`, `LEASE` (the lease
   id that the scripts pass back), `STATE`, `KEPT` (`true` for a lease of the caller's holding
-  that `--lease` kept, otherwise `false`), `SERIAL` when the lease records it, and `ACCOUNTS`
-  when the request asks for accounts (section 7). A kept lease can have another id than the
+  that `--lease` kept, otherwise `false`), `SERIAL` when the lease records it, `HANDLE` when the
+  lease records the id of a reservation (section 3), and `ACCOUNTS` when the request asks for
+  accounts (section 7). A kept lease can have another id than the
   one that the caller passed, because each lease of a holding has its own id. Each value has only the characters of a
   resource name, so that a shell script can use it as it is: a serial with other characters
   is not printed. With `--json`, it prints a list `parts` with the same values for each part
-  of the request.
-- **banksman starts nothing.** Every grant is `ready`. The holder checks whether the
-  instance runs, and starts it if it does not, for example with the `emulator` command. A
-  fact from discovery can be wrong, for example for an emulator that is still starting, so
-  `running` only orders the matches, and the holder decides.
+  of the request, and `paid` for each part.
+- **Paid resources need an acknowledgement.** Without `--paid`, the resources of a paid kind
+  (section 5) are not candidates. A request whose candidates are all paid, for example
+  `--where kind=remote`, fails at once with exit status 1, and says that the resources are
+  paid and need `--paid` after the user agreed to the cost. A request that waits or finds every
+  match in use also says how many paid resources would match. With `--paid`, paid resources
+  take part, after every resource that costs nothing. `--paid` is an acknowledgement, not a
+  filter: `--where paid=true` asks for a paid resource. A lease that the caller keeps with
+  `--lease` needs no new acknowledgement. The store checks the acknowledgement again under its
+  lock, so a kept lease that ends meanwhile cannot let a new paid lease through. `status` marks
+  a paid kind as `remote (paid)`, and `status --json` carries `paid` for each resource. The
+  permission rules of the agents can ask the user before every `--paid` (section 15).
+- **Starting an instance.** Without `--start`, every grant is `ready`. The holder checks
+  whether the instance runs, and starts it if it does not, for example with the `emulator`
+  command. A fact from discovery can be wrong, for example for an emulator that is still
+  starting, so `running` only orders the matches, and the holder decides. With `--start`,
+  banksman starts a granted instance that does not run when it can start its kind; today
+  that is the `android-remote` preset only (section 8), and the holder still starts an
+  emulator. The new leases of the request are `booting` during the start, under the boot
+  deadline, and name the `acquire`, as during a reset. The start records the handle in the
+  lease as soon as it knows it, and the serial when the instance runs, so the adb guard
+  protects the device from the first moment. When the start fails, or does not end by the
+  boot deadline, every new lease of the request is given back, and `acquire` fails with the
+  reason. A lease that the caller keeps with `--lease` is not started again. The starts and
+  the resets of one request run one after another, so the boot deadline of each new lease
+  also counts the boot timeout of every other start of the request.
 - **The agent can choose.** `acquire` grants one resource for each part of the request and
   names it. It does not return a list, because two callers that choose from the same list
   choose the same resource. An agent that needs a specific resource asks for it, for example
@@ -425,10 +461,11 @@ holdings apart (section 9).
   reads its facts again after the reset, and records and prints the serial that discovery finds
   then. An instance that discovery does not find with a serial then, also because discovery
   fails, has no serial.
-- **No other process acts on the instance during a reset.** The lease names the `acquire`
-  that runs the hook, and a hook never outlives that process (section 5). When the lease
-  becomes void or is released during the reset, it drains, and the resource is taken back
-  or freed only after that process has ended. `admin release --force` refuses meanwhile.
+- **No other process acts on the instance during a start or a reset.** The lease names the
+  `acquire` that starts the instance or runs the hook, and a hook never outlives that process
+  (section 5). When the lease becomes void or is released meanwhile, it drains, and the
+  resource is taken back or freed only after that process has ended. `admin release --force`
+  refuses meanwhile.
 - **Waiting.** While every matching resource is held, `acquire` fails with exit status 4. For
   a request with several parts, this is while the parts cannot all be granted (section 7).
   With `--wait`, it looks again every 5 seconds until the wait ends, and each look reads the
@@ -602,11 +639,96 @@ holdings apart (section 9).
   gives the model `SM-S926B`, not "Galaxy S24+". banksman ships no table of marketing names, and it does
   not read the device name in the settings, which a person can change and which often
   holds a personal name. A device that is
-  not authorized is reported, not offered. The presets use the SDK in `~/Library/Android/sdk`
+  not authorized is reported, not offered. A device whose serial starts with `localhost:` is a
+  port forward, such as a remote device, and gets another port on every connection, so this
+  preset reports it and does not offer it; the `android-remote` preset offers it. The presets use the SDK in `~/Library/Android/sdk`
   on macOS and in `~/Android/Sdk` on Linux, and the AVDs in `~/.android/avd`. The `sdk` and
   `avd_home` keys of the `[android]` table change them. The presets never read
   `$ANDROID_HOME` or `$ANDROID_AVD_HOME`, for the same reason as for the state directory.
   They only read, and they declare no `on_void`.
+- **Remote devices.** `preset = "android-remote"` offers the physical devices of Android
+  Device Streaming, a service that reserves a real device in a lab and forwards it to the
+  local adb server as `localhost:<port>`. The `android` command line tool does that, and
+  banksman runs it from the path in `cli` of the `[android]` table, never from the `PATH`. The
+  kind is off unless the operator declares it and allows models in the inventory, and it is
+  paid by default (section 5). banksman never knows a price, an account, or a project of its
+  own: the project is configuration.
+
+  ```toml
+  [android]
+  cli = "/home/me/.local/bin/android"    # the android command line tool; `command -v android`
+
+  [kinds.remote]
+  preset = "android-remote"
+  project = "my-project"                 # the Google Cloud project, required with this preset
+  preselect = ["tokay:*"]
+  boot_timeout = "8m"
+  hard_cap = "3h"                        # the service ends a reservation 3 h after its creation
+  ```
+
+  `project` is valid only with this preset. Every call of the tool gets `--project` and
+  `--sdk` with the SDK of banksman, so that the tool and the daemon of each connection use
+  the same adb as banksman, never an adb from the `PATH`, which can be the wrapper of the
+  adb guard or another version that restarts the adb server. `cli_state` in `[android]` is the
+  directory where the tool keeps its files about connections, by default
+  `~/.android/cli/remote-devices` in the home directory from the user database.
+
+  One instance is one model of the catalogue of the service, named `<codename>:<api>`, for
+  example `tokay:34`; the tool writes `tokay/34`, but a resource name cannot have `/`. The
+  service allows one reservation of a model for each account, so one instance for each model
+  loses nothing. The facts are `codename`, `api`, `manufacturer` (the group of the catalogue),
+  `model` (the name in the catalogue), and `form`, from the words of that name: `Tab` or
+  `Tablet` gives `tablet`, `Watch` gives `watch`, and everything else is `phone`. A connected
+  device gives its own facts instead, as for the `android-device` preset, except `codename`
+  and `api`, which name the model. It also has `running`, `serial`, `handle` (the id of its
+  reservation), and `ends` (when the reservation ends, as a UTC time, when banksman knows it).
+
+  **No network in discovery.** `banksman admin discover --kind <kind>` runs
+  `android device remote models`, saves the catalogue of models as `<kind>-catalogue.json` in
+  the remote directory, shows the live reservations of the account as notes, and then works as
+  for every kind. The remote directory is `~/.local/state/banksman/remote`, outside `/tmp`, as
+  the log; next to the state directory when only `BANKSMAN_STATE_DIR` is set; or
+  `BANKSMAN_REMOTE_DIR`. Without a catalogue, the kind has no instances, and agents see the
+  command that fetches it; `status` shows how old the catalogue is. Every other command reads
+  only local sources: the catalogue; the properties file `active-connections.properties` in
+  `cli_state`, where the daemon of each live connection writes its reservation and its port;
+  `adb devices -l`, which confirms the port; and `<kind>-sessions.json`, banksman's own record
+  of the reservations that it started or adopted. A live port maps to its model through that
+  record, or else through `getprop` on the device. The codename of a device of a partner lab is
+  not a property of the device, so only the record maps it; otherwise the device is reported
+  and not offered.
+
+  **The start.** `acquire --start` (section 6) for a model that does not run lists the live
+  reservations of the account, then runs `android device remote create <codename>/<api>
+  --connect`, which reserves the device, waits until it is active, and connects it, in about
+  40 seconds. As soon as the tool prints the id, banksman records it in its file and in the
+  lease, so a take-back can end the reservation also when the `acquire` is killed in the
+  middle. A reservation that the account already had, or that was live on this machine
+  before, is adopted: the tool connects it and prints the same text, and banksman does not
+  record it as one that it created. banksman then extends the reservation to the hard
+  deadline of the lease, records the serial, waits until adb lists the device, and marks the
+  lease ready. The service caps a reservation at 3 hours after its creation without an error,
+  so banksman records the end that it got. When a step after the id fails, banksman removes a
+  reservation that it created, and the lease is given back.
+
+  **The connection.** The daemon of a connection ends when adb drops it, for example after
+  `adb kill-server`, `adb disconnect`, or a restart of the machine, and it does not connect
+  again. When `banksman run`, or `acquire --lease`, finds a lease with a handle and no live
+  port, it runs `android device remote connect <id>`, which takes about 3 seconds and gives a
+  new port, and records the new serial. When the reservation has ended, `run` fails before its
+  command, and the holder releases the lease.
+
+  **The end.** A release keeps the reservation: the model is then a free instance that runs,
+  until the reservation ends, and the next request gets it without a new reservation, as an
+  emulator that a release leaves running. The reaper ends only what banksman started: for a
+  void lease whose handle the record lists as created by banksman, it runs
+  `android device remote remove <id>`. A reservation that has ended already counts as gone. A
+  reservation that nothing takes back, for example after a restart that emptied `/tmp`, ends
+  by itself, at the latest 3 hours after its creation.
+
+  The tool prints local times such as `9:56 AM` without a date; banksman takes the next such
+  time, and records no end when it cannot read one. Everything that the tool prints, and every
+  value in its files, is untrusted, and checked as discovered values are.
 - **Identifiers only.** For accounts, banksman stores addresses, never credentials. Reading
   the accounts on an Android device depends on `dumpsys account` output, which is not a
   stable interface. When that output has no list of accounts, the accounts are not known,
@@ -881,6 +1003,12 @@ is a setup of the operator, and a project needs nothing for it.
   `status` shows it. The purpose in it is untrusted text, as in `status`. When the lease belongs
   to the caller's holding but is no longer held, for example because it drains, the guard says
   that the lease is lost.
+- **Remote devices.** The serial of a remote device, `localhost:<port>`, is a serial like
+  any other, and the start records it in the lease before the lease is ready, so the guard
+  protects the device from the first moment. `adb kill-server` and `adb disconnect
+  localhost:<port>` end the connection of a remote device, so the guard refuses them for the
+  devices of other holders as for every device, and `banksman run` connects the caller's own
+  device again (section 8).
 - **Strict mode.** With `strict = true` in the `[guard]` table of the configuration, the guard
   also refuses an agent's device command on a device that no lease of its holding has: a free
   device, or a device that the inventory does not allow, such as a personal phone.
@@ -932,13 +1060,14 @@ is a setup of the operator, and a project needs nothing for it.
 ```
 banksman acquire [--as <part>] [--where <attr><op><value> ...] [--accounts <n>] ...
                  [--for <text>] [--expect <duration>] [--wait <duration>] [--lease <id>]
-                 [--issue <id>] [--owner-pid <pid>] [--json]
+                 [--paid] [--start] [--issue <id>] [--owner-pid <pid>] [--json]
 banksman enter   --resource <name> --lease <id> --pid <pid> [--pgid <pgid>]  # check, touch, register
 banksman check   --resource <name> --lease <id>                    # touch; exit 0: yours, 3: lost
 banksman leave   --resource <name> --lease <id> --pid <pid>
 banksman run     --lease <id> --resource <name> -- <command> ...   # in a group of its own, fenced
 banksman run     --where <attr><op><value> ... [--accounts <n>] [--for <text>] [--expect <duration>]
-                 [--wait <duration>] [--issue <id>] [--owner-pid <pid>] -- <command> ...
+                 [--wait <duration>] [--paid] [--start] [--issue <id>] [--owner-pid <pid>]
+                 -- <command> ...
 banksman touch   --lease <id> [--resource <name>] [--expect <duration>] [--owner-pid <pid>]
 banksman release --lease <id> [--resource <name>]                  # the holding, or one resource
 banksman release --all [--owner-pid <pid>]                         # the leases of this agent
@@ -958,8 +1087,8 @@ banksman admin adb-shim                                            # optional ad
 ```
 
 Commands that grant a resource print `KEY=value` lines, for example `RESOURCE=`, `SERIAL=`,
-`ACCOUNTS=`, and `LEASE=`, the lease id that the scripts pass back, so that a shell script
-can read them.
+`HANDLE=`, `ACCOUNTS=`, and `LEASE=`, the lease id that the scripts pass back, so that a shell
+script can read them.
 With `--json` they print JSON instead. Exit status 1 is an error, 2 a usage error, 3 a lease
 that is lost, and 4 a request whose matching resources are all in use. `run` exits with the
 status of its command, unless banksman fails before the command starts or the lease is lost.
@@ -967,7 +1096,10 @@ status of its command, unless banksman fails before the command starts or the le
 In the command of `banksman run`, each argument that is exactly `{serial}` becomes the serial
 of the lease, and each argument that is exactly `{resource}` becomes the resource: the shell of
 the caller cannot expand a variable that banksman sets only for the command. `run` fails before
-the command starts when the command has `{serial}` and the serial is not known.
+the command starts when the command has `{serial}` and the serial is not known. The command
+gets `BANKSMAN_LEASE`, `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_SERIAL` and
+`BANKSMAN_HANDLE` when they are known, and `ANDROID_SERIAL` for a kind with an Android preset,
+so that a script can, for example, extend the reservation of a remote device by hand.
 
 Every command that only an operator may run is under `banksman admin`, so that an agent's
 permission rules can refuse all of them with one pattern, including ones added later.
@@ -986,7 +1118,8 @@ permission rules can refuse all of them with one pattern, including ones added l
   reader refuses an output schema that it does not know, instead of guessing. The test suite
   records the shape of every JSON document, so a change of the output cannot pass without a
   decision about the number.
-- The document of a `discover` hook has a schema of its own (section 8).
+- The document of a `discover` hook has a schema of its own (section 8), and so have the
+  catalogue and the record of reservations of the `android-remote` preset.
 - The surfaces treated as public API are the CLI (commands, flags, exit codes, `KEY=value`
   output), the JSON output, the lease file format, the log file format, the configuration
   files, and the hook contract.
@@ -1017,6 +1150,9 @@ this section names.
   inside it: `run` waits for every process that its command leaves in its group.
 - Release leases before waiting for a person, so that a run that waits overnight does not
   hold a device. If a run forgets, the owner and idle checks free the device later.
+- Before `--paid`, tell the user that the device costs money, and get a yes. Let the
+  permission rules of the agents ask the user before every `banksman acquire ... --paid` and
+  `banksman run ... --paid`.
 - Keep app setup and cleanup in the project's scripts.
 - Refuse `banksman admin` in the permission rules of the agents. Without such a rule, an agent
   can widen what agents may use, or take a resource from another holder. The rule is a
@@ -1095,6 +1231,10 @@ Done:
   with `ANDROID_SERIAL` and the placeholders `{serial}` and `{resource}`.
 - The optional adb guard: an adb wrapper that refuses an agent's device command on the device
   of another holding, and commands that disconnect every device.
+- Remote devices of Android Device Streaming: the `android-remote` preset with a catalogue
+  that `admin discover` fetches, paid kinds and `--paid`, and `acquire --start`, which
+  reserves, connects, and extends a remote device, with the reservation id in the lease, a
+  new connection in `run`, and a take-back that ends only what banksman created.
 
 Next:
 

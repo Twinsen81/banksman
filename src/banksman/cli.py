@@ -10,15 +10,33 @@ import shlex
 import signal
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from importlib import resources
 
-from banksman import LEASE_SCHEMA, OUTPUT_SCHEMA, __version__, android, console, guard, hooks
+from banksman import (
+    LEASE_SCHEMA,
+    OUTPUT_SCHEMA,
+    __version__,
+    android,
+    console,
+    guard,
+    hooks,
+    remote,
+)
 from banksman.assign import MAX_ACCOUNTS, MAX_PARTS
-from banksman.config import Config, Kind, load_config, parse_duration
-from banksman.discovery import Found, Instance, discover, serial_now, serials_seen
+from banksman.config import ANDROID_REMOTE, Config, Kind, load_config, parse_duration
+from banksman.discovery import (
+    KIND,
+    PAID,
+    Found,
+    Instance,
+    discover,
+    note_text,
+    serial_now,
+    serials_seen,
+)
 from banksman.errors import BanksmanError
 from banksman.history import Event, History
 from banksman.identity import find_agent, find_holder
@@ -200,6 +218,8 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="ID",
         help="the id of a lease to keep: its resource is chosen first if it still matches",
     )
+    _paid_argument(acquire, "")
+    _start_argument(acquire, "")
     acquire.add_argument("--issue", help="the issue id; by default it comes from the branch name")
     acquire.add_argument(
         "--owner-pid",
@@ -323,6 +343,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_pid,
         help="with --where: the process whose end frees the lease; by default this run",
     )
+    _paid_argument(run, "with --where: ")
+    _start_argument(run, "with --where: ")
     run.add_argument(
         "command_line",
         nargs=argparse.REMAINDER,
@@ -476,6 +498,24 @@ def _verbose_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _paid_argument(parser: argparse.ArgumentParser, prefix: str) -> None:
+    parser.add_argument(
+        "--paid",
+        action="store_true",
+        help=f"{prefix}also offer resources whose use costs money, such as remote devices;"
+        " give it only after the user agreed to the cost",
+    )
+
+
+def _start_argument(parser: argparse.ArgumentParser, prefix: str) -> None:
+    parser.add_argument(
+        "--start",
+        action="store_true",
+        help=f"{prefix}start a granted instance that does not run, such as a remote device,"
+        " and grant it when it runs",
+    )
+
+
 def _lease_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--resource", required=True, help="the leased resource")
     parser.add_argument(
@@ -570,6 +610,16 @@ def _recorder() -> Record:
 def _take_back(config: Config) -> TakeBack:
     def take_back(lease: Lease) -> bool:
         kind = config.kinds.get(lease.kind)
+        if kind is not None and kind.preset == ANDROID_REMOTE and lease.handle is not None:
+            # banksman ends only a reservation that it created, and a hook of the kind runs
+            # after that.
+            failure = remote.take_back(kind, config.android, lease.handle)
+            if failure is not None:
+                print(
+                    clean(f"banksman: cannot take back {lease.resource}: {failure}"),
+                    file=sys.stderr,
+                )
+                return False
         if kind is not None and kind.on_void is not None:
             # The hook can end the instance by its serial. The serial in the lease can be old,
             # and an emulator takes the lowest free port, so another instance can have it now.
@@ -667,7 +717,7 @@ def _status(config: Config) -> _Status:
     # because it can take seconds. What it finds about serials goes into the leases first.
     found = search(config, load_inventory(), [Part()], clock=store.system.clock)
     store.observe(found.serials)
-    resources = console.resources(store.snapshot(), found)
+    resources = console.resources(store.snapshot(), found, paid=_paid_kinds(config))
     machine = store.system
     pids = console.owner_pids(resources)
     return _Status(
@@ -854,6 +904,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 ("--wait", args.wait),
                 ("--issue", args.issue),
                 ("--owner-pid", args.owner_pid),
+                ("--paid", args.paid or None),
+                ("--start", args.start or None),
             )
             if value is not None
         ]
@@ -871,6 +923,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             seen = serial_now(kind, config, lease.resource, lease.serial, clock)
             store.observe(seen)
             lease = store.check(args.resource, args.lease)
+            if _disconnected(kind, lease, seen):
+                again = _reconnect(store, config, kind, lease)
+                store.observe([again])
+                seen += (again,)
+                lease = store.check(args.resource, args.lease)
         # The command acts on the serial, so it gets only one that discovery confirms now: a
         # discovery that fails cannot tell whether another instance has the serial by now.
         if lease.resource not in {each.resource for each in seen if each.serial is not None}:
@@ -892,6 +949,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         issue=args.issue,
         # The lease belongs to this run, so it ends with it, also when something kills it.
         owner_pid=os.getpid() if args.owner_pid is None else args.owner_pid,
+        paid=args.paid,
+        start=args.start,
     )
     (lease,) = grant.leases
     try:
@@ -1011,8 +1070,10 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         keep=args.lease,
         issue=args.issue,
         owner_pid=args.owner_pid,
+        paid=args.paid,
+        start=args.start,
     )
-    _print_grant(parts, grant.granted, grant.leases, args.json)
+    _print_grant(parts, grant, args.json)
     return 0
 
 
@@ -1040,6 +1101,8 @@ def _acquire(
     keep: str | None,
     issue: str | None,
     owner_pid: int | None,
+    paid: bool = False,
+    start: bool = False,
 ) -> _Grant:
     config = load_config()
     check_kinds([clause for part in parts for clause in part.clauses], config)
@@ -1062,7 +1125,10 @@ def _acquire(
         store, _ = _reaped_store(config)
         found = search(config, load_inventory(), parts, clock=machine.clock)
         needs = [
-            Need(tuple(_choice(candidate, config) for candidate in candidates), part.accounts)
+            Need(
+                tuple(_choice(candidate, config, start) for candidate in candidates),
+                part.accounts,
+            )
             for part, candidates in zip(parts, found.candidates)
         ]
         # Waiting helps only when the request could be met if the resources in use were free.
@@ -1077,6 +1143,27 @@ def _acquire(
                 ]
             )
             raise BanksmanError(_no_match(parts, found.candidates))
+        # A paid resource takes part only when the caller acknowledges the cost, or keeps a
+        # lease on it. The store checks that again under its lock.
+        kept = set() if paid or keep is None else set(store.holding(keep))
+
+        def offered(resource: str, costs: bool) -> bool:
+            return paid or not costs or resource in kept
+
+        usable = [
+            tuple(each for each in candidates if offered(each.resource, each.paid))
+            for candidates in found.candidates
+        ]
+        payable = _payable(found.candidates, usable)
+        unpaid = [
+            Need(
+                tuple(each for each in need.choices if offered(each.resource, each.paid)),
+                need.accounts,
+            )
+            for need in needs
+        ]
+        if not satisfiable(unpaid):
+            raise BanksmanError(_paid_only(payable))
         granted = store.grant(
             needs,
             holder,
@@ -1084,16 +1171,18 @@ def _acquire(
             expect=expect,
             reset_time=hooks.HOOK_TIMEOUT_SECONDS,
             seen=found.serials,
+            paid=paid,
         )
         if granted is not None:
             break
         left = give_up - machine.clock()
         if left <= 0:
-            raise Busy(_busy(parts, found.candidates, still=bool(wait)))
+            _print_notes([_paid_note(payable)] if payable else [])
+            raise Busy(_busy(parts, usable, still=bool(wait)))
         owner_started = _owner_still_runs(machine, holder.owner_pid, owner_started)
         if not waiting:
             # A caller that waits, such as a build, shows why it does not go on.
-            busy = _busy(parts, found.candidates, still=False)
+            busy = _busy(parts, usable, still=False)
             print(
                 clean(
                     f"banksman: {busy}; waiting up to {console.span(wait)}. banksman status"
@@ -1101,9 +1190,11 @@ def _acquire(
                 ),
                 file=sys.stderr,
             )
+            _print_notes([_paid_note(payable)] if payable else [])
             waiting = True
         machine.sleep(min(POLL_SECONDS, left))
-    leases = _prepare(store, config, granted)
+    starts = {choice.resource for need in needs for choice in need.choices if choice.start}
+    leases = _prepare(store, config, granted, starts)
     reset = [
         lease
         for grant, lease in zip(granted, leases)
@@ -1134,7 +1225,74 @@ def _acquire(
             else lease
             for lease in leases
         ]
+    for index, (grant, lease) in enumerate(zip(granted, leases)):
+        kind = config.kinds.get(lease.kind)
+        # The search found that the kept device is not connected now.
+        if grant.kept and kind is not None and _disconnected(kind, lease, found.serials):
+            again = _reconnect(store, config, kind, lease)
+            now = store.observe([again])
+            if lease.resource in now and now[lease.resource].lease_id == lease.lease_id:
+                leases[index] = now[lease.resource]
     return _Grant(store, config, granted, leases)
+
+
+def _disconnected(kind: Kind, lease: Lease, seen: Sequence[SerialSeen]) -> bool:
+    """Whether a lease has the reservation of a remote device whose connection discovery does
+    not find now."""
+    if kind.preset != ANDROID_REMOTE or lease.handle is None:
+        return False
+    return lease.resource not in {each.resource for each in seen if each.serial is not None}
+
+
+def _reconnect(store: Store, config: Config, kind: Kind, lease: Lease) -> SerialSeen:
+    """Connect the remote device of a lease again, and return its new serial for the lease.
+
+    The connection ends when adb drops it, for example after adb kill-server or a restart of
+    the machine, and the reservation stays.
+    """
+    assert lease.handle is not None
+    try:
+        serial = remote.connect(kind, config.android, lease.handle)
+    except remote.Ended as exc:
+        raise BanksmanError(
+            f"the reservation {lease.handle} of {lease.resource} has ended, so its device is"
+            f" gone ({exc}). Release the lease"
+        ) from None
+    except BanksmanError as exc:
+        raise BanksmanError(f"cannot connect {lease.resource} again: {exc}") from None
+    return SerialSeen(lease.resource, lease.kind, serial, store.system.clock(), lease.handle)
+
+
+def _payable(
+    candidates: Sequence[Sequence[Candidate]], usable: Sequence[Sequence[Candidate]]
+) -> dict[str, int]:
+    """Return how many paid resources of each kind match but need --paid."""
+    left_out: dict[str, set[str]] = {}
+    for every, offered in zip(candidates, usable):
+        names = {each.resource for each in offered}
+        for each in every:
+            if each.resource not in names:
+                left_out.setdefault(each.kind, set()).add(each.resource)
+    return {kind: len(names) for kind, names in sorted(left_out.items())}
+
+
+def _paid_counts(payable: Mapping[str, int]) -> str:
+    return ", ".join(f"{count} of kind {kind}" for kind, count in payable.items())
+
+
+def _paid_only(payable: Mapping[str, int]) -> str:
+    return (
+        f"every permitted resource that can meet the request costs money: {_paid_counts(payable)}."
+        " Tell the user that the resource is paid, and only when the user agrees, run the"
+        " command again with --paid"
+    )
+
+
+def _paid_note(payable: Mapping[str, int]) -> str:
+    return (
+        f"paid resources match too: {_paid_counts(payable)}. banksman offers them only with"
+        " --paid, after the user agreed to the cost"
+    )
 
 
 def _owner_still_runs(machine: Machine, owner_pid: int | None, started: str | None) -> str | None:
@@ -1161,26 +1319,31 @@ def _some(candidates: Sequence[Candidate], shown: int = 10) -> str:
     return f"{names}, and {more} more" if more > 0 else names
 
 
-def _choice(candidate: Candidate, config: Config) -> Choice:
+def _choice(candidate: Candidate, config: Config, start: bool) -> Choice:
     kind = config.kinds[candidate.kind]
-    # banksman starts nothing: the holder starts an instance that does not run. A lease is
-    # booting only while the on_acquire hook resets its instance, so that a caller that dies in
-    # the middle loses the lease at the boot deadline.
+    # The holder starts an instance that does not run, unless the caller asks banksman with
+    # --start and banksman can start the kind. A lease is booting only while banksman starts its
+    # instance or the on_acquire hook resets it, so that a caller that dies in the middle loses
+    # the lease at the boot deadline.
     return Choice(
         candidate.resource,
         candidate.kind,
         kind.timeouts,
         reset=kind.on_acquire is not None,
         accounts=candidate.accounts or (),
+        start=start and candidate.cold and kind.preset == ANDROID_REMOTE,
+        paid=candidate.paid,
     )
 
 
-def _prepare(store: Store, config: Config, granted: Sequence[Granted]) -> list[Lease]:
-    """Reset the instances of the new leases with the on_acquire hooks of their kinds, and then
-    mark every new lease ready.
+def _prepare(
+    store: Store, config: Config, granted: Sequence[Granted], starts: Collection[str] = ()
+) -> list[Lease]:
+    """Start the instances of the new leases that `starts` names, reset the instances of the
+    new leases with the on_acquire hooks of their kinds, and then mark every new lease ready.
 
-    A request gets all its parts or none: if a reset fails, or a new lease is lost meanwhile,
-    every new lease of the request is given back.
+    A request gets all its parts or none: if a start or a reset fails, or a new lease is lost
+    meanwhile, every new lease of the request is given back.
     """
     leases = [grant.lease for grant in granted]
     new = [index for index, grant in enumerate(granted) if not grant.kept]
@@ -1190,6 +1353,8 @@ def _prepare(store: Store, config: Config, granted: Sequence[Granted]) -> list[L
     try:
         for index in new:
             lease = leases[index]
+            if lease.resource in starts:
+                leases[index] = lease = _start(store, config, lease, given_back)
             if config.kinds[lease.kind].on_acquire is None:
                 continue
             failure = hooks.reset(config.kinds, lease)
@@ -1215,6 +1380,33 @@ def _prepare(store: Store, config: Config, granted: Sequence[Granted]) -> list[L
                 _give_back(store, grant.lease)
         raise
     return leases
+
+
+def _start(store: Store, config: Config, lease: Lease, given_back: str) -> Lease:
+    """Start the instance of a new booting lease, and return the lease with its serial."""
+    kind = config.kinds[lease.kind]
+    assert lease.boot_deadline is not None
+    clock = console.Clock(store.system.clock(), store.system.wall_clock())
+    # The on_acquire hook needs its time before the boot deadline too.
+    reset = hooks.HOOK_TIMEOUT_SECONDS if kind.on_acquire is not None else 0
+    try:
+        started = remote.start(
+            kind,
+            config.android,
+            lease.resource,
+            until=clock.wall_time(lease.hard_deadline),
+            deadline=clock.wall_time(lease.boot_deadline) - reset,
+            record=lambda handle: store.started(lease.resource, lease.lease_id, handle=handle),
+        )
+    except NotHeld:
+        raise
+    except BanksmanError as exc:
+        raise BanksmanError(
+            f"cannot start {lease.resource}: {exc}; {given_back} given back"
+        ) from None
+    return store.started(
+        lease.resource, lease.lease_id, handle=started.handle, serial=started.serial
+    )
 
 
 def _give_back(store: Store, lease: Lease) -> None:
@@ -1262,15 +1454,13 @@ def _print_notes(notes: Sequence[str]) -> None:
         print(clean(f"banksman: note: {note}"), file=sys.stderr)
 
 
-def _print_grant(
-    parts: Sequence[Part],
-    granted: Sequence[Granted],
-    leases: Sequence[Lease],
-    as_json: bool,
-) -> None:
-    # A serial in a lease has only the characters of a resource name, as every value here, so
-    # that a shell script can use it as it is. Account names are resource names too.
+def _print_grant(parts: Sequence[Part], grant: _Grant, as_json: bool) -> None:
+    # A serial and a handle in a lease have only the characters of a resource name, as every
+    # value here, so that a shell script can use them as they are. Account names are resource
+    # names too.
+    granted, leases = grant.granted, grant.leases
     serials = [lease.serial for lease in leases]
+    paid = [_is_paid(grant.config, lease.kind) for lease in leases]
     if as_json:
         _print_json(
             {
@@ -1283,10 +1473,14 @@ def _print_grant(
                         "kind": lease.kind,
                         "state": lease.state,
                         "serial": serial,
-                        "accounts": list(grant.accounts),
-                        "kept": grant.kept,
+                        "handle": lease.handle,
+                        "paid": each_paid,
+                        "accounts": list(each.accounts),
+                        "kept": each.kept,
                     }
-                    for part, grant, lease, serial in zip(parts, granted, leases, serials)
+                    for part, each, lease, serial, each_paid in zip(
+                        parts, granted, leases, serials, paid
+                    )
                 ],
             }
         )
@@ -1300,22 +1494,33 @@ def _print_grant(
             ("KEPT", _flag(granted[0].kept)),
         ]
         lines += [("SERIAL", serials[0])] if serials[0] is not None else []
+        lines += [("HANDLE", leases[0].handle)] if leases[0].handle is not None else []
         lines += [("ACCOUNTS", ",".join(granted[0].accounts))] if parts[0].accounts else []
     else:
         lines = []
-        for part, grant, lease, serial in zip(parts, granted, leases, serials):
+        for part, each, lease, serial in zip(parts, granted, leases, serials):
             prefix = f"{part.name.upper()}_"  # type: ignore[union-attr]
             lines += [
                 (f"{prefix}RESOURCE", lease.resource),
                 (f"{prefix}KIND", lease.kind),
                 (f"{prefix}LEASE", lease.lease_id),
                 (f"{prefix}STATE", lease.state),
-                (f"{prefix}KEPT", _flag(grant.kept)),
+                (f"{prefix}KEPT", _flag(each.kept)),
             ]
             lines += [(f"{prefix}SERIAL", serial)] if serial is not None else []
-            lines += [(f"{prefix}ACCOUNTS", ",".join(grant.accounts))] if part.accounts else []
+            lines += [(f"{prefix}HANDLE", lease.handle)] if lease.handle is not None else []
+            lines += [(f"{prefix}ACCOUNTS", ",".join(each.accounts))] if part.accounts else []
     for key, value in lines:
         print(f"{key}={value}")
+
+
+def _is_paid(config: Config, kind: str) -> bool:
+    found = config.kinds.get(kind)
+    return found is not None and found.paid
+
+
+def _paid_kinds(config: Config) -> set[str]:
+    return {kind.name for kind in config.kinds.values() if kind.paid}
 
 
 def _flag(value: bool) -> str:
@@ -1589,8 +1794,9 @@ def _discover_all(config: Config, kinds: Sequence[Kind], inventory: Inventory) -
     owners = {name: kind.name for kind in config.kinds.values() for name in kind.instances()}
     found = []
     for kind in kinds:
+        renewed = _renew_catalogue(kind, config) if kind.preset == ANDROID_REMOTE else []
         each = discover(kind, config)
-        instances, notes = [], list(each.notes)
+        instances, notes = [], [*renewed, *each.notes]
         for instance in each.instances:
             other = decided.get(instance.name)
             if other is not None and other != kind.name:
@@ -1608,6 +1814,26 @@ def _discover_all(config: Config, kinds: Sequence[Kind], inventory: Inventory) -
                 )
         found.append(Found(each.kind, tuple(instances), tuple(notes)))
     return found
+
+
+def _renew_catalogue(kind: Kind, config: Config) -> list[str]:
+    """Fetch the catalogue of models of a remote kind again, and list the reservations of the
+    account. Return what happened, as notes for the operator."""
+    notes = []
+    try:
+        count = remote.renew_catalogue(kind, config.android)
+        notes.append(f"the catalogue has {count} models now")
+    except BanksmanError as exc:
+        notes.append(f"cannot renew the catalogue of models, so the earlier one is used: {exc}")
+    try:
+        for each in remote.reservations(kind, config.android):
+            notes.append(
+                f"the account has the reservation {each.handle} of {each.model}"
+                f" ({each.codename}/{each.api}): {each.state}, until {each.expires}"
+            )
+    except BanksmanError as exc:
+        notes.append(f"cannot list the reservations of the account: {exc}")
+    return [note_text(note) for note in notes]
 
 
 def _before(decisions: Decisions, name: str) -> str:
@@ -1636,10 +1862,11 @@ def _print_choices(choices: Sequence[_Choice]) -> None:
             facts = " ".join(
                 f"{key}={value}"
                 for key, value in sorted(choice.instance.facts.items())
-                if key != "kind"
+                if key not in (KIND, PAID)
             )
             note = f"note: {choice.instance.note}" if choice.instance.note else ""
-            detail = "  ".join(part for part in (choice.kind, facts, note) if part)
+            paid = " (paid)" if choice.instance.facts.get(PAID) is True else ""
+            detail = "  ".join(part for part in (f"{choice.kind}{paid}", facts, note) if part)
         else:
             detail = "on " + ", ".join(choice.hosts)
         rows.append([mark, str(number), choice.name, choice.before, detail])

@@ -63,7 +63,12 @@ def test_json_shows_the_selection_and_writes_nothing(capsys, config_path, invent
         "R5CR5678DEF": True,
         "R5CR9999XYZ": True,
     }
-    assert shown["instances"][0]["facts"] == {"form": "phone", "api": 35, "kind": "lab"}
+    assert shown["instances"][0]["facts"] == {
+        "form": "phone",
+        "api": 35,
+        "kind": "lab",
+        "paid": False,
+    }
     assert shown["accounts"] == [
         {"name": "qa-1@example.test", "on": ["R5CR1234ABC", "R5CR5678DEF"], "selected": True},
         {"name": "qa-2@example.test", "on": ["R5CR5678DEF"], "selected": True},

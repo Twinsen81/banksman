@@ -83,7 +83,10 @@ def test_status_shows_every_permitted_resource_also_when_it_is_free(capsys, conf
         "kind": "emulator",
         "state": "free",
         "present": True,
+        "paid": False,
         "serial": None,
+        "handle": None,
+        "ends": None,
         "facts": {"form": "tablet", "api": 33},
         "lease": None,
     }

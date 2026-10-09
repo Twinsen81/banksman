@@ -1543,6 +1543,53 @@ def test_observe_sets_and_clears_the_serial_and_is_not_a_touch(store, system):
     assert serials(store) == {"emu-1": (None, system.now + 1)}
 
 
+def test_discovery_sets_a_handle_and_never_clears_it(store, system):
+    store.acquire("tokay:34", "remote", Holder(OWNER))
+    found = SerialSeen("tokay:34", "remote", "localhost:49920", 5.0, "fakeid0000001")
+    store.observe([found])
+    # The connection ended, and the reservation can still be live.
+    store.observe([SerialSeen("tokay:34", "remote", None, 6.0)])
+    (lease,) = store.snapshot().leases
+    assert (lease.serial, lease.handle) == (None, "fakeid0000001")
+
+
+def test_a_start_records_the_handle_at_once_and_the_serial_later(store, system):
+    (granted,) = store.grant(
+        [Need((Choice("tokay:34", "remote", start=True),))], Holder(OWNER)
+    )
+    lease = granted.lease
+    assert (lease.state, lease.reaper_pid) == ("booting", os.getpid())
+    early = store.started("tokay:34", lease.lease_id, handle="fakeid0000001")
+    assert (early.handle, early.serial) == ("fakeid0000001", None)
+    started = store.started(
+        "tokay:34", lease.lease_id, handle="fakeid0000001", serial="localhost:49522"
+    )
+    assert (started.serial, started.serial_seen) == ("localhost:49522", system.now)
+
+
+def test_a_start_records_the_handle_of_a_lease_that_became_void(store, system, state_dir):
+    (granted,) = store.grant(
+        [Need((Choice("tokay:34", "remote", start=True),))], Holder(OWNER)
+    )
+    edit_lease(state_dir, "tokay:34", lambda data: drain(data, "boot_timeout"))
+    lease = store.started("tokay:34", granted.lease.lease_id, handle="fakeid0000001")
+    assert (lease.state, lease.handle) == ("draining", "fakeid0000001")
+
+
+def test_the_boot_deadline_counts_the_other_starts_of_the_request(store, system):
+    timeouts = Timeouts(boot_timeout=100)
+    granted = store.grant(
+        [
+            Need((Choice("tokay:34", "remote", timeouts, start=True),)),
+            Need((Choice("houji:35", "remote", timeouts, start=True),)),
+            Need((Choice("emu-1", "emulator", timeouts),)),
+        ],
+        Holder(OWNER),
+    )
+    deadlines = [each.lease.boot_deadline - system.now for each in granted]
+    assert deadlines == [200, 200, 300]
+
+
 def test_a_result_that_says_nothing_keeps_the_serial(store, system):
     store.acquire("emu-1", "emulator", Holder(OWNER))
     store.observe([seen("emu-1", "emulator-5554", 5.0)])

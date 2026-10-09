@@ -30,6 +30,7 @@ VARIABLES = (
     "BANKSMAN_KIND",
     "BANKSMAN_LEASE",
     "BANKSMAN_SERIAL",
+    "BANKSMAN_HANDLE",
     "BANKSMAN_ACCOUNTS",
 )
 # adb, and the connected tests of the Android Gradle plugin, act on the device that this variable
@@ -92,11 +93,14 @@ def variables(lease: Lease, *, android: bool) -> dict[str, str]:
     """Return the variables that name the resource of a lease for a hook or a command.
 
     The serial is the one in the lease. With `android`, ANDROID_SERIAL names it too, or names no
-    device while the serial is not known.
+    device while the serial is not known. The handle is the id of the reservation of a remote
+    device, so that a script can extend it or disconnect it.
     """
     values = {"BANKSMAN_RESOURCE": lease.resource, "BANKSMAN_KIND": lease.kind}
     if lease.serial is not None:
         values["BANKSMAN_SERIAL"] = lease.serial
+    if lease.handle is not None:
+        values["BANKSMAN_HANDLE"] = lease.handle
     if android:
         values[ANDROID_SERIAL] = NO_SERIAL if lease.serial is None else lease.serial
     return values

@@ -179,6 +179,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field `lease_schema`. `banksman log` also reads the lines of schema 5 again, so the history
   from before the upgrade to schema 6 is back. The test suite records the shape of every JSON
   document, so a change of the output fails the tests until its shape is recorded.
+- Remote devices of Android Device Streaming, with the new preset `android-remote`. An
+  instance is a model of the catalogue of the service, such as `tokay:34`. `banksman admin
+  discover` fetches the catalogue with the `android` command line tool, whose path is the new
+  key `cli` in `[android]`, and the new kind key `project` names the Google Cloud project.
+  Every other command reads only local files and adb, never the network. The
+  `android-device` preset no longer offers a device whose serial starts with `localhost:`.
+- Paid kinds. The new kind key `paid` marks a kind whose every use costs money; it is true by
+  default for `android-remote`. `acquire` and `run --where` offer a paid resource only with
+  the new flag `--paid`, and after every resource that costs nothing. A request whose matches
+  are all paid fails at once and says why. `status` shows `remote (paid)`, and
+  [docs/PROJECTS.md](docs/PROJECTS.md) has rules that ask the user before every `--paid`.
+- `acquire --start` and `run --where --start`: banksman reserves and connects a remote device
+  that does not run, extends the reservation to the hard cap of the lease, and grants it when
+  adb lists it. The lease is `booting` meanwhile, under the boot deadline. The lease records
+  the id of the reservation as soon as the tool prints it; `acquire` prints it as `HANDLE`,
+  and `run` and the hooks get it in `BANKSMAN_HANDLE`. `run` and `acquire --lease` connect a
+  dropped remote device again. A release keeps the reservation for the next request, and the
+  reaper ends a reservation of a void lease only when banksman created it. Lease files carry
+  the id, so the lease schema is now 7: lease files of an earlier banksman cannot be read
+  after the upgrade, and `banksman admin release --force --resource <name>` frees their
+  resources. The output schema stays 6: `status --json` and the grant only get the new fields
+  `paid`, `handle`, and `ends`.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

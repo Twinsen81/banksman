@@ -57,8 +57,12 @@ banksman run --lease "$LEASE" --resource "$RESOURCE" -- ./gradlew connectedCheck
   together with the job of banksman. A program in the same pipeline that reads the terminal,
   such as `less`, waits until the command has ended.
 - The command gets `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, and `BANKSMAN_LEASE` in its
-  environment, `BANKSMAN_ACCOUNTS` when the lease has accounts, and `BANKSMAN_SERIAL` when the
-  serial of the instance is known. Before the command starts, banksman asks discovery for the
+  environment, `BANKSMAN_ACCOUNTS` when the lease has accounts, `BANKSMAN_SERIAL` when the
+  serial of the instance is known, and `BANKSMAN_HANDLE` when the lease has the reservation of
+  a remote device, so that a script can, for example, extend the reservation with
+  `android device remote extend "$BANKSMAN_HANDLE" ...`. For a remote device whose connection
+  ended, for example after `adb kill-server`, banksman connects the device again before the
+  command starts; when the reservation has ended, it fails before the command. Before the command starts, banksman asks discovery for the
   serial, so the command gets the serial of an emulator that its holder started or restarted
   after the grant. When discovery cannot confirm the serial then, for example because adb
   fails, the command gets no serial. It never takes `BANKSMAN_SERIAL` from the environment of
@@ -107,7 +111,7 @@ project, and source it from the scripts that use a device. It is POSIX `sh`.
 
 | Function | With banksman | Without banksman |
 |---|---|---|
-| `banksman_acquire [OPTION ...]` | Runs `banksman acquire` with the options, and sets `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_LEASE`, and `BANKSMAN_SERIAL` and `BANKSMAN_ACCOUNTS` when the grant has them. Returns the status of `acquire`, for example 4 when every matching resource is in use. | Returns 0, and sets nothing. |
+| `banksman_acquire [OPTION ...]` | Runs `banksman acquire` with the options, and sets `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_LEASE`, and `BANKSMAN_SERIAL`, `BANKSMAN_HANDLE`, and `BANKSMAN_ACCOUNTS` when the grant has them. Returns the status of `acquire`, for example 4 when every matching resource is in use. | Returns 0, and sets nothing. |
 | `banksman_run COMMAND [ARGUMENT ...]` | Runs the command with `banksman run` under the lease. Returns the status of the command, or 3 when the lease was lost. | Runs the command as it is. |
 | `banksman_release` | Gives back the new lease that `banksman_acquire` got in this script. A lease that `acquire` kept stays with the caller. | Does nothing. |
 
@@ -185,6 +189,10 @@ widens what agents may use, and `banksman admin release --force` takes a resourc
 holder. banksman cannot tell an agent from the operator, because both run as the same user, so
 the permission rules of the agent must refuse these commands. The rules below do that.
 
+Some resources cost money for each use, such as the remote devices of the `android-remote`
+preset, and banksman offers them only to a request with `--paid`. The rules below also ask the
+user before every `--paid`, so that an agent does not spend money without a yes.
+
 These rules are a guardrail against a careless agent, not a security boundary. They match the
 text of a command, so a command that is written in another way, for example with the program
 in a variable, is not refused. An agent runs as the same user as the operator, and that user
@@ -204,6 +212,10 @@ project:
       "Edit(~/.config/banksman/**)",
       "Edit(~/.local/state/banksman/**)",
       "Edit(//tmp/banksman-*/**)"
+    ],
+    "ask": [
+      "Bash(*banksman acquire*--paid*)",
+      "Bash(*banksman run*--paid*)"
     ]
   }
 }
@@ -211,7 +223,8 @@ project:
 
 A Bash rule matches the text of the command. The leading `*` makes the rule also match
 `/usr/local/bin/banksman admin ...` and `sh -c 'banksman admin ...'`, which a rule that starts
-with `banksman` does not match. The `Edit` rules keep
+with `banksman` does not match. The `ask` rules find `--paid` anywhere in the command, and the
+user decides each time. The `Edit` rules keep
 Claude Code's file tools, and the file commands that it recognizes in Bash, away from the
 configuration and the inventory, from the quarantines and the log, and from the lease files.
 
@@ -227,6 +240,18 @@ prefix_rule(
     match = ["banksman admin discover --all --yes", "banksman admin release --force --resource emulator-5554"],
     not_match = ["banksman status", "banksman run --where kind=sdk -- sdkmanager --list"],
 )
+
+prefix_rule(
+    pattern = [
+        ["banksman", "/opt/homebrew/bin/banksman", "/usr/local/bin/banksman"],
+        ["acquire", "run"],
+        "--paid",
+    ],
+    decision = "prompt",
+    justification = "--paid gets a device whose use costs money: the user must agree first.",
+    match = ["banksman acquire --paid --where kind=remote --start", "banksman run --paid --where kind=remote -- ./scripts/check.sh"],
+    not_match = ["banksman acquire --where form=phone"],
+)
 ```
 
 A Codex rule matches the start of the command, and it has no wildcard. So the first element
@@ -237,7 +262,9 @@ splits a simple shell script, such as `cd app && banksman admin ...`, into its c
 it applies the rules, but not a script with redirections, substitutions, or variables. Codex applies its rules to the commands that it runs outside its sandbox, and
 banksman must run outside the sandbox anyway, because it reads the process list. Rules are
 experimental in Codex. `codex execpolicy check --rules <file> -- banksman admin discover`
-shows what a rule decides for a command.
+shows what a rule decides for a command. The rule for `--paid` can only match the flag right
+after the command name, so the text for the agents below asks them to write it there; a
+`--paid` in another place passes without a question.
 
 ### Text for the instructions of agents
 
@@ -259,6 +286,11 @@ Other agents on this machine use the same devices and emulators. When `banksman`
   `banksman run --lease <id> --resource <name> -- ./scripts/ui-tests.sh --device {serial}`.
 - A granted emulator may not run yet. Start it when it does not run, and use it when it
   runs already.
+- Some devices cost money for each use, such as remote devices, and banksman offers them only
+  with `--paid`. Before you use `--paid`, tell the user that the device is paid, and get a
+  yes. Write `--paid` right after `acquire` or `run`, for example
+  `banksman acquire --paid --where kind=remote --start`. `--start` reserves and connects a
+  remote device, which takes about a minute.
 - Release the lease (`banksman release --lease <id>`) before you stop to wait for a person.
 - Exit status 4 means that every matching device is in use: wait with `--wait`, or do other
   work. It is not a failure of your change. Exit status 3 means that the lease is lost: stop

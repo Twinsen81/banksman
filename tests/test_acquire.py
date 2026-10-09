@@ -99,6 +99,8 @@ def test_acquire_prints_json(capsys, config_path):
                 "kind": "build",
                 "state": "ready",
                 "serial": None,
+                "handle": None,
+                "paid": False,
                 "accounts": [],
                 "kept": False,
             }

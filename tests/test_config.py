@@ -132,6 +132,29 @@ def test_physical_devices_have_a_higher_rank_unless_the_operator_sets_one(config
     }
 
 
+def test_a_remote_kind_needs_the_tool_and_a_project_and_is_paid(config_path):
+    write_config(
+        config_path,
+        '[android]\ncli = "/opt/android-cli/android"\ncli_state = "/var/lib/android-cli"\n'
+        '[kinds.remote]\npreset = "android-remote"\nproject = "example.com:my-project"\n'
+        '[kinds.cheap]\npreset = "android-remote"\nproject = "my-project"\npaid = false\n'
+        "[kinds.farm]\ncount = 2\npaid = true\n",
+    )
+    loaded = load_config()
+    assert loaded.android == Android(
+        cli=Path("/opt/android-cli/android"), cli_state=Path("/var/lib/android-cli")
+    )
+    remote = loaded.kinds["remote"]
+    assert (remote.project, remote.paid, remote.rank) == ("example.com:my-project", True, 2)
+    assert (loaded.kinds["cheap"].paid, loaded.kinds["farm"].paid) == (False, True)
+
+
+def test_a_remote_kind_without_the_path_of_the_tool_says_how_to_find_it(config_path):
+    write_config(config_path, '[kinds.remote]\npreset = "android-remote"\nproject = "p"\n')
+    with pytest.raises(ConfigError, match="android.cli: .* Run `command -v android`"):
+        load_config()
+
+
 def test_a_new_counted_kind_needs_only_configuration(config_path, store, system):
     write_config(config_path, '[kinds.port]\ncount = 2\nidle_timeout = "off"\nhard_cap = "1h"\n')
     port = load_config().kinds["port"]
@@ -278,6 +301,18 @@ def test_text_that_is_not_a_duration_is_refused(text):
         ('[accounts]\npreselect = ["qa\\u001b@example.test"]', "accounts.preselect"),
         ("[accounts]\npattern = ['*']", "accounts.pattern"),
         ("[android]\nsdk = 'Library/Android/sdk'", "android.sdk"),
+        ("[android]\ncli = 'android'", "android.cli"),
+        ("[android]\ncli_state = '.android/cli'", "android.cli_state"),
+        ("[kinds.remote]\npreset = 'android-remote'", "kinds.remote.project"),
+        ("[kinds.remote]\npreset = 'android-remote'\nproject = ''", "kinds.remote.project"),
+        (
+            "[kinds.remote]\npreset = 'android-remote'\nproject = 'my project'",
+            "kinds.remote.project",
+        ),
+        ("[kinds.remote]\npreset = 'android-remote'\nproject = 7", "kinds.remote.project"),
+        ("[kinds.remote]\npreset = 'android-remote'\nproject = 'a/b'", "kinds.remote.project"),
+        ("[kinds.device]\npreset = 'android-device'\nproject = 'p'", "kinds.device.project"),
+        ("[kinds.build]\ncount = 1\npaid = 'yes'", "kinds.build.paid"),
         ("[android]\nadb = '/opt/adb'", "android.adb"),
         ("[guard]\nstrict = 'yes'", "guard.strict"),
         ("[guard]\nstrictly = true", "guard.strictly"),

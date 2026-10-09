@@ -18,11 +18,11 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from banksman import android, hooks
-from banksman.config import ANDROID_DEVICE, ANDROID_EMULATOR, Config, Kind
+from banksman import android, hooks, remote
+from banksman.config import ANDROID_DEVICE, ANDROID_EMULATOR, ANDROID_REMOTE, Config, Kind
 from banksman.errors import BanksmanError
 from banksman.lease import RESOURCE_NAME, SerialSeen
 from banksman.sanitize import clean
@@ -39,13 +39,18 @@ _MAX_FACT_NUMBER = 10**9
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 # Attributes that banksman sets itself: the kind of an instance, whether an allowed account is
-# signed in on it, and its tags from the inventory. A hook cannot set them, so it cannot make an
-# instance look like one of another kind, or like one with an allowed account.
+# signed in on it, its tags from the inventory, and whether its use costs money. A hook cannot
+# set them, so it cannot make an instance look like one of another kind, like one with an
+# allowed account, or like one that is free of charge.
 KIND = "kind"
 ACCOUNT = "account"
 TAG = "tag"
+PAID = "paid"
 SERIAL = "serial"
 RUNNING = "running"
+# The id of the reservation of a remote device, and when it ends.
+HANDLE = "handle"
+ENDS = "ends"
 
 FactValue = str | int | bool
 
@@ -69,6 +74,9 @@ class Found:
     # names no instance. The other notes can name an instance that agents may not use, such as a
     # personal phone that is not authorized.
     failure: str | None = None
+    # Other notes that banksman writes and that name no instance, also in `notes`, such as the
+    # age of a catalogue. Agents may see them.
+    shown: tuple[str, ...] = ()
 
 
 def discover(kind: Kind, config: Config, *, accounts: bool = True) -> Found:
@@ -79,9 +87,16 @@ def discover(kind: Kind, config: Config, *, accounts: bool = True) -> Found:
     """
     try:
         if kind.preset == ANDROID_EMULATOR:
-            return parse(kind.name, android.emulators(config.android, accounts=accounts))
+            document = android.emulators(config.android, accounts=accounts)
+            return parse(kind.name, document, paid=kind.paid)
         if kind.preset == ANDROID_DEVICE:
-            return parse(kind.name, android.devices(config.android, accounts=accounts))
+            document = android.devices(config.android, accounts=accounts)
+            return parse(kind.name, document, paid=kind.paid)
+        if kind.preset == ANDROID_REMOTE:
+            document, shown = remote.discover(kind, config.android, accounts=accounts)
+            found = parse(kind.name, document, paid=kind.paid)
+            shown_notes = tuple(note_text(note) for note in shown)
+            return replace(found, notes=(*shown_notes, *found.notes), shown=shown_notes)
     except BanksmanError as exc:
         return _failed(kind.name, note_text(str(exc)))
     failure, output = hooks.discover(kind)
@@ -91,7 +106,7 @@ def discover(kind: Kind, config: Config, *, accounts: bool = True) -> Found:
         document = json.loads(output)
     except (ValueError, UnicodeDecodeError):
         return _failed(kind.name, "the discover hook printed text that is not JSON")
-    return parse(kind.name, document)
+    return parse(kind.name, document, paid=kind.paid)
 
 
 def serial_of(facts: Mapping[str, FactValue]) -> str | None:
@@ -100,9 +115,19 @@ def serial_of(facts: Mapping[str, FactValue]) -> str | None:
     A serial comes from a device or a hook. banksman prints it, puts it into the environment of
     commands, and replaces arguments with it, so only the characters of a resource name pass.
     """
-    serial = facts.get(SERIAL)
-    valid = isinstance(serial, str) and RESOURCE_NAME.fullmatch(serial) is not None
-    return serial if valid else None  # type: ignore[return-value]
+    return _name_fact(facts, SERIAL)
+
+
+def handle_of(facts: Mapping[str, FactValue]) -> str | None:
+    """Return the id of the reservation in the facts of an instance when it is a valid resource
+    name. banksman prints it and puts it into the environment of commands, as a serial."""
+    return _name_fact(facts, HANDLE)
+
+
+def _name_fact(facts: Mapping[str, FactValue], name: str) -> str | None:
+    value = facts.get(name)
+    valid = isinstance(value, str) and RESOURCE_NAME.fullmatch(value) is not None
+    return value if valid else None  # type: ignore[return-value]
 
 
 def serials_seen(found: Found, at: float) -> tuple[SerialSeen, ...]:
@@ -116,7 +141,8 @@ def serials_seen(found: Found, at: float) -> tuple[SerialSeen, ...]:
     for instance in found.instances:
         serial = serial_of(instance.facts)
         if serial is not None:
-            seen.append(SerialSeen(instance.name, found.kind, serial, at))
+            handle = handle_of(instance.facts)
+            seen.append(SerialSeen(instance.name, found.kind, serial, at, handle))
         elif instance.facts.get(RUNNING) is False:
             seen.append(SerialSeen(instance.name, found.kind, None, at))
     return tuple(seen)
@@ -146,8 +172,11 @@ def serial_now(
     return seen
 
 
-def parse(kind: str, document: object) -> Found:
-    """Return the valid instances of a discover document, with notes about what was left out."""
+def parse(kind: str, document: object, *, paid: bool = False) -> Found:
+    """Return the valid instances of a discover document, with notes about what was left out.
+
+    Each instance gets the kind, and whether its use costs money, from the configuration.
+    """
     if (
         not isinstance(document, dict)
         or document.get("schema") != DISCOVER_SCHEMA
@@ -164,7 +193,7 @@ def parse(kind: str, document: object) -> Found:
         notes.append(f"only the first {MAX_INSTANCES} instances are used")
     instances: list[Instance] = []
     for data in raw[:MAX_INSTANCES]:
-        instance = _instance(kind, data, notes)
+        instance = _instance(kind, data, notes, paid)
         if instance is None:
             continue
         if any(other.name == instance.name for other in instances):
@@ -183,7 +212,7 @@ def note_text(text: str) -> str:
     return cleaned if len(cleaned) <= MAX_NOTE_LENGTH else cleaned[: MAX_NOTE_LENGTH - 3] + "..."
 
 
-def _instance(kind: str, data: object, notes: list[str]) -> Instance | None:
+def _instance(kind: str, data: object, notes: list[str], paid: bool) -> Instance | None:
     if not isinstance(data, dict):
         notes.append("an instance is not a JSON object, so it is left out")
         return None
@@ -195,6 +224,7 @@ def _instance(kind: str, data: object, notes: list[str]) -> Instance | None:
         return None
     facts = _facts(name, data.get("facts", {}), notes)
     facts[KIND] = kind
+    facts[PAID] = paid
     note = data.get("note")
     return Instance(
         name=name,
@@ -212,7 +242,7 @@ def _facts(name: str, raw: object, notes: list[str]) -> dict[str, FactValue]:
     for key, value in list(raw.items())[:_MAX_FACTS]:
         if not isinstance(key, str) or FACT_NAME.fullmatch(key) is None:
             notes.append(f"{name}: a fact has a name that is not valid, so it is left out")
-        elif key in (ACCOUNT, TAG):
+        elif key in (ACCOUNT, TAG, PAID):
             notes.append(f"{name}: banksman sets the fact {key} itself, so it is left out")
         elif _fact_value(value):
             facts[key] = value

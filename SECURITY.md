@@ -19,7 +19,10 @@ otherwise.
 ## Threat model
 
 banksman runs on one machine, as the user who calls it. It has no daemon, no listening
-port, and no network access. The design is in [docs/DESIGN.md](docs/DESIGN.md).
+port, and no network access of its own. Only the optional `android-remote` preset runs a
+program that calls a cloud service: the `android` command line tool, in `banksman admin
+discover`, in a start, in a new connection of a remote device, and in a take-back. The design
+is in [docs/DESIGN.md](docs/DESIGN.md).
 
 **The lease state belongs to one user.** When the operator turns stopping on, the reaper
 sends signals to the processes and process groups that a lease file lists; by default it
@@ -40,13 +43,22 @@ user. So banksman refuses a configuration file that a user other than the user a
 owns, or that group or others can write to. The reaper runs at the start of most commands,
 so a command that an agent runs can run the `on_void` hook of a void lease, in the
 environment of that command. Which hooks exist is the operator's choice: banksman ships no
-hook that ends anything.
+hook that ends anything. The `android` tool of the `android-remote` preset is a program too,
+and banksman runs it from the absolute path in the configuration, never from the `PATH`, so
+a file in a project cannot stand in for it. banksman ends only the reservations of remote
+devices that it created itself, and it records them in
+`~/.local/state/banksman/remote`, which it creates with mode `0700`; it refuses a file there
+that another user owns or that group or others can write to, because that record decides
+which reservations the reaper ends.
 
 **Agents are clients, not operators.** Agents acquire, touch, check, and release leases.
 Discovery, which decides what agents may use, and forced release, which takes a resource
 from another holder, are operator commands under `banksman admin`. An agent's permission
 rules can refuse all of them with one pattern; [docs/PROJECTS.md](docs/PROJECTS.md) gives
-such rules for Claude Code and Codex. The inventory that discovery writes,
+such rules for Claude Code and Codex. `--paid` lets a request get a resource whose use costs
+money, such as a remote device; [docs/PROJECTS.md](docs/PROJECTS.md) gives rules that ask the
+user before every `--paid`. Like the rules for `banksman admin`, they match the text of a
+command only, and do not see a `--paid` inside a script. The inventory that discovery writes,
 `~/.config/banksman/inventory.toml`, decides what agents may use, so banksman refuses an
 inventory that another user owns or that group or others can write to, as for the
 configuration file. A new scan never allows a name that a person refused. That is a guardrail against a careless
@@ -74,8 +86,11 @@ of `banksman log` carries the purpose only with `--verbose`, as `status` does.
 from discover hooks. banksman refuses an instance name that is not a valid resource name,
 keeps only short facts without control characters, removes terminal control sequences from
 notes, and never shows an account name that it does not accept. banksman sets the attributes
-`kind`, `account`, and `tag` itself, so a hook cannot make an instance look like one of
-another kind or like one with an allowed account. A request grants only what the
+`kind`, `paid`, `account`, and `tag` itself, so a hook cannot make an instance look like one of
+another kind, like one that costs nothing, or like one with an allowed account. What the
+`android` tool prints, and the values in its properties file and in the catalogue, are
+untrusted too: banksman accepts only ids, ports, and names of the expected form, and reads at
+most 1 MiB of output. A request grants only what the
 configuration declares or the inventory allows, also when it names a resource, and an
 account only when the inventory allows it. `status` shows only the resources that the configuration
 declares or the inventory allows, and the resources that have a lease, so it never shows an
@@ -84,11 +99,11 @@ such an instance, so `status` and `acquire` show only why a discovery failed and
 notes it has; only `banksman admin discover` shows the notes.
 
 **A grant is safe to read in a shell.** The `KEY=value` lines of `acquire` carry only the
-resource name, the kind, the lease id, the state, whether the lease was kept, a serial, and
-the granted accounts, and each
+resource name, the kind, the lease id, the state, whether the lease was kept, a serial, the id
+of a reservation, and the granted accounts, and each
 value has only the characters of a resource name; several accounts are separated by commas.
 The name of a part, which is the prefix of its keys, has only lowercase letters, digits, and
-`_`. A serial with other characters is not printed, and no other fact is printed.
+`_`. A serial or an id with other characters is not printed, and no other fact is printed.
 
 **The Gradle init script runs in every build of the user.** This applies only when the
 operator installs the optional build slots (DESIGN.md, section 11). On Gradle 7.4 and later,
@@ -111,11 +126,12 @@ leader of a new process group for its command, and signals that group only while
 its own child, is not yet reaped, so that the id of the group cannot name another group. It
 passes on to the group the SIGHUP, SIGINT, SIGQUIT, and SIGTERM that it gets, and it stops the
 group when the lease is lost. The command gets the resource, the kind, and the lease id in its
-environment, and the serial and the accounts of its lease, all with the characters of a
-resource name only. An argument that is exactly `{serial}` or `{resource}` is replaced with one
+environment, and the serial, the id of the reservation, and the accounts of its lease, all with
+the characters of a resource name only. An argument that is exactly `{serial}` or `{resource}` is replaced with one
 of these values; no other text of the command changes, and no shell reads it.
 
-**The serial comes from discovery only.** `run` and the hooks act on the serial in a lease:
+**The serial comes from discovery, or from a start that banksman performed.** `run` and the
+hooks act on the serial in a lease:
 they put it into `BANKSMAN_SERIAL` and, for a kind with an Android preset, into
 `ANDROID_SERIAL`. The holder cannot set it, so an agent cannot point the commands of its lease
 at the device of another holder. A serial that is not a valid resource name is not recorded.

@@ -14,12 +14,13 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from banksman import android
+from banksman import android, remote
 from banksman.config import Config, Kind
 from banksman.discovery import (
     ACCOUNT,
     FACT_NAME,
     KIND,
+    PAID,
     RUNNING,
     TAG,
     FactValue,
@@ -33,7 +34,7 @@ from banksman.lease import SerialSeen
 
 # Attributes that are known also when no instance has them now, so that a request for one waits
 # for a match instead of failing.
-KNOWN = frozenset({KIND, ACCOUNT, TAG, *android.FACTS})
+KNOWN = frozenset({KIND, ACCOUNT, TAG, PAID, *android.FACTS, *remote.FACTS})
 # The name of a part of a request. It becomes the prefix of the KEY=value lines of the grant.
 PART_NAME = re.compile(r"[a-z][a-z0-9_]{0,15}")
 _NUMBER = re.compile(r"-?[0-9]{1,10}")
@@ -76,6 +77,8 @@ class Candidate:
     # The allowed accounts that are signed in on the instance now, or None when its accounts
     # are not known.
     accounts: tuple[str, ...] | None = None
+    # Each use costs money, so a request gets it only with --paid.
+    paid: bool = False
 
     @property
     def cold(self) -> bool:
@@ -157,7 +160,14 @@ def search(
         if not kind.discovered:
             # The configuration that declares the instances is the permission.
             resources.extend(
-                Candidate(name, kind.name, kind.rank, {KIND: kind.name}, inventory.tags_of(name))
+                Candidate(
+                    name,
+                    kind.name,
+                    kind.rank,
+                    {KIND: kind.name, PAID: kind.paid},
+                    inventory.tags_of(name),
+                    paid=kind.paid,
+                )
                 for name in kind.instances()
             )
             continue
@@ -183,7 +193,9 @@ def search(
                 )
                 facts[ACCOUNT] = bool(accounts)
             tags = inventory.tags_of(instance.name)
-            resources.append(Candidate(instance.name, kind.name, kind.rank, facts, tags, accounts))
+            resources.append(
+                Candidate(instance.name, kind.name, kind.rank, facts, tags, accounts, kind.paid)
+            )
         present = {instance.name for instance in found.instances}
         allowed = inventory.kinds[kind.name].allowed if kind.name in inventory.kinds else ()
         absent.extend((kind.name, name) for name in allowed if name not in present)
@@ -201,10 +213,19 @@ def search(
                 or (candidate.accounts is not None and len(candidate.accounts) >= part.accounts)
             )
         ]
-        # Lower ranks first, so a request that does not name a kind gets, for example, an
-        # emulator before a physical device. Then an instance that runs before one that its
-        # holder must start, which saves the time and the memory of a start.
-        matching.sort(key=lambda candidate: (candidate.rank, candidate.cold, candidate.resource))
+        # A paid resource last, whatever the ranks are: a request gets one only when the user
+        # agreed to the cost, and only when nothing free can serve it. Then lower ranks first, so
+        # a request that does not name a kind gets, for example, an emulator before a physical
+        # device. Then an instance that runs before one that its holder must start, which saves
+        # the time and the memory of a start.
+        matching.sort(
+            key=lambda candidate: (
+                candidate.paid,
+                candidate.rank,
+                candidate.cold,
+                candidate.resource,
+            )
+        )
         candidates.append(tuple(matching))
     return Search(tuple(candidates), tuple(notes), tuple(absent), tuple(serials))
 
@@ -217,6 +238,7 @@ def _shown_notes(found: Found) -> list[str]:
     many other notes it has. The operator sees them with banksman admin discover.
     """
     shown = [] if found.failure is None else [f"kind {found.kind}: {found.failure}"]
+    shown += found.shown
     hidden = len(found.notes) - len(shown)
     if hidden:
         notes = "1 other note" if hidden == 1 else f"{hidden} other notes"

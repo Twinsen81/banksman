@@ -19,7 +19,10 @@ FREE = {
     "kind": None,
     "state": "free",
     "present": True,
+    "paid": False,
     "serial": None,
+    "handle": None,
+    "ends": None,
     "facts": {},
     "lease": None,
 }

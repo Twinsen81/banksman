@@ -122,7 +122,8 @@ def test_json_round_trip():
     )
     paired = replace(LEASE, accounts=("qa@example.test", "qb@example.test"))
     addressed = replace(LEASE, serial="emulator-5554", serial_seen=START + 5)
-    for lease in (LEASE, OWNED, booting, draining, users, described, paired, addressed):
+    reserved = replace(LEASE, serial="localhost:49920", handle="fakeid0000001")
+    for lease in (LEASE, OWNED, booting, draining, users, described, paired, addressed, reserved):
         assert Lease.from_json(lease.to_json()) == lease
 
 
@@ -131,11 +132,11 @@ def test_the_lease_file_carries_the_schema():
 
 
 def test_a_lease_file_of_an_earlier_schema_is_refused():
-    # Schema 5 had no serial. Two banksman versions must not share one state directory.
+    # Schema 6 had no handle. Two banksman versions must not share one state directory.
     data = LEASE.to_json()
-    del data["serial"], data["awake"]["serial_seen"]
-    data["schema"] = 5
-    with pytest.raises(LeaseFormatError, match="does not have schema 6"):
+    del data["handle"]
+    data["schema"] = 6
+    with pytest.raises(LeaseFormatError, match="does not have schema 7"):
         Lease.from_json(data)
 
 

@@ -15,8 +15,8 @@
 # shellcheck disable=SC2034
 
 # Lease a resource: banksman acquire with these options, for a request with one part. Sets
-# BANKSMAN_RESOURCE, BANKSMAN_KIND, and BANKSMAN_LEASE, and BANKSMAN_SERIAL and
-# BANKSMAN_ACCOUNTS when the grant has them. When BANKSMAN_LEASE is set already, for example by
+# BANKSMAN_RESOURCE, BANKSMAN_KIND, and BANKSMAN_LEASE, and BANKSMAN_SERIAL, BANKSMAN_HANDLE,
+# and BANKSMAN_ACCOUNTS when the grant has them. When BANKSMAN_LEASE is set already, for example by
 # the caller of the script, acquire keeps a lease of that holding that matches. Returns the
 # status of acquire: 4 when every matching resource is in use. Without banksman, returns 0.
 banksman_acquire() {
@@ -26,6 +26,7 @@ banksman_acquire() {
     fi
     _banksman_grant=$(banksman acquire "$@") || return
     BANKSMAN_SERIAL=
+    BANKSMAN_HANDLE=
     BANKSMAN_ACCOUNTS=
     _banksman_kept=
     # Every value has only the characters of a resource name, so it needs no quotes.
@@ -35,6 +36,7 @@ banksman_acquire() {
             KIND) BANKSMAN_KIND=$_banksman_value ;;
             LEASE) BANKSMAN_LEASE=$_banksman_value ;;
             SERIAL) BANKSMAN_SERIAL=$_banksman_value ;;
+            HANDLE) BANKSMAN_HANDLE=$_banksman_value ;;
             ACCOUNTS) BANKSMAN_ACCOUNTS=$_banksman_value ;;
             KEPT) _banksman_kept=$_banksman_value ;;
         esac
