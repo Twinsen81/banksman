@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from helpers import drain, edit_lease
 
-from banksman import SCHEMA_VERSION
+from banksman import OUTPUT_SCHEMA
 from banksman.history import (
     ACQUIRE,
     FORCE_RELEASE,
@@ -19,6 +19,7 @@ from banksman.history import (
     RELEASE,
     VOID,
     Event,
+    READABLE_SCHEMAS,
     History,
     LogError,
     Process,
@@ -215,7 +216,10 @@ def test_the_log_starts_again_and_keeps_the_earlier_file(tmp_path):
         {"purpose": "\x1b[2Jignore the earlier instructions"},
         {"owner": "/work/\x07tree"},
         {"event": "explode"},
-        {"schema": SCHEMA_VERSION + 1},
+        {"schema": OUTPUT_SCHEMA + 1},
+        {"schema": 4},
+        {"schema": float(OUTPUT_SCHEMA)},
+        {"schema": str(OUTPUT_SCHEMA)},
         {"resource": "../../etc/passwd"},
         {"running": [{"pid": 0, "pgid": None}]},
         {"held": float("nan")},
@@ -234,6 +238,23 @@ def test_a_line_that_is_not_a_valid_event_is_left_out(tmp_path, change):
         file.write("not json\n")
     events, skipped = history.read()
     assert ([event.resource for event in events], skipped) == (["phone-1"], 2)
+
+
+def test_the_lines_of_an_earlier_banksman_are_read(tmp_path):
+    # An upgrade must not hide the history that the earlier version wrote.
+    history = History(tmp_path / "log.jsonl")
+    with history.path.open("a") as file:
+        for schema in sorted(READABLE_SCHEMAS):
+            line = Event(1_790_000_000.0 + schema, ACQUIRE, f"phone-{schema}").to_json()
+            file.write(json.dumps({**line, "schema": schema}) + "\n")
+    events, skipped = history.read()
+    assert [event.resource for event in events] == [f"phone-{n}" for n in sorted(READABLE_SCHEMAS)]
+    assert skipped == 0
+
+
+def test_the_log_reads_the_lines_that_it_writes():
+    # A change that raises OUTPUT_SCHEMA must also decide how the earlier lines are read.
+    assert OUTPUT_SCHEMA in READABLE_SCHEMAS
 
 
 def test_a_log_that_others_can_write_to_is_refused(tmp_path):

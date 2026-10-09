@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from helpers import SRC, age_lease, drain, edit_lease, reap_in_child
 
-from banksman import SCHEMA_VERSION
+from banksman import LEASE_SCHEMA
 from banksman.errors import BanksmanError
 from banksman.fencing import Refused
 from banksman.lease import (
@@ -115,7 +115,7 @@ def test_reserve_writes_a_booting_lease_before_the_start(store, system, state_di
     lease = store.reserve("emu-1", "emulator", Holder(OWNER))
     assert lease.state == BOOTING
     data = lease_file(state_dir, "emu-1")
-    assert data["schema"] == SCHEMA_VERSION
+    assert data["schema"] == LEASE_SCHEMA
     assert data["state"] == BOOTING
     assert data["awake"]["boot_deadline"] == system.now + 5 * 60
     assert stat.S_IMODE((state_dir / "emu-1.json").stat().st_mode) == 0o600
@@ -687,7 +687,7 @@ def test_an_unreadable_lease_file_keeps_only_its_resource_out_of_use(store, stat
 
 def test_a_lease_file_from_a_newer_banksman_stops_every_command(store, state_dir):
     store.acquire("phone-1", "device", Holder(OWNER))
-    edit_lease(state_dir, "phone-1", lambda data: data.update(schema=SCHEMA_VERSION + 1))
+    edit_lease(state_dir, "phone-1", lambda data: data.update(schema=LEASE_SCHEMA + 1))
     for call in (store.snapshot, store.reap):
         with pytest.raises(StoreError, match="schema"):
             call()

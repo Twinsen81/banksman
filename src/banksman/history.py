@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from banksman import SCHEMA_VERSION
+from banksman import OUTPUT_SCHEMA
 from banksman.errors import BanksmanError
 from banksman.lease import (
     ISSUE,
@@ -50,6 +50,10 @@ EVENTS = (ACQUIRE, RELEASE, VOID, REAP, QUARANTINE, FORCE_RELEASE)
 # never fills the disk.
 MAX_LOG_BYTES = 10 * 1024 * 1024
 MAX_PROBLEM_LENGTH = 300
+# The schemas of the lines that this banksman reads. The log started with schema 5, and its
+# lines have not changed since, so the history of an earlier banksman stays readable after an
+# upgrade. A change that raises OUTPUT_SCHEMA must decide how the earlier lines are read.
+READABLE_SCHEMAS = frozenset({5, 6})
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
@@ -116,7 +120,7 @@ class Event:
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "schema": SCHEMA_VERSION,
+            "schema": OUTPUT_SCHEMA,
             "at": self.at,
             "event": self.event,
             "resource": self.resource,
@@ -143,8 +147,8 @@ class Event:
     @classmethod
     def from_json(cls, data: object) -> Event:
         """Return the event of a line of the log, or raise ValueError."""
-        if not isinstance(data, dict) or data.get("schema") != SCHEMA_VERSION:
-            raise ValueError(f"not an event of schema {SCHEMA_VERSION}")
+        if not isinstance(data, dict) or not _is_readable(data.get("schema")):
+            raise ValueError("not an event of a schema that this banksman reads")
         running = data.get("running")
         if not isinstance(running, list) or not all(
             isinstance(each, dict)
@@ -219,7 +223,7 @@ class History:
 
     def read(self) -> tuple[list[Event], int]:
         """Return the events in the order in which they happened, and how many lines were left
-        out because they are not valid events of this schema."""
+        out because they are not valid events of a schema that this banksman reads."""
         events: list[Event] = []
         skipped = 0
         for path in (self.earlier, self.path):
@@ -270,6 +274,10 @@ def _check_owner(path: Path, info: os.stat_result) -> None:
         raise LogError(f"{path} belongs to another user")
     if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise LogError(f"group or others can write to {path}")
+
+
+def _is_readable(schema: object) -> bool:
+    return isinstance(schema, int) and schema in READABLE_SCHEMAS
 
 
 def _get(data: dict[str, Any], key: str, check: Any) -> Any:

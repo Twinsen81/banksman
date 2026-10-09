@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from banksman import SCHEMA_VERSION
+from banksman import LEASE_SCHEMA
 from banksman.errors import BanksmanError
 from banksman.lease import (
     BOOT_TIMEOUT,
@@ -127,7 +127,7 @@ def test_json_round_trip():
 
 
 def test_the_lease_file_carries_the_schema():
-    assert LEASE.to_json()["schema"] == SCHEMA_VERSION
+    assert LEASE.to_json()["schema"] == LEASE_SCHEMA
 
 
 def test_a_lease_file_of_an_earlier_schema_is_refused():
@@ -150,7 +150,7 @@ def _user(**changes):
 @pytest.mark.parametrize(
     "change",
     [
-        lambda data: data.update(schema=SCHEMA_VERSION + 1),
+        lambda data: data.update(schema=LEASE_SCHEMA + 1),
         lambda data: data.update(state="lost"),
         lambda data: data.update(state=["ready"]),
         lambda data: data.update(resource="../escape"),

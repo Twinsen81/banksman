@@ -1,6 +1,10 @@
+import sys
+
 import pytest
+import shapes
 from helpers import FakeSystem
 
+from banksman import cli
 from banksman.config import CONFIG_ENV
 from banksman.inventory import INVENTORY_ENV
 from banksman.store import LOG_ENV, QUARANTINE_DIR_ENV, STATE_DIR_ENV, Store
@@ -56,3 +60,24 @@ def system():
 def store(state_dir, system):
     return Store(state_dir, system)
 
+
+@pytest.fixture(autouse=True)
+def output_shapes(monkeypatch):
+    # Every JSON document that a test makes the CLI print must have its recorded shape, so that a
+    # change of the output cannot pass without a decision about OUTPUT_SCHEMA.
+    printed = cli._print_json
+
+    def checked(payload):
+        shapes.check(_command(), payload)
+        printed(payload)
+
+    monkeypatch.setattr(cli, "_print_json", checked)
+
+
+def _command() -> str:
+    frame = sys._getframe(2)
+    while frame is not None:
+        if frame.f_code.co_name.startswith("_cmd_") and frame.f_globals is vars(cli):
+            return frame.f_code.co_name.removeprefix("_cmd_").replace("_", " ")
+        frame = frame.f_back
+    raise AssertionError("JSON was printed outside of a command")

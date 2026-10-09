@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from banksman import SCHEMA_VERSION
+from banksman import LEASE_SCHEMA
 from banksman.errors import BanksmanError
 
 BOOTING = "booting"
@@ -197,7 +197,7 @@ class Lease:
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "schema": SCHEMA_VERSION,
+            "schema": LEASE_SCHEMA,
             "lease_id": self.lease_id,
             "holding": self.holding,
             "resource": self.resource,
@@ -240,8 +240,8 @@ class Lease:
     def from_json(cls, data: object) -> Lease:
         if not isinstance(data, dict):
             raise LeaseFormatError("the file does not hold a JSON object")
-        if data.get("schema") != SCHEMA_VERSION:
-            raise LeaseFormatError(f"the file does not have schema {SCHEMA_VERSION}")
+        if data.get("schema") != LEASE_SCHEMA:
+            raise LeaseFormatError(f"the file does not have schema {LEASE_SCHEMA}")
         awake = data.get("awake")
         if not isinstance(awake, dict):
             raise LeaseFormatError("awake is missing or not valid")

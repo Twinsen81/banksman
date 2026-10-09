@@ -90,6 +90,11 @@ change between minor versions. The surfaces that will be treated as public API a
 (commands, flags, exit codes, and `KEY=value` output), the JSON output and its `schema`
 number, the lease file format, the configuration files, and the hook contract.
 
+A change of the JSON output needs a change of its recorded shape in `tests/shapes.py`. A new
+field needs only that. A field that is removed or renamed, or that changes its type or its
+meaning, also needs a new `OUTPUT_SCHEMA`. Any change of the lease file format needs a new
+`LEASE_SCHEMA`. Section 14 of [docs/DESIGN.md](docs/DESIGN.md) has the rules.
+
 ## Code of Conduct
 
 By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).

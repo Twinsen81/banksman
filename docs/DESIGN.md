@@ -149,10 +149,10 @@ leases instead.
   not a touch. `banksman run` gives its command only a serial that its own discovery confirms
   before the command starts: a discovery that fails cannot tell whether another instance has
   the serial by now.
-- **Damaged lease files.** A lease file with a newer `schema` stops every command, because
-  two versions of banksman must not share one state directory. A lease file that cannot be
-  read keeps its resource out of use, and `status` shows it. Other resources are not
-  affected.
+- **Damaged lease files.** A lease file with a newer lease schema stops every command,
+  because two versions of banksman must not share one state directory. A lease file that
+  cannot be read keeps its resource out of use, and `status` shows it. Other resources are
+  not affected.
 
 ## 4. Fencing, in both directions
 
@@ -711,12 +711,14 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
 - **The log file** is `~/.local/state/banksman/log.jsonl`, with the home directory from the
   user database. It is outside `/tmp`, as the quarantines are, because the history must
   outlive restarts and cleaners of temporary files. It has one JSON object for each event,
-  each with the `schema` number, and banksman adds to it only under the lock of the lease
-  store. At 10 MB, banksman starts a new file and keeps the earlier one as `log.jsonl.1`. When
-  the log cannot be written, the command still does its work and prints a warning: the change
-  to the lease is already written. `log` leaves out a line that is not a valid event, and says
-  how many it left out. `BANKSMAN_LOG` changes the path for tests; when only
-  `BANKSMAN_STATE_DIR` is set, the log is next to that directory.
+  each with the output schema number (section 14), and banksman adds to it only under the
+  lock of the lease store. At 10 MB, banksman starts a new file and keeps the earlier one as
+  `log.jsonl.1`. When the log cannot be written, the command still does its work and prints
+  a warning: the change to the lease is already written. `log` leaves out a line that is not
+  a valid event, and says how many it left out. It also reads the lines of an earlier output
+  schema whose events it knows, so an upgrade does not hide the history. `BANKSMAN_LOG`
+  changes the path for tests; when only `BANKSMAN_STATE_DIR` is set, the log is next to that
+  directory.
 - Not implemented yet: `banksman explain --where ...` answers the question "can I get one
   now?". For each matching resource it says free, held by whom and until when, not
   permitted, not present, or quarantined, and it gives the caller's place in the queue. An
@@ -972,8 +974,19 @@ permission rules can refuse all of them with one pattern, including ones added l
 
 ## 14. The contract
 
-- Lease files and every JSON document carry a `schema` number. A caller refuses a schema
-  it does not know, instead of guessing.
+- Lease files and every JSON document carry a `schema` number. There are two numbers, and
+  `banksman version` shows both.
+- The lease schema is the version of the lease file format. It changes on every change of
+  the format, also on a new field, because a banksman that does not know a field would drop
+  it when it writes the file again. So a lease file with a newer lease schema stops every
+  command (section 3).
+- The output schema is the version of the JSON that the commands print and of the lines of
+  the log. A new field does not change it, so a reader ignores the fields that it does not
+  know. It changes when a field is removed or renamed, or changes its type or its meaning. A
+  reader refuses an output schema that it does not know, instead of guessing. The test suite
+  records the shape of every JSON document, so a change of the output cannot pass without a
+  decision about the number.
+- The document of a `discover` hook has a schema of its own (section 8).
 - The surfaces treated as public API are the CLI (commands, flags, exit codes, `KEY=value`
   output), the JSON output, the lease file format, the log file format, the configuration
   files, and the hook contract.
