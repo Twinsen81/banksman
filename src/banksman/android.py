@@ -3,7 +3,7 @@
 This is the only module that runs `adb`. Discovery only reads: it lists the devices, reads
 system properties and the accounts of a device, asks a running emulator for its AVD name, and
 reads the AVD files. Each preset returns the same document that a discover hook prints. The adb
-guard lists the devices here too, and runs the adb call that it allows.
+guard lists the devices here too.
 """
 
 from __future__ import annotations
@@ -12,10 +12,10 @@ import os
 import pwd
 import re
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 from banksman.config import Android
 from banksman.errors import BanksmanError
@@ -185,15 +185,6 @@ def parse_transports(text: str) -> list[Transport]:
                 values["devpath"] = field
         found.append(Transport(serial, state, **values))
     return found
-
-
-def exec_adb(adb: str, arguments: Sequence[str], env: Mapping[str, str]) -> NoReturn:
-    """Run the adb at this path in place of this process: it keeps the pid, the terminal, and the
-    signals.
-
-    Raise OSError when adb cannot start.
-    """
-    os.execve(adb, [adb, *arguments], env)
 
 
 def adb_path(settings: Android) -> str:

@@ -38,7 +38,7 @@ OTHER = Holder(
 @pytest.fixture(autouse=True)
 def caller_environment(monkeypatch):
     # The environment of the person who runs the tests must not change what the guard decides.
-    for name in ("BANKSMAN_LEASE", "ANDROID_SERIAL", guard.MARKER):
+    for name in ("BANKSMAN_LEASE", "ANDROID_SERIAL", "BANKSMAN_GUARD"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -54,6 +54,10 @@ class NoProcessList(FakeSystem):
 
     def process_table(self):
         raise AssertionError("the guard read the process list")
+
+
+PHONE = Transport("R5CR1234ABC", "device", devpath="usb:1-1", transport_id="3")
+EMULATOR = Transport("emulator-5554", "device", transport_id="4")
 
 
 def no_adb():
@@ -120,6 +124,11 @@ def check(system, *arguments, env=None, adb=no_adb):
         (["-t", "7", "shell"], Call(DEVICE, "shell", transport_id="7")),
         (["-t7", "shell"], Call(DEVICE, "shell", transport_id="7")),
         (["-t", "0", "shell"], Call(DEVICE, "shell")),
+        (["-s", "X", "-t", "4", "shell"], Call(DEVICE, "shell", "X", "4")),
+        (["--one-device", "X", "start-server"], Call(HOST, "start-server")),
+        (["--one-device", "X", "-s", "Y", "shell"], Call(DEVICE, "shell", "Y")),
+        (["--reply-fd", "3", "-s", "Y", "shell"], Call(DEVICE, "shell", "Y")),
+        (["--one-device"], Call(HOST)),
         (["-d", "reboot"], Call(DEVICE, "reboot", transport="usb")),
         (["-e", "emu", "kill"], Call(DEVICE, "emu", transport="local", console=True)),
         (["-e", "-s", "X", "shell"], Call(DEVICE, "shell", "X", transport="local")),
@@ -130,7 +139,14 @@ def check(system, *arguments, env=None, adb=no_adb):
         (["-L", "tcp:5038", "shell"], Call(DEVICE, "shell", server=("-L", "tcp:5038"))),
         (["-a", "--exit-on-write-error", "logcat"], Call(DEVICE, "logcat")),
         (["forward", "tcp:8000", "tcp:8000"], Call(DEVICE, "forward")),
-        (["wait-for-device", "shell", "ls"], Call(DEVICE, "wait-for-device")),
+        (["wait-for-device", "shell", "ls"], Call(DEVICE, "wait-for-device shell")),
+        (["wait-for-device"], Call(HOST, "wait-for-device")),
+        (["wait-for-device", "devices"], Call(HOST, "wait-for-device devices")),
+        (["wait-for-device", "kill-server"], Call(ALL, "wait-for-device kill-server")),
+        (
+            ["wait-for-usb-device", "forward", "--remove-all"],
+            Call(ALL, "wait-for-usb-device forward --remove-all"),
+        ),
         (["reconnect"], Call(DEVICE, "reconnect")),
         (["reconnect", "device"], Call(DEVICE, "reconnect")),
         (["unknown-command"], Call(DEVICE, "unknown-command")),
@@ -140,7 +156,7 @@ def check(system, *arguments, env=None, adb=no_adb):
         (["reconnect", "offline"], Call(ALL, "reconnect offline")),
         (["-s", "X", "forward", "--remove-all"], Call(ALL, "forward --remove-all")),
         (["-s", "X", "emu", "kill"], Call(DEVICE, "emu", "X", console=True)),
-        (["wait-for-device", "emu", "kill"], Call(DEVICE, "wait-for-device", console=True)),
+        (["wait-for-device", "emu", "kill"], Call(DEVICE, "wait-for-device emu", console=True)),
         (["disconnect"], Call(ALL, "disconnect")),
         (["-s", "X", "disconnect", "192.0.2.7:5555"], Call(DEVICE, "disconnect", "192.0.2.7:5555")),
         # adb refuses these itself, and acts on nothing.
@@ -374,6 +390,13 @@ def test_d_e_and_t_choose_the_device_as_adb_does(store, system, option, found):
     assert f"another holder leases {found}" in check(system, *option, "shell", adb=devices)
 
 
+def test_t_wins_over_s_as_in_adb(store, system):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    devices = listing(PHONE, EMULATOR)
+    assert "another holder" in check(system, "-s", "R5CR1234ABC", "-t", "4", "shell", adb=devices)
+    assert check(system, "-s", "emulator-5554", "-t", "3", "shell", adb=devices) is None
+
+
 @pytest.mark.parametrize(
     "given",
     ["model:Pixel_8", "product:husky", "device:husky", "usb:1-1", "tcp:192.0.2.7", "192.0.2.7"],
@@ -402,10 +425,6 @@ def test_disconnect_acts_on_the_device_that_it_names(store, system):
 
 
 # adb emu finds its emulator by rules of its own.
-
-PHONE = Transport("R5CR1234ABC", "device", devpath="usb:1-1", transport_id="3")
-EMULATOR = Transport("emulator-5554", "device", transport_id="4")
-
 
 @pytest.mark.parametrize("option", [[], ["-d"], ["-e"], ["-t", "3"]])
 def test_emu_without_a_serial_acts_on_the_only_emulator(store, system, option):
@@ -523,43 +542,33 @@ def test_reconnect_without_offline_acts_on_one_device(store, system):
 
 
 @pytest.fixture
-def ran(monkeypatch, system):
-    """Record the adb that the guard runs, instead of running it. Like the real exec, the
-    recording never returns: it ends the command with status 0."""
-    calls = []
-
-    def exec_adb(adb, arguments, env):
-        calls.append((adb, list(arguments), env.get(guard.MARKER)))
-        raise SystemExit(0)
-
-    monkeypatch.setattr(android, "exec_adb", exec_adb)
+def machine(monkeypatch, system):
     monkeypatch.setattr(guard, "Machine", lambda: system)
-    return calls
 
 
-def guarded(*arguments):
+def guarded(*arguments, fallback=None):
     """Run banksman guard adb, and return its exit status."""
-    try:
-        return guard.main(["adb", "--", *arguments])
-    except SystemExit as exc:
-        return exc.code
+    options = [] if fallback is None else [guard.FALLBACK_OPTION, fallback]
+    return guard.main(["adb", *options, "--", *arguments])
 
 
-def test_the_guard_runs_the_adb_of_the_sdk_with_the_same_arguments(ran, config_path, tmp_path):
+def test_a_call_that_may_run_prints_the_adb_of_the_configuration(
+    machine, config_path, tmp_path, capsys
+):
     write_config(config_path, f'[android]\nsdk = "{tmp_path / "sdk"}"\n')
-    assert guarded("-s", "emulator-5554", "shell", "echo", "a b") == 0
-    adb = str(tmp_path / "sdk" / "platform-tools" / "adb")
-    assert ran == [(adb, ["-s", "emulator-5554", "shell", "echo", "a b"], "1")]
+    assert guarded("-s", "emulator-5554", "shell", fallback="/opt/sdk/platform-tools/adb") == 0
+    assert capsys.readouterr().out == f"{tmp_path / 'sdk' / 'platform-tools' / 'adb'}\n"
 
 
-def test_a_refused_call_exits_with_3_and_runs_no_adb(ran, store, system, capsys):
+def test_a_refused_call_exits_with_3_and_prints_no_adb(machine, store, system, capsys):
     lease(store, system, "e2e_phone", other(), serial="emulator-5554")
     assert guarded("-s", "emulator-5554", "shell") == guard.EXIT_REFUSED
-    assert ran == []
-    assert capsys.readouterr().err.startswith("banksman: adb shell: refused: another holder")
+    printed = capsys.readouterr()
+    assert printed.out == ""
+    assert printed.err.startswith("banksman: adb shell: refused: another holder")
 
 
-def test_a_refusal_has_no_terminal_control_sequences(ran, system, config_path, capsys):
+def test_a_refusal_has_no_terminal_control_sequences(machine, config_path, capsys):
     # The serial in the message comes from the command line of the caller.
     write_config(config_path, "[guard]\nstrict = true\n")
     assert guarded("-s", "\x1b]0;title\x07emulator-5556", "shell") == guard.EXIT_REFUSED
@@ -568,16 +577,9 @@ def test_a_refusal_has_no_terminal_control_sequences(ran, system, config_path, c
     assert "\x1b" not in err and "\x07" not in err
 
 
-@pytest.mark.parametrize(
-    "broken",
-    [
-        "configuration",
-        "lease schema",
-        "process list",
-    ],
-)
+@pytest.mark.parametrize("broken", ["configuration", "lease schema", "process list"])
 def test_a_guard_that_fails_lets_the_call_run_and_says_so(
-    broken, ran, store, system, config_path, state_dir, capsys, monkeypatch
+    broken, machine, store, system, config_path, state_dir, capsys, monkeypatch
 ):
     lease(store, system, "e2e_phone", other(), serial="emulator-5554")
     if broken == "configuration":
@@ -590,55 +592,30 @@ def test_a_guard_that_fails_lets_the_call_run_and_says_so(
             raise MachineError("cannot run ps: not permitted")
 
         monkeypatch.setattr(system, "process_table", blocked)
-    assert guarded("-s", "emulator-5554", "shell") == 0
-    assert len(ran) == 1
-    err = capsys.readouterr().err
-    assert err.startswith("banksman: adb guard: this adb call is not checked: ")
+    assert guarded("-s", "emulator-5554", "shell", fallback="/opt/adb") == 0
+    printed = capsys.readouterr()
+    assert printed.out == "/opt/adb\n"
+    assert printed.err.startswith("banksman: adb guard: this adb call is not checked: ")
 
 
-def test_without_a_configuration_the_guard_runs_the_adb_of_the_wrapper(ran, config_path, capsys):
-    write_config(config_path, "[guard]\nstrict = 'yes'\n")
-    status = guarded_with_fallback("/opt/sdk/platform-tools/adb", "devices")
-    assert status == 0
-    assert ran == [("/opt/sdk/platform-tools/adb", ["devices"], "1")]
-    assert "this adb call is not checked" in capsys.readouterr().err
-
-
-def test_with_a_configuration_the_guard_runs_the_adb_of_the_configuration(
-    ran, config_path, tmp_path
+@pytest.mark.parametrize(
+    "configuration", [None, "[holder]\nagents = []\n", "[guard]\nstrict = 'yes'\n"]
+)
+def test_without_an_sdk_in_the_configuration_the_guard_gives_the_adb_of_the_wrapper(
+    machine, config_path, capsys, configuration
 ):
-    write_config(config_path, f'[android]\nsdk = "{tmp_path / "sdk"}"\n')
-    assert guarded_with_fallback("/opt/sdk/platform-tools/adb", "devices") == 0
-    assert ran[0][0] == str(tmp_path / "sdk" / "platform-tools" / "adb")
+    # No file, a file without [android], and a file that cannot be read.
+    if configuration is not None:
+        write_config(config_path, configuration)
+    assert guarded("-s", "emulator-5554", "shell", fallback="/opt/sdk/platform-tools/adb") == 0
+    assert capsys.readouterr().out == "/opt/sdk/platform-tools/adb\n"
 
 
-def guarded_with_fallback(fallback, *arguments):
-    try:
-        return guard.main(["adb", guard.FALLBACK_OPTION, fallback, "--", *arguments])
-    except SystemExit as exc:
-        return exc.code
-
-
-def test_a_guard_that_runs_itself_again_stops(ran, monkeypatch, capsys):
-    monkeypatch.setenv(guard.MARKER, "1")
-    assert guarded("devices") == 1
-    assert ran == []
-    assert "runs this guard again" in capsys.readouterr().err
-
-
-def test_an_adb_that_does_not_exist_gives_127(config_path, tmp_path, capsys):
-    write_config(config_path, f'[android]\nsdk = "{tmp_path / "missing"}"\n')
-    assert guard.main(["adb", "--", "devices"]) == 127
-    assert "Set sdk in [android]" in capsys.readouterr().err
-
-
-def test_an_adb_that_cannot_run_gives_126(config_path, tmp_path):
-    adb = tmp_path / "sdk" / "platform-tools" / "adb"
-    adb.parent.mkdir(parents=True)
-    adb.write_text("not a program")
-    adb.chmod(0o644)
-    write_config(config_path, f'[android]\nsdk = "{tmp_path / "sdk"}"\n')
-    assert guard.main(["adb", "--", "devices"]) == 126
+def test_without_the_adb_of_the_wrapper_the_guard_gives_the_adb_of_the_default_sdk(
+    machine, tmp_path, capsys
+):
+    assert guarded("devices") == 0
+    assert capsys.readouterr().out.startswith(str(tmp_path / "home"))
 
 
 def test_the_guard_knows_only_adb(capsys):
@@ -646,49 +623,16 @@ def test_the_guard_knows_only_adb(capsys):
     assert capsys.readouterr().err == guard.USAGE + "\n"
 
 
-def test_the_command_line_starts_the_guard_too(ran, config_path):
-    write_config(config_path, "not toml")
-    with pytest.raises(SystemExit):
-        cli.main(["guard", "adb", guard.FALLBACK_OPTION, "/opt/adb", "--", "devices"])
-    assert ran == [("/opt/adb", ["devices"], "1")]
-
-
-# The guard in a process of its own, with the real exec.
-
-FAKE_ADB = """#!/bin/sh
-printf '%s\\n' "$@" > "$(dirname "$0")/arguments"
-echo "${BANKSMAN_GUARD:-unset}" > "$(dirname "$0")/marker"
-exit 7
-"""
-
-
-@pytest.fixture
-def fake_adb(tmp_path, config_path):
-    adb = tmp_path / "sdk" / "platform-tools" / "adb"
-    adb.parent.mkdir(parents=True)
-    adb.write_text(FAKE_ADB)
-    adb.chmod(0o755)
-    write_config(config_path, f'[android]\nsdk = "{tmp_path / "sdk"}"\n[holder]\nagents = []\n')
-    return adb
-
-
-def run_banksman(*arguments, env=None, **options):
-    return subprocess.run(
-        [sys.executable, "-m", "banksman", *arguments],
-        env={**os.environ, "PYTHONPATH": SRC, **(env or {})},
-        capture_output=True,
-        text=True,
-        timeout=60,
-        **options,
-    )
-
-
-def test_the_guard_runs_adb_in_its_own_place(fake_adb):
-    result = run_banksman("guard", "adb", "--", "-s", "emulator-5554", "shell", "echo 'a b'")
-    assert result.returncode == 7
-    arguments = (fake_adb.parent / "arguments").read_text().splitlines()
-    assert arguments == ["-s", "emulator-5554", "shell", "echo 'a b'"]
-    assert (fake_adb.parent / "marker").read_text().strip() == "1"
+def test_the_command_line_gives_the_arguments_of_adb_to_the_guard_as_they_are(
+    monkeypatch, capsys
+):
+    arguments = ["guard", "adb", guard.FALLBACK_OPTION, "/opt/adb", "--", "devices", "-l"]
+    calls = []
+    original = guard.main
+    monkeypatch.setattr(guard, "main", lambda argv: calls.append(argv) or original(argv))
+    assert cli.main(arguments) == 0
+    assert calls == [arguments[1:]]
+    assert capsys.readouterr().out == "/opt/adb\n"
 
 
 def test_the_guard_does_not_import_the_rest_of_the_command_line():
@@ -724,33 +668,25 @@ def test_the_launcher_starts_the_guard_without_the_command_line(monkeypatch):
     assert calls == [["adb", "--", "devices"]]
 
 
-def test_the_fast_path_adds_little_time_to_an_adb_call(tmp_path):
-    # Without leases, the guard reads no process list and runs no adb devices. The bound is
-    # wide, so that a slow machine does not fail the test; the measurement is printed.
-    fast = tmp_path / "fast-sdk" / "platform-tools" / "adb"
-    fast.parent.mkdir(parents=True)
-    fast.write_text("#!/bin/sh\nexit 0\n")
-    fast.chmod(0o755)
-    config = tmp_path / "fast.toml"
-    write_config(config, f'[android]\nsdk = "{fast.parent.parent}"\n')
-    env = {**os.environ, "PYTHONPATH": SRC, "BANKSMAN_CONFIG": str(config)}
-
-    def median(command):
-        times = []
-        for _ in range(5):
-            start = time.perf_counter()
-            subprocess.run(command, env=env, check=True, timeout=60)
-            times.append(time.perf_counter() - start)
-        return statistics.median(times)
-
-    alone = median([str(fast), "-s", "emulator-5554", "shell", "true"])
-    guard_command = [sys.executable, "-m", "banksman", "guard", "adb", "--"]
-    with_guard = median([*guard_command, "-s", "emulator-5554", "shell", "true"])
-    print(f"\nthe adb guard adds {1000 * (with_guard - alone):.0f} ms to an adb call")
-    assert with_guard - alone < 0.5
-
-
 # The wrapper: banksman admin adb-shim.
+
+# The fake adb records its arguments, the marker of the wrapper, and a variable of the caller.
+FAKE_ADB = """#!/bin/sh
+here=$(dirname "$0")
+printf '%s\\n' "$@" > "$here/arguments"
+echo "${BANKSMAN_GUARD:-unset} ${ANDROID_SERIAL:-unset}" > "$here/environment"
+exit 7
+"""
+
+
+@pytest.fixture
+def fake_adb(tmp_path, config_path):
+    adb = tmp_path / "sdk" / "platform-tools" / "adb"
+    adb.parent.mkdir(parents=True)
+    adb.write_text(FAKE_ADB)
+    adb.chmod(0o755)
+    write_config(config_path, f'[android]\nsdk = "{tmp_path / "sdk"}"\n[holder]\nagents = []\n')
+    return adb
 
 
 @pytest.fixture
@@ -761,6 +697,33 @@ def shim(fake_adb, tmp_path, capsys):
     path.write_text(capsys.readouterr().out)
     path.chmod(0o755)
     return path
+
+
+def banksman_on_path(tmp_path, script):
+    """Return a PATH whose banksman is this shell script, and the system directories."""
+    directory = tmp_path / "bin"
+    directory.mkdir(exist_ok=True)
+    program = directory / "banksman"
+    program.write_text(script)
+    program.chmod(0o755)
+    return f"{directory}:/usr/bin:/bin"
+
+
+def real_banksman(tmp_path):
+    source, python = shlex.quote(SRC), shlex.quote(sys.executable)
+    return banksman_on_path(
+        tmp_path, f'#!/bin/sh\nPYTHONPATH={source} exec {python} -m banksman "$@"\n'
+    )
+
+
+def run_wrapper(shim, *arguments, path, env=None):
+    return subprocess.run(
+        [str(shim), *arguments],
+        env={**os.environ, "PATH": path, **(env or {})},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
 
 
 def test_admin_adb_shim_prints_the_wrapper_with_the_adb_of_the_sdk(shim, fake_adb):
@@ -774,20 +737,32 @@ def test_admin_adb_shim_warns_when_the_sdk_has_no_adb(config_path, tmp_path, cap
     assert "does not exist. Set sdk in [android]" in capsys.readouterr().err
 
 
-def test_the_wrapper_passes_every_argument_to_the_guard(shim, fake_adb, tmp_path):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    fake = bin_dir / "banksman"
-    fake.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {shlex.quote(str(tmp_path / 'got'))}\n")
-    fake.chmod(0o755)
-    result = subprocess.run(
-        [str(shim), "-s", "emulator-5554", "shell", "echo 'a  b'", ""],
-        env={**os.environ, "PATH": f"{bin_dir}:/usr/bin:/bin"},
-        capture_output=True,
-        text=True,
-        timeout=60,
+def test_the_wrapper_runs_adb_with_the_arguments_and_the_environment_of_the_call(
+    shim, fake_adb, tmp_path
+):
+    result = run_wrapper(
+        shim,
+        "-s",
+        "emulator-5554",
+        "shell",
+        "echo 'a  b'",
+        "",
+        path=real_banksman(tmp_path),
+        env={"ANDROID_SERIAL": "emulator-5554"},
     )
-    assert result.returncode == 0
+    assert (result.returncode, result.stderr) == (7, "")
+    arguments = (fake_adb.parent / "arguments").read_text().split("\n")[:-1]
+    assert arguments == ["-s", "emulator-5554", "shell", "echo 'a  b'", ""]
+    assert (fake_adb.parent / "environment").read_text() == "1 emulator-5554\n"
+
+
+def test_the_wrapper_passes_every_argument_to_the_guard(shim, fake_adb, tmp_path):
+    got = shlex.quote(str(tmp_path / "got"))
+    path = banksman_on_path(
+        tmp_path, f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {got}\necho {shlex.quote(str(fake_adb))}\n"
+    )
+    result = run_wrapper(shim, "-s", "emulator-5554", "shell", "echo 'a  b'", "", path=path)
+    assert result.returncode == 7
     assert (tmp_path / "got").read_text().split("\n")[:-1] == [
         "guard",
         "adb",
@@ -802,16 +777,57 @@ def test_the_wrapper_passes_every_argument_to_the_guard(shim, fake_adb, tmp_path
     ]
 
 
+def test_a_refusal_ends_the_call_with_3_and_runs_no_adb(shim, fake_adb, tmp_path):
+    path = banksman_on_path(tmp_path, "#!/bin/sh\necho 'banksman: refused' >&2\nexit 3\n")
+    result = run_wrapper(shim, "-s", "emulator-5554", "shell", path=path)
+    assert (result.returncode, result.stderr) == (3, "banksman: refused\n")
+    assert not (fake_adb.parent / "arguments").exists()
+
+
+def test_ctrl_c_during_the_check_ends_the_call(shim, fake_adb, tmp_path):
+    path = banksman_on_path(tmp_path, "#!/bin/sh\nexit 130\n")
+    assert run_wrapper(shim, "devices", path=path).returncode == 130
+    assert not (fake_adb.parent / "arguments").exists()
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        # Python cannot start, for example after an upgrade of Python.
+        "#!/nonexistent/python3\n",
+        # An error, such as an import error after a half-finished upgrade.
+        "#!/bin/sh\necho 'Traceback' >&2\nexit 1\n",
+        # An answer that is not the path of an adb.
+        "#!/bin/sh\necho 'not a path'\n",
+        "#!/bin/sh\nexit 0\n",
+    ],
+)
+def test_a_banksman_that_fails_lets_the_wrapper_run_the_saved_adb(
+    shim, fake_adb, tmp_path, script
+):
+    result = run_wrapper(shim, "devices", path=banksman_on_path(tmp_path, script))
+    assert result.returncode == 7
+    assert (fake_adb.parent / "arguments").read_text() == "devices\n"
+    assert "banksman: adb guard: this adb call is not checked" in result.stderr
+
+
+def test_the_wrapper_stops_when_the_adb_of_the_sdk_is_the_wrapper(shim, fake_adb, tmp_path):
+    # A configuration whose sdk holds a copy of the wrapper as its adb.
+    loop = tmp_path / "loop" / "platform-tools" / "adb"
+    loop.parent.mkdir(parents=True)
+    loop.write_text(shim.read_text())
+    loop.chmod(0o755)
+    path = banksman_on_path(tmp_path, f"#!/bin/sh\necho {shlex.quote(str(loop))}\n")
+    result = run_wrapper(shim, "devices", path=path)
+    assert result.returncode == 1
+    assert "the adb of the Android SDK runs this wrapper again" in result.stderr
+    assert not (fake_adb.parent / "arguments").exists()
+
+
 def test_without_banksman_the_wrapper_runs_adb_and_says_that_the_call_is_not_checked(
     shim, fake_adb
 ):
-    result = subprocess.run(
-        [str(shim), "devices"],
-        env={**os.environ, "PATH": "/usr/bin:/bin"},
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    result = run_wrapper(shim, "devices", path="/usr/bin:/bin")
     assert result.returncode == 7
     assert (fake_adb.parent / "arguments").read_text() == "devices\n"
     assert "banksman is not on the PATH, so this adb call is not checked" in result.stderr
@@ -820,7 +836,7 @@ def test_without_banksman_the_wrapper_runs_adb_and_says_that_the_call_is_not_che
 def test_the_wrapper_uses_no_banksman_from_a_relative_directory(shim, fake_adb, tmp_path):
     relative = tmp_path / "project" / "bin"
     relative.mkdir(parents=True)
-    (relative / "banksman").write_text("#!/bin/sh\nexit 99\n")
+    (relative / "banksman").write_text("#!/bin/sh\nexit 3\n")
     (relative / "banksman").chmod(0o755)
     result = subprocess.run(
         [str(shim), "devices"],
@@ -831,3 +847,23 @@ def test_the_wrapper_uses_no_banksman_from_a_relative_directory(shim, fake_adb, 
         timeout=60,
     )
     assert result.returncode == 7
+
+
+def test_the_fast_path_adds_little_time_to_an_adb_call(shim, fake_adb, tmp_path):
+    # Without leases, the guard reads no process list and runs no adb devices. The bound is
+    # wide, so that a slow machine does not fail the test; the measurement is printed.
+    env = {**os.environ, "PATH": real_banksman(tmp_path)}
+
+    def median(command):
+        times = []
+        for _ in range(5):
+            start = time.perf_counter()
+            assert subprocess.run(command, env=env, timeout=60).returncode == 7
+            times.append(time.perf_counter() - start)
+        return statistics.median(times)
+
+    arguments = ["-s", "emulator-5554", "shell", "true"]
+    alone = median([str(fake_adb), *arguments])
+    with_guard = median([str(shim), *arguments])
+    print(f"\nthe adb guard adds {1000 * (with_guard - alone):.0f} ms to an adb call")
+    assert with_guard - alone < 0.5

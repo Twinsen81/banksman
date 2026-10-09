@@ -834,11 +834,17 @@ is a setup of the operator, and a project needs nothing for it.
   chmod +x ~/.local/share/banksman/bin/adb
   ```
 
-  For every call, the wrapper runs `banksman guard adb -- <arguments>`. The guard decides, and
-  then runs the adb of the Android SDK of the configuration (section 8) in its own place, with
-  the same pid, arguments, terminal, and environment. When the configuration cannot be read, it
-  runs the adb that the wrapper saved when banksman printed it. It never runs an adb from the
-  `PATH`, so it never runs itself again. The wrapper uses only a `banksman` in an absolute directory of the
+  For every call, the wrapper runs `banksman guard adb --fallback-adb <saved adb> -- <arguments>`
+  as a child process that only decides: with exit status 0, it prints the path of the adb to
+  run, and with exit status 3, it refuses the call. The wrapper then runs that adb in its own
+  place, with the pid, the arguments, the terminal, and the environment of the call, and with
+  `BANKSMAN_GUARD=1` added. The adb server that a call starts keeps that variable, and nothing
+  reads it. The adb is the adb of the Android SDK of the configuration (section 8). When the
+  configuration names no `sdk`, or cannot be read, it is the adb that the wrapper saved when
+  banksman printed it, because the default SDK can be missing, or have an adb of another version,
+  which would restart the adb server. It is never an adb from the `PATH`. When the adb of the SDK
+  is a wrapper itself, that wrapper sees `BANKSMAN_GUARD` and stops, so the two never run each
+  other without end. The wrapper uses only a `banksman` in an absolute directory of the
   `PATH`, so a file in a project cannot stand in for it. banksman does not install the wrapper
   itself: the operator chooses where it goes. After an upgrade of banksman, or a change of `sdk`
   in `[android]`, the operator saves it again. A wrapper on the `PATH` is better than a hook of
@@ -893,18 +899,20 @@ is a setup of the operator, and a project needs nothing for it.
 - **Speed.** The guard runs before every adb call, and a UI test can make many. It reads the
   lease files without the lock: every write replaces a whole file with a rename, so each file
   that it reads is whole. It also reads the copies of the quarantines, so a quarantine counts
-  also after a restart emptied the state directory. It does not reap, and it runs no discovery. It reads the process list
-  only when the lease id in `BANKSMAN_LEASE` does not decide, and it asks `adb devices` only
-  when the command line does not name the device by a serial that a lease has. On the Mac where
-  it was measured, it adds about 30 ms to a call that needs no process list, and about 55 ms to
-  one that needs it.
+  also after a restart emptied the state directory. It does not reap, and it runs no discovery.
+  It reads the process list only when the lease id in `BANKSMAN_LEASE` does not decide, and it
+  asks `adb devices` only when the command line does not name the device by a serial that a
+  lease has. On the Mac where it was measured, the wrapper and the guard together add about
+  35 ms to a call that needs no process list, and about 70 ms to one that needs it.
 - **When the guard fails.** When banksman cannot decide, for example because of an error in the
   configuration, a lease file of a newer banksman, or a process list that the sandbox of an
   agent hides, the call runs, and banksman says on standard error that the call is not checked.
-  Without a configuration, it runs the adb that the wrapper saved, because the default SDK can
-  be missing, or have an adb of another version, which would restart the adb server.
-  A broken guard that blocks every device is worse than a short time without protection.
-  Without `banksman` on the `PATH`, the wrapper runs adb, and says the same.
+  When banksman cannot start, for example because its Python broke after an upgrade, or ends in
+  any other way, the wrapper runs the adb that it saved, and says the same. That is why the
+  wrapper runs adb itself: a wrapper that replaced itself with banksman could not fall back. A
+  broken guard that blocks every device is worse than a short time without protection. Without
+  `banksman` on the `PATH`, the wrapper runs the saved adb, and says the same. Ctrl-C during the
+  check ends the call.
 - **Limits.** The guard is a guardrail, not a security boundary. These do not pass through it: a
   call through the full path of adb, such as the adb of Android Studio; a tool that talks to the
   adb server itself, such as the connected tests of the Android Gradle plugin, for which the
@@ -939,7 +947,7 @@ banksman explain --where <attr><op><value> ...
 banksman log     [--since <time>] [--resource <name>] [--json] [--verbose]
 banksman reap
 banksman version [--json]
-banksman guard adb -- <adb argument> ...                           # what the adb wrapper runs
+banksman guard adb [--fallback-adb <path>] -- <adb argument> ...  # what the adb wrapper runs
 
 banksman admin discover [--kind <kind>] [--all] [--json] [--yes]
 banksman admin release --force --resource <name>

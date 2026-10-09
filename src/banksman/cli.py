@@ -330,11 +330,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     guard_command = commands.add_parser(
         "guard",
-        help="check an adb call against the leases, and run adb; the wrapper that admin adb-shim"
-        " prints runs it",
+        help="check an adb call against the leases, and print the adb to run; the wrapper that"
+        " admin adb-shim prints runs it",
         allow_abbrev=False,
     )
+    # Only for the help: main gives the arguments of guard to the guard as they are, because
+    # argparse would read the arguments of adb as its own.
     guard_command.add_argument("tool", choices=["adb"], help="the program that the call runs")
+    guard_command.add_argument(
+        guard.FALLBACK_OPTION,
+        metavar="PATH",
+        help="the adb to run when the configuration names no sdk or cannot be read",
+    )
     guard_command.add_argument(
         "arguments",
         nargs=argparse.REMAINDER,
@@ -1406,11 +1413,6 @@ def _cmd_admin_adb_shim(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_guard(args: argparse.Namespace) -> int:
-    # The command line usually starts the guard without this parser (see launcher.py).
-    return guard.main([args.tool, *args.arguments])
-
-
 @dataclass
 class _Choice:
     """An instance or an account that discover shows, and whether it is selected."""
@@ -1757,13 +1759,15 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "admin discover": _cmd_admin_discover,
     "admin gradle-init": _cmd_admin_gradle_init,
     "admin adb-shim": _cmd_admin_adb_shim,
-    "guard": _cmd_guard,
 }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["guard"]:
+        return guard.main(arguments[1:])
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     if args.command == "version":
         return _cmd_version(args)
     name = args.command if args.command != "admin" else f"admin {args.admin_command}"

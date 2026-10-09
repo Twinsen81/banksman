@@ -155,9 +155,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `banksman admin release --force --resource <name>` frees their resources.
 - The optional adb guard. `banksman admin adb-shim` prints an `sh` wrapper that the operator
   saves as `adb` in a directory first on the `PATH` of the agents. For every call, it runs
-  `banksman guard adb`, which refuses an agent's device command with exit status 3 when another
-  holding leases the device, and then runs the adb of the SDK of the configuration in its own
-  place. A call passes for a person, for a device without a lease, for the holding of the lease
+  `banksman guard adb`, which only decides: it refuses an agent's device command with exit
+  status 3 when another holding leases the device, or prints the adb of the SDK of the
+  configuration, which the wrapper then runs in its own place. A call passes for a person, for a device without a lease, for the holding of the lease
   id in `BANKSMAN_LEASE` or of an owner process above the caller, and for the hooks of the
   `acquire` or the reaper that the lease names. The guard finds the device as adb does, from
   `-t`, `-s`, `-d`, `-e`, `ANDROID_SERIAL`, or the only device, and for `adb emu` by the
@@ -166,8 +166,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another holder runs. `strict = true` in the new `[guard]` table also refuses a
   device that no lease of the caller has. The guard reads the lease files without the lock,
   reads the process list and runs `adb devices` only when it must, and lets the call run with
-  a warning when it cannot decide, with the adb that the wrapper saved when the configuration
-  cannot be read. The `banksman` command now starts the guard without loading
+  a warning when it cannot decide. When the configuration names no `sdk` or cannot be read, the
+  guard names the adb that the wrapper saved, and when banksman cannot start or fails, the
+  wrapper runs that adb itself. The `banksman` command now starts the guard without loading
   the rest of the command line.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of

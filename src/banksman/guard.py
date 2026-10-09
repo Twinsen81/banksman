@@ -1,8 +1,9 @@
 """The adb guard: refuse an agent's device command when another holding leases the device.
 
 The adb wrapper that `banksman admin adb-shim` prints runs `banksman guard adb -- ARGUMENT ...`
-for every adb call. The guard decides from the lease files, without the lock, without reaping,
-and without discovery, and then runs the real adb of the Android SDK in its own place. It reads
+for every adb call. The guard only decides: it prints the adb to run, or refuses the call, and
+the wrapper runs adb itself, so that a banksman that cannot start never blocks adb. The guard
+decides from the lease files, without the lock, without reaping, and without discovery. It reads
 the process list and runs `adb devices` only when a decision needs them, because it runs before
 every adb call, and a UI test makes many.
 
@@ -35,11 +36,8 @@ from banksman.system import Machine, Process, System
 # The status of `check` for a lost lease: the caller must not use the device.
 EXIT_REFUSED = 3
 LEASE_VARIABLE = "BANKSMAN_LEASE"
-# Set for the adb that the guard runs. A guard that finds it set runs as that adb: the adb of the
-# SDK is the wrapper itself, and the two would run each other without end.
-MARKER = "BANKSMAN_GUARD"
 USAGE = "usage: banksman guard adb [--fallback-adb PATH] -- [ADB ARGUMENT ...]"
-# The adb that the wrapper saved, for a call when the configuration cannot be read.
+# The adb that the wrapper saved, for a configuration that names no SDK or cannot be read.
 FALLBACK_OPTION = "--fallback-adb"
 # What a command acts on: only the adb server or this machine, such as `adb devices`; one device;
 # or every device, such as `adb kill-server`.
@@ -74,8 +72,6 @@ _FOR_EVERY_DEVICE = (["reconnect", "offline"], ["forward", "--remove-all"])
 # How `adb emu` reads the console port of an emulator from a serial, as sscanf with
 # "emulator-%d" does.
 _EMULATOR = re.compile(r"emulator-\s*\+?([0-9]+)")
-_EXIT_NOT_FOUND = 127
-_EXIT_CANNOT_RUN = 126
 # The most leases that a refused command for every device names.
 _SHOWN = 5
 
@@ -101,7 +97,11 @@ class Call:
 
 
 def main(argv: Sequence[str]) -> int:
-    """Run `banksman guard adb -- ARGUMENT ...`: check the call, then run the real adb."""
+    """Run `banksman guard adb -- ARGUMENT ...` for the adb wrapper.
+
+    Print the path of the adb to run and exit with status 0 when the call may run, or exit with
+    status 3 when it is refused.
+    """
     if argv[:1] != ["adb"]:
         print(USAGE, file=sys.stderr)
         return 2
@@ -111,20 +111,15 @@ def main(argv: Sequence[str]) -> int:
         fallback, arguments = arguments[1], arguments[2:]
     if arguments[:1] == ["--"]:
         arguments = arguments[1:]
-    env = dict(os.environ)
-    if env.get(MARKER):
-        _say(
-            "adb guard: the adb of the Android SDK runs this guard again. Set sdk in [android] to"
-            " the Android SDK, not to the directory of the adb wrapper"
-        )
-        return 1
-    # Without a configuration, the adb that the wrapper saved is the best guess: the default SDK
-    # can be missing, or have an adb of another version, which would restart the adb server.
+    # Without an sdk in the configuration, the adb that the wrapper saved is the best guess: the
+    # default SDK can be missing, or have an adb of another version, which would restart the adb
+    # server.
     adb = fallback or android.adb_path(Android())
     try:
         config = load_config()
-        adb = android.adb_path(config.android)
-        refusal = check(arguments, config, env, Machine())
+        if config.android.sdk is not None or fallback is None:
+            adb = android.adb_path(config.android)
+        refusal = check(arguments, config, os.environ, Machine())
     except Exception as exc:
         # A broken guard that blocks every device is worse than a short time without
         # protection, so the call runs, and the person who reads the output sees why.
@@ -134,13 +129,8 @@ def main(argv: Sequence[str]) -> int:
     if refusal is not None:
         _say(refusal)
         return EXIT_REFUSED
-    sys.stdout.flush()
-    sys.stderr.flush()
-    try:
-        android.exec_adb(adb, arguments, {**env, MARKER: "1"})
-    except OSError as exc:
-        _say(f"adb guard: cannot run {adb}: {exc.strerror}. Set sdk in [android]")
-        return _EXIT_NOT_FOUND if isinstance(exc, FileNotFoundError) else _EXIT_CANNOT_RUN
+    print(adb)
+    return 0
 
 
 def check(
@@ -214,18 +204,21 @@ def parse(arguments: Sequence[str]) -> Call:
         elif word not in ("-a", "--exit-on-write-error"):
             rest.insert(0, word)
             break
+    # adb waits, for example with wait-for-device, and then runs the command after the wait. The
+    # wait only reads, so the command decides.
+    wait = [rest.pop(0)] if rest and rest[0].startswith("wait-for-") else []
+    options = tuple(server)
     if not rest or rest[0] in _HOST_COMMANDS or rest[:2] == ["forward", "--list"]:
-        return Call(HOST, rest[0] if rest else "")
+        return Call(HOST, " ".join(wait + rest[:1]))
     if rest[0] == "kill-server":
-        return Call(ALL, rest[0], server=tuple(server))
+        return Call(ALL, " ".join(wait + rest[:1]), server=options)
     if rest == ["disconnect"] or rest[:2] in _FOR_EVERY_DEVICE:
-        return Call(ALL, " ".join(rest[:2]), server=tuple(server))
+        return Call(ALL, " ".join(wait + rest[:2]), server=options)
     if rest[0] == "disconnect":
         # It disconnects the device that it names, whatever -s says.
-        return Call(DEVICE, rest[0], serial=rest[1], server=tuple(server))
-    # A wait such as wait-for-device can come before the command.
-    console = (rest[1:2] if rest[0].startswith("wait-for-") else rest[:1]) == ["emu"]
-    return Call(DEVICE, rest[0], serial, transport_id, transport, tuple(server), console)
+        return Call(DEVICE, " ".join(wait + rest[:1]), serial=rest[1], server=options)
+    command = " ".join(wait + rest[:1])
+    return Call(DEVICE, command, serial, transport_id, transport, options, rest[0] == "emu")
 
 
 class Caller:

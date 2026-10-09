@@ -11,13 +11,22 @@
 #
 # After an upgrade of banksman, or a change of sdk in [android], save it again.
 #
-# For every call, banksman guard adb checks the leases, and then runs the adb of the Android SDK
-# in the configuration. The adb below was that adb when banksman printed this script. It runs
-# when the configuration cannot be read, and without banksman on the PATH, when this script runs
-# it itself and says that the call is not checked. It uses only a banksman in an absolute
-# directory of the PATH, so a file in a project cannot stand in for it.
+# For every call, banksman guard adb checks the leases and only decides: it prints the adb to run,
+# or refuses the call with exit status 3. This script then runs adb itself, so that a banksman
+# that cannot start, for example after an upgrade of Python, never blocks adb. The adb below was
+# the adb of the configuration when banksman printed this script. This script runs it, and says
+# that the call is not checked, when banksman is not on the PATH or fails. It uses only a banksman
+# in an absolute directory of the PATH, so a file in a project cannot stand in for it.
 
 adb=@ADB@
+
+# This script sets the variable for the adb that it runs. When it is set here, the adb of the SDK
+# is this script itself, and the two would run each other without end.
+if [ -n "${BANKSMAN_GUARD:-}" ]; then
+    echo "banksman: adb guard: the adb of the Android SDK runs this wrapper again. Set sdk in" \
+        "[android] to the Android SDK, not to the directory of the adb wrapper" >&2
+    exit 1
+fi
 
 # Not `command -v`: some shells give a program in a relative directory as an absolute path.
 banksman=
@@ -34,8 +43,25 @@ while [ -n "$rest" ]; do
         ;;
     esac
 done
-if [ -n "$banksman" ]; then
-    exec "$banksman" guard adb --fallback-adb "$adb" -- "$@"
+
+if [ -z "$banksman" ]; then
+    echo "banksman: adb guard: banksman is not on the PATH, so this adb call is not checked" >&2
+else
+    checked=$("$banksman" guard adb --fallback-adb "$adb" -- "$@")
+    case $? in
+    0)
+        # Anything but an absolute path is not an answer of the guard.
+        case $checked in
+        /*) adb=$checked ;;
+        *) echo "banksman: adb guard: this adb call is not checked" >&2 ;;
+        esac
+        ;;
+    3) exit 3 ;;
+    # Ctrl-C during the check ends the call.
+    130) exit 130 ;;
+    *) echo "banksman: adb guard: this adb call is not checked" >&2 ;;
+    esac
 fi
-echo "banksman: adb guard: banksman is not on the PATH, so this adb call is not checked" >&2
+BANKSMAN_GUARD=1
+export BANKSMAN_GUARD
 exec "$adb" "$@"
