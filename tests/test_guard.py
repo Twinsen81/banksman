@@ -9,6 +9,7 @@ runs the tests does not change what the guard decides.
 import json
 import os
 import shlex
+import shutil
 import statistics
 import subprocess
 import sys
@@ -120,7 +121,7 @@ def check(system, *arguments, env=None, adb=no_adb):
         (["-t7", "shell"], Call(DEVICE, "shell", transport_id="7")),
         (["-t", "0", "shell"], Call(DEVICE, "shell")),
         (["-d", "reboot"], Call(DEVICE, "reboot", transport="usb")),
-        (["-e", "emu", "kill"], Call(DEVICE, "emu", transport="local")),
+        (["-e", "emu", "kill"], Call(DEVICE, "emu", transport="local", console=True)),
         (["-e", "-s", "X", "shell"], Call(DEVICE, "shell", "X", transport="local")),
         (
             ["-H", "host", "-P5038", "-s", "X", "shell"],
@@ -137,6 +138,9 @@ def check(system, *arguments, env=None, adb=no_adb):
         (["-P", "5038", "kill-server"], Call(ALL, "kill-server", server=("-P", "5038"))),
         (["kill-server", "now"], Call(ALL, "kill-server")),
         (["reconnect", "offline"], Call(ALL, "reconnect offline")),
+        (["-s", "X", "forward", "--remove-all"], Call(ALL, "forward --remove-all")),
+        (["-s", "X", "emu", "kill"], Call(DEVICE, "emu", "X", console=True)),
+        (["wait-for-device", "emu", "kill"], Call(DEVICE, "wait-for-device", console=True)),
         (["disconnect"], Call(ALL, "disconnect")),
         (["-s", "X", "disconnect", "192.0.2.7:5555"], Call(DEVICE, "disconnect", "192.0.2.7:5555")),
         # adb refuses these itself, and acts on nothing.
@@ -296,6 +300,17 @@ def test_the_reaper_must_be_above_the_caller(store, system, state_dir):
     assert "another holder" in check(system, "-s", "emulator-5554", "emu", "kill")
 
 
+def test_a_quarantine_counts_also_after_a_restart_emptied_the_state_directory(
+    state_dir, quarantine_dir, system
+):
+    store = Store(state_dir, system, take_back=lambda lease: False)
+    lease(store, system, "R5CR1234ABC", other(), kind="device")
+    system.advance(20 * 60)
+    store.reap()
+    shutil.rmtree(state_dir)
+    assert "the lease is quarantined" in check(system, "-s", "R5CR1234ABC", "shell")
+
+
 def test_a_lease_file_that_cannot_be_read_keeps_its_device_out_of_use(state_dir, system):
     state_dir.mkdir(mode=0o700)
     (state_dir / "R5CR1234ABC.json").write_text("{not json")
@@ -386,6 +401,49 @@ def test_disconnect_acts_on_the_device_that_it_names(store, system):
     assert "adb disconnect: refused: another holder leases 192.0.2.7:5555" in refusal
 
 
+# adb emu finds its emulator by rules of its own.
+
+PHONE = Transport("R5CR1234ABC", "device", devpath="usb:1-1", transport_id="3")
+EMULATOR = Transport("emulator-5554", "device", transport_id="4")
+
+
+@pytest.mark.parametrize("option", [[], ["-d"], ["-e"], ["-t", "3"]])
+def test_emu_without_a_serial_acts_on_the_only_emulator(store, system, option):
+    # The physical device does not make the command ambiguous for adb emu, and adb emu ignores
+    # -d, -e, and -t.
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    refusal = check(system, *option, "emu", "kill", adb=listing(PHONE, EMULATOR))
+    assert "another holder leases emulator-5554 (e2e_phone)" in refusal
+
+
+def test_emu_with_several_emulators_and_no_serial_passes(store, system):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    second = Transport("emulator-5556", "device")
+    assert check(system, "emu", "kill", adb=listing(EMULATOR, second)) is None
+
+
+def test_emu_takes_the_console_port_from_the_serial(store, system):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    assert "another holder" in check(system, "-s", "emulator-05554", "emu", "kill")
+    assert "another holder" in check(
+        system, "emu", "kill", env={"ANDROID_SERIAL": "emulator-5554"}
+    )
+    # A serial that is not an emulator has no console, so adb emu fails by itself.
+    assert check(system, "-s", "R5CR1234ABC", "emu", "kill") is None
+
+
+def test_emu_with_d_or_e_ignores_android_serial(store, system):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    env = {"ANDROID_SERIAL": "emulator-5556"}
+    assert "another holder" in check(system, "-e", "emu", "kill", env=env, adb=listing(EMULATOR))
+
+
+def test_emu_after_a_wait_follows_the_rules_of_emu(store, system):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    refusal = check(system, "wait-for-device", "emu", "kill", adb=listing(PHONE, EMULATOR))
+    assert "another holder" in refusal
+
+
 # Strict mode.
 
 
@@ -419,16 +477,25 @@ def test_strict_passes_a_command_that_adb_refuses_itself(store, system, strict):
 # Commands that act on every device.
 
 
-@pytest.mark.parametrize("arguments", [["kill-server"], ["reconnect", "offline"], ["disconnect"]])
+@pytest.mark.parametrize(
+    "arguments",
+    [["kill-server"], ["reconnect", "offline"], ["disconnect"], ["forward", "--remove-all"]],
+)
 def test_a_command_for_every_device_is_refused_while_another_holding_has_a_device(
     store, system, arguments
 ):
     lease(store, system, "e2e_phone", other(), serial="emulator-5554")
     assert check(system, *arguments) == (
-        f"adb {' '.join(arguments)}: refused: it disconnects the devices of every holder, and"
-        " other holders lease devices that run now: emulator-5554 (codex · #123 · verify the"
-        " tablet layout)"
+        f"adb {' '.join(arguments)}: refused: it acts on every device, also on devices that other"
+        " holders lease and that run now: emulator-5554 (codex · #123 · verify the tablet"
+        " layout)"
     )
+
+
+def test_removing_every_port_forward_is_refused_also_with_the_own_device(store, system):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    lease(store, system, "e2e_tablet", other(), serial="emulator-5556")
+    assert "refused" in check(system, "-s", "emulator-5554", "forward", "--remove-all")
 
 
 def test_a_command_for_every_device_passes_with_only_own_devices(store, system):
@@ -461,8 +528,8 @@ def ran(monkeypatch, system):
     recording never returns: it ends the command with status 0."""
     calls = []
 
-    def exec_adb(settings, arguments, env):
-        calls.append((android.adb_path(settings), list(arguments), env.get(guard.MARKER)))
+    def exec_adb(adb, arguments, env):
+        calls.append((adb, list(arguments), env.get(guard.MARKER)))
         raise SystemExit(0)
 
     monkeypatch.setattr(android, "exec_adb", exec_adb)
@@ -529,6 +596,29 @@ def test_a_guard_that_fails_lets_the_call_run_and_says_so(
     assert err.startswith("banksman: adb guard: this adb call is not checked: ")
 
 
+def test_without_a_configuration_the_guard_runs_the_adb_of_the_wrapper(ran, config_path, capsys):
+    write_config(config_path, "[guard]\nstrict = 'yes'\n")
+    status = guarded_with_fallback("/opt/sdk/platform-tools/adb", "devices")
+    assert status == 0
+    assert ran == [("/opt/sdk/platform-tools/adb", ["devices"], "1")]
+    assert "this adb call is not checked" in capsys.readouterr().err
+
+
+def test_with_a_configuration_the_guard_runs_the_adb_of_the_configuration(
+    ran, config_path, tmp_path
+):
+    write_config(config_path, f'[android]\nsdk = "{tmp_path / "sdk"}"\n')
+    assert guarded_with_fallback("/opt/sdk/platform-tools/adb", "devices") == 0
+    assert ran[0][0] == str(tmp_path / "sdk" / "platform-tools" / "adb")
+
+
+def guarded_with_fallback(fallback, *arguments):
+    try:
+        return guard.main(["adb", guard.FALLBACK_OPTION, fallback, "--", *arguments])
+    except SystemExit as exc:
+        return exc.code
+
+
 def test_a_guard_that_runs_itself_again_stops(ran, monkeypatch, capsys):
     monkeypatch.setenv(guard.MARKER, "1")
     assert guarded("devices") == 1
@@ -556,10 +646,11 @@ def test_the_guard_knows_only_adb(capsys):
     assert capsys.readouterr().err == guard.USAGE + "\n"
 
 
-def test_the_command_line_starts_the_guard_too(ran):
+def test_the_command_line_starts_the_guard_too(ran, config_path):
+    write_config(config_path, "not toml")
     with pytest.raises(SystemExit):
-        cli.main(["guard", "adb", "--", "devices"])
-    assert ran[0][1] == ["devices"]
+        cli.main(["guard", "adb", guard.FALLBACK_OPTION, "/opt/adb", "--", "devices"])
+    assert ran == [("/opt/adb", ["devices"], "1")]
 
 
 # The guard in a process of its own, with the real exec.
@@ -683,7 +774,7 @@ def test_admin_adb_shim_warns_when_the_sdk_has_no_adb(config_path, tmp_path, cap
     assert "does not exist. Set sdk in [android]" in capsys.readouterr().err
 
 
-def test_the_wrapper_passes_every_argument_to_the_guard(shim, tmp_path):
+def test_the_wrapper_passes_every_argument_to_the_guard(shim, fake_adb, tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake = bin_dir / "banksman"
@@ -700,6 +791,8 @@ def test_the_wrapper_passes_every_argument_to_the_guard(shim, tmp_path):
     assert (tmp_path / "got").read_text().split("\n")[:-1] == [
         "guard",
         "adb",
+        "--fallback-adb",
+        str(fake_adb),
         "--",
         "-s",
         "emulator-5554",

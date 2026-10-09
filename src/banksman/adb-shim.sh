@@ -12,10 +12,10 @@
 # After an upgrade of banksman, or a change of sdk in [android], save it again.
 #
 # For every call, banksman guard adb checks the leases, and then runs the adb of the Android SDK
-# in the configuration. Without banksman on the PATH, this script runs the adb below, which was
-# that adb when banksman printed this script, and says that the call is not checked. It uses
-# only a banksman in an absolute directory of the PATH, so a file in a project cannot stand in
-# for it.
+# in the configuration. The adb below was that adb when banksman printed this script. It runs
+# when the configuration cannot be read, and without banksman on the PATH, when this script runs
+# it itself and says that the call is not checked. It uses only a banksman in an absolute
+# directory of the PATH, so a file in a project cannot stand in for it.
 
 adb=@ADB@
 
@@ -35,7 +35,7 @@ while [ -n "$rest" ]; do
     esac
 done
 if [ -n "$banksman" ]; then
-    exec "$banksman" guard adb -- "$@"
+    exec "$banksman" guard adb --fallback-adb "$adb" -- "$@"
 fi
 echo "banksman: adb guard: banksman is not on the PATH, so this adb call is not checked" >&2
 exec "$adb" "$@"

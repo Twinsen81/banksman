@@ -1664,6 +1664,15 @@ def test_peek_without_a_state_directory_finds_no_leases(state_dir, quarantine_di
     assert not state_dir.exists()
 
 
+def test_peek_finds_a_quarantine_after_a_restart_emptied_the_state_directory(
+    state_dir, quarantine_dir, system
+):
+    quarantine(failing(state_dir, system), system)
+    shutil.rmtree(state_dir)
+    assert [lease.state for lease in peek(state_dir, quarantine_dir).leases] == [QUARANTINED]
+    assert not state_dir.exists()
+
+
 def test_peek_refuses_a_state_directory_that_others_can_write_to(store, state_dir, quarantine_dir):
     store.acquire("phone-1", "device", Holder(OWNER))
     state_dir.chmod(0o777)

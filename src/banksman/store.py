@@ -1167,15 +1167,12 @@ def peek(directory: Path, quarantine_dir: Path) -> Snapshot:
     the files can come from different moments, so the result is good for a check that refuses or
     allows a command, never for a change to a lease.
     """
-    if not os.path.lexists(directory):
-        return Snapshot([], [])
-    _check_directory(directory)
-    places = [directory]
-    if os.path.lexists(quarantine_dir):
-        _check_directory(quarantine_dir)
-        # A quarantined lease whose file a cleaner of temporary files deleted still keeps its
-        # resource out of use. The file in the state directory comes last, so it wins.
-        places.insert(0, quarantine_dir)
+    # A quarantined lease whose file a cleaner of temporary files or a restart deleted still
+    # keeps its resource out of use, also when the whole state directory has gone. The file in the
+    # state directory comes last, so it wins.
+    places = [place for place in (quarantine_dir, directory) if os.path.lexists(place)]
+    for place in places:
+        _check_directory(place)
     entries = {entry.resource: entry for place in places for entry in _scan(place)}
     found = [entries[resource] for resource in sorted(entries)]
     return Snapshot(

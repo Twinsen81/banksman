@@ -140,7 +140,8 @@ full path of adb, a tool that talks to the adb server itself, a second connectio
 emulator, and a process that no agent process is above all pass, and the lease id that lets a
 call pass is the same token as for the scripts. The wrapper runs only a `banksman` in an
 absolute directory of the `PATH`, so a file in a project cannot stand in for it, and the guard
-runs the adb of the SDK of the configuration, never one from the `PATH`. A refusal names the
+runs the adb of the SDK of the configuration, or the adb that the wrapper saved when the
+configuration cannot be read, never one from the `PATH`. A refusal names the
 holder as `status` does, with the purpose, which is untrusted text, and with terminal control
 sequences removed. When banksman cannot decide, the call runs with a warning: the guard fails
 open, so a broken configuration costs protection, not every device.

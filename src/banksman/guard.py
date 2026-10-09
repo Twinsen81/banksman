@@ -15,6 +15,7 @@ holders want the same one.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -37,7 +38,9 @@ LEASE_VARIABLE = "BANKSMAN_LEASE"
 # Set for the adb that the guard runs. A guard that finds it set runs as that adb: the adb of the
 # SDK is the wrapper itself, and the two would run each other without end.
 MARKER = "BANKSMAN_GUARD"
-USAGE = "usage: banksman guard adb -- [ADB ARGUMENT ...]"
+USAGE = "usage: banksman guard adb [--fallback-adb PATH] -- [ADB ARGUMENT ...]"
+# The adb that the wrapper saved, for a call when the configuration cannot be read.
+FALLBACK_OPTION = "--fallback-adb"
 # What a command acts on: only the adb server or this machine, such as `adb devices`; one device;
 # or every device, such as `adb kill-server`.
 HOST = "host"
@@ -65,6 +68,12 @@ _HOST_COMMANDS = frozenset(
 # The state that `adb devices` shows for a USB device that adb may not open. adb never chooses
 # such a device.
 _NO_PERMISSION = "no"
+# Commands, besides kill-server and disconnect without an address, that act on every device:
+# `forward --remove-all` removes the port forwards of every device, not only of the chosen one.
+_FOR_EVERY_DEVICE = (["reconnect", "offline"], ["forward", "--remove-all"])
+# How `adb emu` reads the console port of an emulator from a serial, as sscanf with
+# "emulator-%d" does.
+_EMULATOR = re.compile(r"emulator-\s*\+?([0-9]+)")
 _EXIT_NOT_FOUND = 127
 _EXIT_CANNOT_RUN = 126
 # The most leases that a refused command for every device names.
@@ -87,6 +96,8 @@ class Call:
     # The options that name the adb server, such as -P 5038, so that `adb devices` asks the same
     # server.
     server: tuple[str, ...] = ()
+    # `adb emu` talks to the console of an emulator, which it chooses by rules of its own.
+    console: bool = False
 
 
 def main(argv: Sequence[str]) -> int:
@@ -95,6 +106,9 @@ def main(argv: Sequence[str]) -> int:
         print(USAGE, file=sys.stderr)
         return 2
     arguments = list(argv[1:])
+    fallback = None
+    if arguments[:1] == [FALLBACK_OPTION] and len(arguments) > 1:
+        fallback, arguments = arguments[1], arguments[2:]
     if arguments[:1] == ["--"]:
         arguments = arguments[1:]
     env = dict(os.environ)
@@ -104,10 +118,12 @@ def main(argv: Sequence[str]) -> int:
             " the Android SDK, not to the directory of the adb wrapper"
         )
         return 1
-    settings = Android()
+    # Without a configuration, the adb that the wrapper saved is the best guess: the default SDK
+    # can be missing, or have an adb of another version, which would restart the adb server.
+    adb = fallback or android.adb_path(Android())
     try:
         config = load_config()
-        settings = config.android
+        adb = android.adb_path(config.android)
         refusal = check(arguments, config, env, Machine())
     except Exception as exc:
         # A broken guard that blocks every device is worse than a short time without
@@ -121,12 +137,9 @@ def main(argv: Sequence[str]) -> int:
     sys.stdout.flush()
     sys.stderr.flush()
     try:
-        android.exec_adb(settings, arguments, {**env, MARKER: "1"})
+        android.exec_adb(adb, arguments, {**env, MARKER: "1"})
     except OSError as exc:
-        _say(
-            f"adb guard: cannot run {android.adb_path(settings)}: {exc.strerror}. Set sdk in"
-            " [android]"
-        )
+        _say(f"adb guard: cannot run {adb}: {exc.strerror}. Set sdk in [android]")
         return _EXIT_NOT_FOUND if isinstance(exc, FileNotFoundError) else _EXIT_CANNOT_RUN
 
 
@@ -205,12 +218,14 @@ def parse(arguments: Sequence[str]) -> Call:
         return Call(HOST, rest[0] if rest else "")
     if rest[0] == "kill-server":
         return Call(ALL, rest[0], server=tuple(server))
-    if rest == ["disconnect"] or rest[:2] == ["reconnect", "offline"]:
-        return Call(ALL, " ".join(rest), server=tuple(server))
+    if rest == ["disconnect"] or rest[:2] in _FOR_EVERY_DEVICE:
+        return Call(ALL, " ".join(rest[:2]), server=tuple(server))
     if rest[0] == "disconnect":
         # It disconnects the device that it names, whatever -s says.
         return Call(DEVICE, rest[0], serial=rest[1], server=tuple(server))
-    return Call(DEVICE, rest[0], serial, transport_id, transport, tuple(server))
+    # A wait such as wait-for-device can come before the command.
+    console = (rest[1:2] if rest[0].startswith("wait-for-") else rest[:1]) == ["emu"]
+    return Call(DEVICE, rest[0], serial, transport_id, transport, tuple(server), console)
 
 
 class Caller:
@@ -321,8 +336,10 @@ def target(
     single device, and fails by itself.
 
     The order is the order of adb: -t, then -s, then -d or -e, then ANDROID_SERIAL, then the
-    only device.
+    only device. `adb emu` has rules of its own.
     """
+    if call.console:
+        return _console(call, env, listing)
     if call.transport_id is not None:
         return _one(
             [found for found in _usable(listing()) if found.transport_id == call.transport_id]
@@ -337,6 +354,25 @@ def target(
         # A USB device has an address. An emulator, and a device over TCP/IP, have none.
         usable = [found for found in usable if bool(found.devpath) == (call.transport == "usb")]
     return _one(usable)
+
+
+def _console(call: Call, env: Mapping[str, str], listing: Listing) -> str | None:
+    """Return the emulator whose console `adb emu` talks to, or None when it finds none.
+
+    adb takes the console port from the serial of -s or ANDROID_SERIAL, and without one, it takes
+    the only emulator that it knows, also when other devices are connected. It ignores -t, -d,
+    and -e.
+    """
+    serial = call.serial
+    if serial is None and call.transport is None:
+        serial = env.get("ANDROID_SERIAL") or None
+    if serial is None:
+        emulators = [found.serial for found in listing() if _EMULATOR.match(found.serial)]
+        if len(emulators) != 1:
+            return None
+        serial = emulators[0]
+    port = _EMULATOR.match(serial)
+    return None if port is None else f"emulator-{int(port.group(1))}"
 
 
 def _serial(given: str, devices: Snapshot, listing: Listing) -> str | None:
@@ -450,8 +486,8 @@ def _every_device_refused(call: Call, others: Sequence[Lease]) -> str:
     if len(others) > _SHOWN:
         shown.append(f"{len(others) - _SHOWN} more")
     return (
-        f"adb {call.command}: refused: it disconnects the devices of every holder, and other"
-        f" holders lease devices that run now: {', '.join(shown)}"
+        f"adb {call.command}: refused: it acts on every device, also on devices that other"
+        f" holders lease and that run now: {', '.join(shown)}"
     )
 
 

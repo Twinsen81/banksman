@@ -187,12 +187,12 @@ def parse_transports(text: str) -> list[Transport]:
     return found
 
 
-def exec_adb(settings: Android, arguments: Sequence[str], env: Mapping[str, str]) -> NoReturn:
-    """Run adb in place of this process: it keeps the pid, the terminal, and the signals.
+def exec_adb(adb: str, arguments: Sequence[str], env: Mapping[str, str]) -> NoReturn:
+    """Run the adb at this path in place of this process: it keeps the pid, the terminal, and the
+    signals.
 
     Raise OSError when adb cannot start.
     """
-    adb = adb_path(settings)
     os.execve(adb, [adb, *arguments], env)
 
 

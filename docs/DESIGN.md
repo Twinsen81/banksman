@@ -836,8 +836,9 @@ is a setup of the operator, and a project needs nothing for it.
 
   For every call, the wrapper runs `banksman guard adb -- <arguments>`. The guard decides, and
   then runs the adb of the Android SDK of the configuration (section 8) in its own place, with
-  the same pid, arguments, terminal, and environment. It never runs an adb from the `PATH`, so
-  it never runs itself again. The wrapper uses only a `banksman` in an absolute directory of the
+  the same pid, arguments, terminal, and environment. When the configuration cannot be read, it
+  runs the adb that the wrapper saved when banksman printed it. It never runs an adb from the
+  `PATH`, so it never runs itself again. The wrapper uses only a `banksman` in an absolute directory of the
   `PATH`, so a file in a project cannot stand in for it. banksman does not install the wrapper
   itself: the operator chooses where it goes. After an upgrade of banksman, or a change of `sdk`
   in `[android]`, the operator saves it again. A wrapper on the `PATH` is better than a hook of
@@ -848,7 +849,10 @@ is a setup of the operator, and a project needs nothing for it.
   adb knows. `-s` also takes the other names that adb takes, such as `model:Pixel_8`, a USB
   address, or a host without its port. For these names, for `-t`, `-d`, and `-e`, and for a
   command that names no device, the guard asks `adb devices -l`. When adb would find no single
-  device, the call runs, and adb refuses it itself. A command that acts on no device, such as
+  device, the call runs, and adb refuses it itself. `adb emu` has rules of its own, and the
+  guard follows them: it talks to the console of the emulator whose port is in the serial of
+  `-s` or `ANDROID_SERIAL`, and without one, to the only emulator, also when physical devices
+  are connected; it ignores `-t`, `-d`, and `-e`. A command that acts on no device, such as
   `adb devices`, `adb connect`, or `adb forward --list`, always runs.
 - **The lease of the device.** A held lease that records the serial; a lease in another state
   that records it, while no held lease records it, because discovery keeps the serial up to
@@ -880,14 +884,16 @@ is a setup of the operator, and a project needs nothing for it.
 
 - **Commands for every device.** `adb kill-server` stops the adb server, which disconnects
   every device; `adb reconnect offline` resets the connection of every offline device, such as
-  an emulator that boots; and `adb disconnect` without an address ends every connection over
-  TCP/IP. The run that breaks is then not the run that gave the command. So the guard refuses
+  an emulator that boots; `adb disconnect` without an address ends every connection over
+  TCP/IP; and `adb forward --remove-all` removes the port forwards of every device, also with
+  `-s`. The run that breaks is then not the run that gave the command. So the guard refuses
   these commands for an agent while another holding has a held lease that records a serial,
   that is, while an instance of another holder runs. `adb reconnect` and
   `adb reconnect device` act on one device, like other device commands.
 - **Speed.** The guard runs before every adb call, and a UI test can make many. It reads the
   lease files without the lock: every write replaces a whole file with a rename, so each file
-  that it reads is whole. It does not reap, and it runs no discovery. It reads the process list
+  that it reads is whole. It also reads the copies of the quarantines, so a quarantine counts
+  also after a restart emptied the state directory. It does not reap, and it runs no discovery. It reads the process list
   only when the lease id in `BANKSMAN_LEASE` does not decide, and it asks `adb devices` only
   when the command line does not name the device by a serial that a lease has. On the Mac where
   it was measured, it adds about 30 ms to a call that needs no process list, and about 55 ms to
@@ -895,6 +901,8 @@ is a setup of the operator, and a project needs nothing for it.
 - **When the guard fails.** When banksman cannot decide, for example because of an error in the
   configuration, a lease file of a newer banksman, or a process list that the sandbox of an
   agent hides, the call runs, and banksman says on standard error that the call is not checked.
+  Without a configuration, it runs the adb that the wrapper saved, because the default SDK can
+  be missing, or have an adb of another version, which would restart the adb server.
   A broken guard that blocks every device is worse than a short time without protection.
   Without `banksman` on the `PATH`, the wrapper runs adb, and says the same.
 - **Limits.** The guard is a guardrail, not a security boundary. These do not pass through it: a
