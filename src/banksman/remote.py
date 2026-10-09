@@ -122,10 +122,12 @@ class Session:
     resource: str
     # Whether banksman created the reservation. The reaper ends only those.
     created: bool
-    # When the record was written, in wall-clock time.
+    # When banksman first recorded the reservation, in wall-clock time. The service ends the
+    # reservation at the latest 3 hours after its creation, so the record is kept that long.
     at: float
     port: int | None = None
-    # When the reservation ends, in wall-clock time, or None when that is not known.
+    # When the reservation ends, in wall-clock time, or None when that is not known. The holder
+    # can extend the reservation by hand, so this can be too early, and only status shows it.
     ends: float | None = None
 
 
@@ -483,7 +485,7 @@ def changing_sessions(
         sessions = load_sessions(kind)
         yield sessions
         now = clock()
-        kept = [session for session in sessions.values() if _ends(session) > now]
+        kept = [session for session in sessions.values() if _kept_until(session) > now]
         _write(
             _sessions_path(kind),
             {"schema": FILE_SCHEMA, "sessions": [_session_json(each) for each in kept]},
@@ -666,8 +668,12 @@ def start(
         if known or match is None:
             return
         handle = match["handle"]
-        session = Session(handle, resource, created=handle not in before, at=clock())
         with changing_sessions(kind, clock) as sessions:
+            # A reservation that banksman created stays banksman's to end, also when a later
+            # start adopts it, for example after a release and a lost connection.
+            session = sessions.get(handle) or Session(
+                handle, resource, created=handle not in before, at=clock()
+            )
             sessions[handle] = session
         known.append(session)
         record(handle)
@@ -781,8 +787,10 @@ def take_back(
         return str(exc)
     if session is None or not session.created:
         return None
-    # A reservation whose end has passed is gone without a call of the tool.
-    if session.ends is None or session.ends > clock() - 60:
+    # Only the tool can confirm that a reservation has ended: the holder can extend it by hand,
+    # so the recorded end can be too early. A reservation older than the longest one that the
+    # service allows is gone without a call.
+    if _kept_until(session) > clock():
         try:
             remove(kind, settings, handle, run=run)
         except BanksmanError as exc:
@@ -902,9 +910,10 @@ def _session(entry: object) -> Session | None:
     return Session(handle, resource, created, at, port, ends)
 
 
-def _ends(session: Session) -> float:
-    """Return when a reservation ends at the latest."""
-    return session.ends if session.ends is not None else session.at + MAX_RESERVATION_SECONDS
+def _kept_until(session: Session) -> float:
+    """Return when the record of a reservation can go: when the reservation has surely ended,
+    whatever its holder extended by hand."""
+    return session.at + MAX_RESERVATION_SECONDS + 60
 
 
 def _session_json(session: Session) -> dict[str, object]:

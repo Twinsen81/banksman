@@ -374,6 +374,31 @@ def test_no_serial_is_kept_from_before_a_reset_when_discovery_fails_after_it(
     assert leases()["qa_phone"].serial is None
 
 
+def test_a_reset_next_to_a_kept_lease_records_the_serials(capsys, config_path, tmp_path):
+    record = tmp_path / "reset"
+    configure(config_path, extra=f"on_acquire = {json.dumps(hook(RECORD, str(record)))}\n")
+    status, kept, _ = acquire(capsys, "--where", "kind=build")
+    assert status == 0
+    # One part keeps the build slot, and the other gets a new emulator, which is reset.
+    status, values, err = acquire(
+        capsys,
+        "--lease",
+        kept["LEASE"],
+        "--as",
+        "slot",
+        "--where",
+        "kind=build",
+        "--as",
+        "phone",
+        "--where",
+        "form=phone",
+    )
+    assert status == 0, err
+    assert (values["SLOT_KEPT"], values["PHONE_RESOURCE"]) == ("true", "qa_phone")
+    assert values["PHONE_SERIAL"] == "emulator-5554"
+    assert record.read_text() == "qa_phone\n"
+
+
 def test_a_failing_on_acquire_hook_gives_the_lease_back(capsys, config_path):
     configure(config_path, extra=f"on_acquire = {json.dumps(hook(FAIL))}\n")
     status, values, err = acquire(capsys, "--where", "form=phone")

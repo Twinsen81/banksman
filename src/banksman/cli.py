@@ -1193,6 +1193,9 @@ def _acquire(
             _print_notes([_paid_note(payable)] if payable else [])
             waiting = True
         machine.sleep(min(POLL_SECONDS, left))
+    # A kept remote device that is not connected now is connected again first, so that a
+    # request that cannot get it spends no start.
+    granted = _reconnect_kept(store, config, granted, found.serials)
     starts = {choice.resource for need in needs for choice in need.choices if choice.start}
     leases = _prepare(store, config, granted, starts)
     reset = [
@@ -1208,11 +1211,11 @@ def _acquire(
             if not kind.discovered:
                 continue
             started = machine.clock()
-            found = serials_seen(discover(kind, config), started)
-            seen.extend(found)
+            after = serials_seen(discover(kind, config), started)
+            seen.extend(after)
             # The serial from before the reset can name another instance now, so an instance
             # that discovery does not find with a serial now, also because it fails, has none.
-            known = {each.resource for each in found if each.serial is not None}
+            known = {each.resource for each in after if each.serial is not None}
             seen.extend(
                 SerialSeen(lease.resource, name, None, started)
                 for lease in reset
@@ -1225,15 +1228,40 @@ def _acquire(
             else lease
             for lease in leases
         ]
-    for index, (grant, lease) in enumerate(zip(granted, leases)):
-        kind = config.kinds.get(lease.kind)
-        # The search found that the kept device is not connected now.
-        if grant.kept and kind is not None and _disconnected(kind, lease, found.serials):
-            again = _reconnect(store, config, kind, lease)
-            now = store.observe([again])
-            if lease.resource in now and now[lease.resource].lease_id == lease.lease_id:
-                leases[index] = now[lease.resource]
     return _Grant(store, config, granted, leases)
+
+
+def _reconnect_kept(
+    store: Store, config: Config, granted: list[Granted], seen: Sequence[SerialSeen]
+) -> list[Granted]:
+    """Connect again each kept remote device that the search found not connected.
+
+    A request gets all its parts or none: when a device cannot be connected, every new lease of
+    the request is given back.
+    """
+    new = [grant for grant in granted if not grant.kept]
+    connected = []
+    try:
+        for grant in granted:
+            lease = grant.lease
+            kind = config.kinds.get(lease.kind)
+            if grant.kept and kind is not None and _disconnected(kind, lease, seen):
+                now = store.observe([_reconnect(store, config, kind, lease)])
+                if lease.resource in now and now[lease.resource].lease_id == lease.lease_id:
+                    grant = replace(grant, lease=now[lease.resource])
+            connected.append(grant)
+    except BanksmanError as exc:
+        for grant in new:
+            _give_back(store, grant.lease)
+        if not new:
+            raise
+        given_back = "the new lease is" if len(new) == 1 else "the new leases are"
+        raise BanksmanError(f"{exc}; {given_back} given back") from None
+    except BaseException:
+        for grant in new:
+            _give_back(store, grant.lease)
+        raise
+    return connected
 
 
 def _disconnected(kind: Kind, lease: Lease, seen: Sequence[SerialSeen]) -> bool:

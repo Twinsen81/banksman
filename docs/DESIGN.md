@@ -705,7 +705,7 @@ holdings apart (section 9).
   lease, so a take-back can end the reservation also when the `acquire` is killed in the
   middle. A reservation that the account already had, or that was live on this machine
   before, is adopted: the tool connects it and prints the same text, and banksman does not
-  record it as one that it created. banksman then extends the reservation to the hard
+  record it as one that it created, unless it created it earlier itself. banksman then extends the reservation to the hard
   deadline of the lease, records the serial, waits until adb lists the device, and marks the
   lease ready. The service caps a reservation at 3 hours after its creation without an error,
   so banksman records the end that it got. When a step after the id fails, banksman removes a
@@ -722,9 +722,12 @@ holdings apart (section 9).
   until the reservation ends, and the next request gets it without a new reservation, as an
   emulator that a release leaves running. The reaper ends only what banksman started: for a
   void lease whose handle the record lists as created by banksman, it runs
-  `android device remote remove <id>`. A reservation that has ended already counts as gone. A
-  reservation that nothing takes back, for example after a restart that emptied `/tmp`, ends
-  by itself, at the latest 3 hours after its creation.
+  `android device remote remove <id>`. A reservation that has ended already counts as gone.
+  The holder can extend a reservation by hand with `BANKSMAN_HANDLE`, so the end that banksman
+  recorded can be too early: only `remove` confirms that a reservation has ended, and the record
+  stays 3 hours after banksman first recorded the reservation. A reservation that nothing takes
+  back, for example after a restart that emptied `/tmp`, ends by itself, at the latest 3 hours
+  after its creation.
 
   The tool prints local times such as `9:56 AM` without a date; banksman takes the next such
   time, and records no end when it cannot read one. Everything that the tool prints, and every

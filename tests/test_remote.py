@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pytest
@@ -726,6 +727,74 @@ def test_acquire_with_lease_connects_a_kept_device_again(capsys, config_path, sd
     status, kept, err = acquire(capsys, "--where", "codename=tokay", "--lease", values["LEASE"])
     assert status == 0, err
     assert (kept["KEPT"], kept["SERIAL"], kept["HANDLE"]) == ("true", "localhost:49920", FIRST)
+
+
+def test_a_kept_device_that_cannot_be_connected_gives_the_new_leases_back(
+    capsys, config_path, sdk, cli
+):
+    configure(config_path, sdk, cli, remote_keys="[kinds.build]\ncount = 1\n")
+    save_catalogue()
+    adb_lists(sdk, [49522])
+    answers = lifecycle(cli)
+    status, values, err = acquire(capsys, "--where", "codename=tokay", "--paid", "--start")
+    assert status == 0, err
+    cli.connected({})
+    answers[f"device remote connect {FIRST}"] = {"err": "Error: UNAVAILABLE\n", "status": 1}
+    cli.answer(answers)
+    status, _, err = acquire(
+        capsys,
+        "--lease",
+        values["LEASE"],
+        "--as",
+        "phone",
+        "--where",
+        "codename=tokay",
+        "--as",
+        "slot",
+        "--where",
+        "kind=build",
+    )
+    assert status == 1
+    assert "cannot connect tokay:34 again" in err
+    assert "the new lease is given back" in err
+    assert sorted(leases()) == ["tokay:34"]
+
+
+def test_a_later_start_keeps_a_reservation_that_banksman_created(
+    capsys, config_path, sdk, cli, state_dir
+):
+    values, _ = start_one(capsys, config_path, sdk, cli)
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    # The connection ended, so the model does not run; the account still has the reservation.
+    lifecycle(cli, listed=LIST)
+    status, again, err = acquire(capsys, "--where", "codename=tokay", "--paid", "--start")
+    assert (status, again["HANDLE"]) == (0, FIRST), err
+    assert sessions()[FIRST].created is True
+    edit_lease(state_dir, "tokay:34", lambda data: data["awake"].update(hard_deadline=0))
+    assert main(["reap"]) == 0
+    assert cli.calls()[-1] == f"device remote remove {FIRST}"
+
+
+def test_a_take_back_removes_a_reservation_whose_recorded_end_has_passed(
+    capsys, config_path, sdk, cli, state_dir
+):
+    start_one(capsys, config_path, sdk, cli)
+    # The holder extended the reservation by hand, so the end that banksman recorded is old.
+    with remote.changing_sessions(kind()) as records:
+        records[FIRST] = replace(records[FIRST], ends=time.time() - 600)
+    assert FIRST in sessions()
+    edit_lease(state_dir, "tokay:34", lambda data: data["awake"].update(hard_deadline=0))
+    assert main(["reap"]) == 0
+    assert cli.calls()[-1] == f"device remote remove {FIRST}"
+    assert sessions() == {}
+
+
+def test_a_record_goes_only_after_the_longest_life_of_a_reservation():
+    now = time.time()
+    with remote.changing_sessions(kind()) as records:
+        records[FIRST] = remote.Session(FIRST, "tokay:34", True, now - 60, ends=now - 30)
+        records[SECOND] = remote.Session(SECOND, "houji:35", True, now - 3 * 60 * 60 - 120)
+    assert list(sessions()) == [FIRST]
 
 
 def test_a_void_lease_ends_the_reservation_that_banksman_created(
