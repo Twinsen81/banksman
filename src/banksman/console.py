@@ -226,9 +226,11 @@ def lease_json(
         "accounts": list(lease.accounts),
     }
     # The purpose is the only free text in a lease, and other agents wrote it. JSON is what
-    # agents read, so it carries the purpose only when the caller asks for it.
+    # agents read, so it carries the purpose only when the caller asks for it, and the label of
+    # the holding, which another agent chose too.
     if verbose:
         shown["purpose"] = lease.purpose
+        shown["label"] = lease.label
     return shown
 
 

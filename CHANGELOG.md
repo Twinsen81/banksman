@@ -201,11 +201,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after the upgrade, and `banksman admin release --force --resource <name>` frees their
   resources. The output schema stays 6: `status --json` and the grant only get the new fields
   `paid`, `handle`, and `ends`.
+- Named holdings. `acquire --holding <label>` keeps the holding of the caller's agent process
+  that has this label, as `--lease` does, also a paid one without a new `--paid`; without such
+  a holding, it starts one with the label. The caller chooses the label, so an agent that lost
+  its lease id, for example after a compaction of its context, gets the same device again
+  with the same command. `run`, `touch`, and `release` take `--holding` instead of `--lease`,
+  and `run --holding` needs `--resource` only when the holding has several resources. A
+  holding that has a booting lease, for example of an `acquire` that a time limit stopped
+  during its reset, is not kept, by a label or by a lease id: the request waits as for a
+  resource in use, `run --holding` refuses it, and `release` gives it back. The new
+  command `banksman held` lists the held leases of the agent process with their labels, lease
+  ids, resources, and serials. `status --json --verbose` shows the label. Lease files carry the
+  label, so the lease schema is now 8: lease files of an earlier banksman cannot be read after
+  the upgrade, and `banksman admin release --force --resource <name>` frees their resources.
+  The output schema stays 6.
+- `banksman agent-guide` prints a guide for agents in the format of a skill: how to get a
+  device with a label, run work on it, and give it back, the exit statuses, the time limits of
+  the shell tools of agents, and the rules for paid devices and for `banksman admin`. Agents
+  may run it, so the text always matches the installed banksman, and the operator can save it
+  as a skill. The examples in the documentation now wait 5 minutes, less than the longest time
+  for which Claude Code lets a command of its Bash tool run.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex
-  that refuse `banksman admin`, and a text for the instructions of agents. Section 15 of the
-  design has an example configuration for an Android project.
+  that refuse `banksman admin`, the guide for agents, and an example of the test accounts of
+  a server as a kind. Section 15 of the design has an example configuration for an Android
+  project.
 - Design document ([docs/DESIGN.md](docs/DESIGN.md)), recorded decisions
   ([DECISIONS.md](DECISIONS.md)), security policy and threat model
   ([SECURITY.md](SECURITY.md)), and contribution guide.

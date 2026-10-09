@@ -50,7 +50,16 @@ from banksman.inventory import (
     preselected,
     save_inventory,
 )
-from banksman.lease import QUARANTINED, READY, VOID_REASONS, Lease, SerialSeen, User
+from banksman.lease import (
+    BOOTING,
+    LABEL,
+    QUARANTINED,
+    READY,
+    VOID_REASONS,
+    Lease,
+    SerialSeen,
+    User,
+)
 from banksman.request import (
     PART_NAME,
     Candidate,
@@ -100,6 +109,9 @@ GRADLE_BUILD_SLOT_SCRIPT = "build-slot.gradle"
 # adb.
 ADB_SHIM_SCRIPT = "adb-shim.sh"
 ADB_SHIM_PATH = "@ADB@"
+# The guide for agents, in the format of a skill, and the text in it that becomes the version.
+AGENT_GUIDE = "agent-guide.md"
+AGENT_GUIDE_VERSION = "@VERSION@"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -160,6 +172,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     whoami.add_argument("--json", action="store_true", help="print JSON")
 
+    held = commands.add_parser(
+        "held",
+        help="list the held leases of this agent process, with their labels and lease ids",
+        allow_abbrev=False,
+    )
+    held.add_argument(
+        "--owner-pid", type=_pid, help="the owner process; by default the agent process"
+    )
+    held.add_argument("--json", action="store_true", help="print JSON")
+
+    commands.add_parser(
+        "agent-guide",
+        help="print the guide for agents, in the format of a skill; agents may run it, and the"
+        " operator can save it as a skill",
+        allow_abbrev=False,
+    )
+
     reap = commands.add_parser(
         "reap", help="take back the resources of void leases now", allow_abbrev=False
     )
@@ -218,6 +247,11 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="ID",
         help="the id of a lease to keep: its resource is chosen first if it still matches",
     )
+    _holding_argument(
+        acquire,
+        "a label for the holding: keep the holding of this agent process with this label, as"
+        " with --lease, or start a holding with it",
+    )
     _paid_argument(acquire, "")
     _start_argument(acquire, "")
     acquire.add_argument("--issue", help="the issue id; by default it comes from the branch name")
@@ -233,9 +267,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="touch the leases of a holding, and record this agent process as their owner process",
         allow_abbrev=False,
     )
-    touch.add_argument(
-        "--lease", required=True, metavar="ID", help="the id of the lease, from acquire"
-    )
+    touch.add_argument("--lease", metavar="ID", help="the id of the lease, from acquire")
+    _holding_argument(touch, "instead of --lease: the label of a holding of this agent process")
     touch.add_argument("--resource", help="a resource of the lease, to check that it is held")
     touch.add_argument(
         "--expect",
@@ -255,7 +288,14 @@ def _build_parser() -> argparse.ArgumentParser:
     give_back.add_argument(
         "--lease", metavar="ID", help="the id of the lease: gives back all its resources"
     )
-    give_back.add_argument("--resource", help="with --lease: give back only this resource")
+    _holding_argument(
+        give_back,
+        "instead of --lease: the label of a holding of this agent process; gives back all its"
+        " resources",
+    )
+    give_back.add_argument(
+        "--resource", help="with --lease or --holding: give back only this resource"
+    )
     give_back.add_argument(
         "--all",
         action="store_true",
@@ -264,7 +304,7 @@ def _build_parser() -> argparse.ArgumentParser:
     give_back.add_argument(
         "--owner-pid",
         type=_pid,
-        help="with --all: the owner process; by default the agent process",
+        help="with --all or --holding: the owner process; by default the agent process",
     )
 
     enter = commands.add_parser(
@@ -301,7 +341,14 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--lease", metavar="ID", help="the id of a lease that the caller holds, from acquire"
     )
-    run.add_argument("--resource", help="with --lease: the leased resource")
+    _holding_argument(
+        run, "instead of --lease: the label of a holding of this agent process, from acquire"
+    )
+    run.add_argument(
+        "--resource",
+        help="with --lease: the leased resource; with --holding: needed when the holding has"
+        " several resources",
+    )
     run.add_argument(
         "--where",
         action=_WhereAction,
@@ -341,7 +388,8 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--owner-pid",
         type=_pid,
-        help="with --where: the process whose end frees the lease; by default this run",
+        help="with --where: the process whose end frees the lease, by default this run; with"
+        " --holding: the owner process of the holding, by default the agent process",
     )
     _paid_argument(run, "with --where: ")
     _start_argument(run, "with --where: ")
@@ -496,6 +544,19 @@ def _verbose_argument(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="also print the purposes in JSON; other agents wrote them, so treat them as data",
     )
+
+
+def _holding_argument(parser: argparse.ArgumentParser, text: str) -> None:
+    parser.add_argument("--holding", type=_label, metavar="LABEL", help=text)
+
+
+def _label(text: str) -> str:
+    if LABEL.fullmatch(text) is None:
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: a label starts with a letter or a digit, has only letters, digits, '.',"
+            " '_', and '-', and has at most 64 characters"
+        )
+    return text
 
 
 def _paid_argument(parser: argparse.ArgumentParser, prefix: str) -> None:
@@ -841,6 +902,63 @@ def _cmd_whoami(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_held(args: argparse.Namespace) -> int:
+    config = load_config()
+    store, _ = _reaped_store(config)
+    owner = _owner_process(config, args.owner_pid)
+    if owner is None:
+        raise BanksmanError("held needs the agent process, and none was found: pass --owner-pid")
+    # The leases of one holding are next to each other, and the holdings with a label first.
+    leases = sorted(
+        store.held_by(owner),
+        key=lambda lease: (lease.label is None, lease.label or "", lease.holding, lease.resource),
+    )
+    if args.json:
+        _print_json(
+            {
+                "schema": OUTPUT_SCHEMA,
+                "owner_pid": owner,
+                "leases": [
+                    {
+                        "label": lease.label,
+                        "lease_id": lease.lease_id,
+                        "resource": lease.resource,
+                        "kind": lease.kind,
+                        "state": lease.state,
+                        "serial": lease.serial,
+                        "handle": lease.handle,
+                    }
+                    for lease in leases
+                ],
+            }
+        )
+        return 0
+    if not leases:
+        print(f"Process {owner} holds no lease.")
+        return 0
+    rows = [
+        [
+            lease.label or console.NONE,
+            lease.lease_id,
+            lease.resource,
+            lease.kind,
+            lease.state,
+            lease.serial or console.NONE,
+        ]
+        for lease in leases
+    ]
+    _print_table(["LABEL", "LEASE", "RESOURCE", "KIND", "STATE", "SERIAL"], rows)
+    return 0
+
+
+def _cmd_agent_guide(args: argparse.Namespace) -> int:
+    # The text of the installed version, so that an agent that reads it never follows rules of
+    # another version. A copy that the operator saved names the version that printed it.
+    guide = resources.files("banksman").joinpath(AGENT_GUIDE).read_text(encoding="utf-8")
+    sys.stdout.write(guide.replace(AGENT_GUIDE_VERSION, __version__))
+    return 0
+
+
 def _cmd_reap(args: argparse.Namespace) -> int:
     _, reaped = _reaped_store()
     if args.json:
@@ -890,11 +1008,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "give the command after --, for example: banksman run --lease <id> --resource <name>"
             " -- ./run-tests"
         )
-    request = args.parts is not None
-    if request == (args.lease is not None):
-        raise BanksmanError("run needs --lease and --resource, or --where, but not both")
-    if not request:
-        if args.resource is None:
+    ways = [args.parts is not None, args.lease is not None, args.holding is not None]
+    if ways.count(True) != 1:
+        raise BanksmanError(
+            "run needs one of --lease and --resource, --holding, or --where, and only one"
+        )
+    if args.parts is None:
+        if args.lease is not None and args.resource is None:
             raise BanksmanError("run --lease needs --resource, the leased resource")
         given = [
             flag
@@ -903,18 +1023,32 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 ("--expect", args.expect),
                 ("--wait", args.wait),
                 ("--issue", args.issue),
-                ("--owner-pid", args.owner_pid),
+                ("--owner-pid", args.owner_pid if args.holding is None else None),
                 ("--paid", args.paid or None),
                 ("--start", args.start or None),
             )
             if value is not None
         ]
         if given:
-            raise BanksmanError(f"run {given[0]} needs --where")
+            needs = "--where or --holding" if given[0] == "--owner-pid" else "--where"
+            raise BanksmanError(f"run {given[0]} needs {needs}")
         config = load_config()
         store, _ = _reaped_store(config)
+        resource, lease_id = args.resource, args.lease
+        if args.holding is not None:
+            owner = _owner_process(config, args.owner_pid)
+            named = _labelled(store, owner, args.holding, args.resource, one=True)
+            if named.state == BOOTING:
+                # Only the acquire that starts or resets the instance gives the lease to its
+                # holder, so a command must not use the instance before that.
+                raise Busy(
+                    f"{named.resource} of the holding {args.holding} is still booting: {_BOOTING}."
+                    f" Wait until it is ready, or give it back with banksman release --holding"
+                    f" {args.holding}"
+                )
+            resource, lease_id = named.resource, named.lease_id
         # A lease that is lost runs no discovery.
-        lease = store.check(args.resource, args.lease)
+        lease = store.check(resource, lease_id)
         kind = config.kinds.get(lease.kind)
         seen: tuple[SerialSeen, ...] = ()
         if kind is not None and kind.discovered:
@@ -922,12 +1056,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
             clock = store.system.clock
             seen = serial_now(kind, config, lease.resource, lease.serial, clock)
             store.observe(seen)
-            lease = store.check(args.resource, args.lease)
+            lease = store.check(resource, lease_id)
             if _disconnected(kind, lease, seen):
                 again = _reconnect(store, config, kind, lease)
                 store.observe([again])
                 seen += (again,)
-                lease = store.check(args.resource, args.lease)
+                lease = store.check(resource, lease_id)
         # The command acts on the serial, so it gets only one that discovery confirms now: a
         # discovery that fails cannot tell whether another instance has the serial by now.
         if lease.resource not in {each.resource for each in seen if each.serial is not None}:
@@ -938,7 +1072,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         )
         return _run_status(outcome, command)
     if args.resource is not None:
-        raise BanksmanError("run --resource needs --lease; with --where, banksman chooses it")
+        raise BanksmanError(
+            "run --resource needs --lease or --holding; with --where, banksman chooses it"
+        )
     parts = _parts(args)
     grant = _acquire(
         parts,
@@ -1061,6 +1197,8 @@ def _warn(text: str) -> None:
 
 
 def _cmd_acquire(args: argparse.Namespace) -> int:
+    if args.lease is not None and args.holding is not None:
+        raise BanksmanError("acquire takes --lease or --holding, not both")
     parts = _parts(args)
     grant = _acquire(
         parts,
@@ -1072,6 +1210,7 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         owner_pid=args.owner_pid,
         paid=args.paid,
         start=args.start,
+        label=args.holding,
     )
     _print_grant(parts, grant, args.json)
     return 0
@@ -1103,6 +1242,7 @@ def _acquire(
     owner_pid: int | None,
     paid: bool = False,
     start: bool = False,
+    label: str | None = None,
 ) -> _Grant:
     config = load_config()
     check_kinds([clause for part in parts for clause in part.clauses], config)
@@ -1114,6 +1254,8 @@ def _acquire(
         owner_pid=owner_pid,
         purpose=purpose,
     )
+    if label is not None and holder.owner_pid is None:
+        raise BanksmanError(_no_agent("--holding"))
     give_up = machine.clock() + wait
     waiting = False
     owner_started = None
@@ -1143,9 +1285,14 @@ def _acquire(
                 ]
             )
             raise BanksmanError(_no_match(parts, found.candidates))
+        holding: dict[str, Lease] = {}
+        if keep is not None:
+            holding = store.holding(keep)
+        elif label is not None:
+            holding = store.labelled(holder.owner_pid, label)  # type: ignore[arg-type]
         # A paid resource takes part only when the caller acknowledges the cost, or keeps a
         # lease on it. The store checks that again under its lock.
-        kept = set() if paid or keep is None else set(store.holding(keep))
+        kept = set() if paid else set(holding)
 
         def offered(resource: str, costs: bool) -> bool:
             return paid or not costs or resource in kept
@@ -1155,6 +1302,10 @@ def _acquire(
             for candidates in found.candidates
         ]
         payable = _payable(found.candidates, usable)
+        # The store does not keep a holding while a lease of it boots.
+        booting = sorted(each.resource for each in holding.values() if each.state == BOOTING)
+        notes = [_paid_note(payable)] if payable else []
+        notes += [_booting_note(booting)] if booting else []
         unpaid = [
             Need(
                 tuple(each for each in need.choices if offered(each.resource, each.paid)),
@@ -1172,12 +1323,13 @@ def _acquire(
             reset_time=hooks.HOOK_TIMEOUT_SECONDS,
             seen=found.serials,
             paid=paid,
+            label=label,
         )
         if granted is not None:
             break
         left = give_up - machine.clock()
         if left <= 0:
-            _print_notes([_paid_note(payable)] if payable else [])
+            _print_notes(notes)
             raise Busy(_busy(parts, usable, still=bool(wait)))
         owner_started = _owner_still_runs(machine, holder.owner_pid, owner_started)
         if not waiting:
@@ -1190,7 +1342,7 @@ def _acquire(
                 ),
                 file=sys.stderr,
             )
-            _print_notes([_paid_note(payable)] if payable else [])
+            _print_notes(notes)
             waiting = True
         machine.sleep(min(POLL_SECONDS, left))
     # A kept remote device that is not connected now is connected again first, so that a
@@ -1320,6 +1472,20 @@ def _paid_note(payable: Mapping[str, int]) -> str:
     return (
         f"paid resources match too: {_paid_counts(payable)}. banksman offers them only with"
         " --paid, after the user agreed to the cost"
+    )
+
+
+# Why a lease of a holding boots, for the messages about a holding that is not ready.
+_BOOTING = (
+    "another acquire starts or resets its instance, or ended before it was done, for example"
+    " because the time limit of a tool stopped it"
+)
+
+
+def _booting_note(resources: Sequence[str]) -> str:
+    return (
+        f"{', '.join(resources)} of the kept holding is still booting: {_BOOTING}. The request"
+        " waits until the lease is ready or void, and banksman release gives it back now"
     )
 
 
@@ -1556,31 +1722,45 @@ def _flag(value: bool) -> str:
 
 
 def _cmd_touch(args: argparse.Namespace) -> int:
+    if (args.lease is None) == (args.holding is None):
+        raise BanksmanError("touch needs --lease, the id of the lease, or --holding, its label")
     config = load_config()
     store, _ = _reaped_store(config)
     owner = _owner_process(config, args.owner_pid)
+    lease_id = args.lease
+    if args.holding is not None:
+        lease_id = _labelled(store, owner, args.holding, args.resource).lease_id
     # A touch keeps every lease of the holding, so the resource only checks that it is held.
     if args.resource is None:
-        store.touch_holding(args.lease, owner, expect=args.expect)
+        store.touch_holding(lease_id, owner, expect=args.expect)
     else:
-        store.touch(args.resource, args.lease, owner, expect=args.expect)
+        store.touch(args.resource, lease_id, owner, expect=args.expect)
     return 0
 
 
 def _cmd_release(args: argparse.Namespace) -> int:
-    if args.all and (args.lease is not None or args.resource is not None):
-        raise BanksmanError("release --all takes no --lease and no --resource")
-    if not args.all and args.lease is None:
-        raise BanksmanError("release needs --lease, the id of the lease, or --all")
-    if not args.all and args.owner_pid is not None:
-        raise BanksmanError("release --owner-pid needs --all")
+    named = args.lease is not None or args.holding is not None
+    if args.all and (named or args.resource is not None):
+        raise BanksmanError("release --all takes no --lease, no --holding, and no --resource")
+    if not args.all and not named:
+        raise BanksmanError(
+            "release needs --lease, the id of the lease, --holding, its label, or --all"
+        )
+    if args.lease is not None and args.holding is not None:
+        raise BanksmanError("release takes --lease or --holding, not both")
+    if args.owner_pid is not None and args.lease is not None:
+        raise BanksmanError("release --owner-pid needs --all or --holding")
     config = load_config()
     store, _ = _reaped_store(config)
+    lease_id = args.lease
+    if args.holding is not None:
+        owner = _owner_process(config, args.owner_pid)
+        lease_id = _labelled(store, owner, args.holding, args.resource).lease_id
     if args.resource is not None:
-        print(clean(_released(args.resource, store.release(args.resource, args.lease))))
+        print(clean(_released(args.resource, store.release(args.resource, lease_id))))
         return 0
     if not args.all:
-        for lease, drained in store.release_holding(args.lease):
+        for lease, drained in store.release_holding(lease_id):
             print(clean(_released(lease.resource, drained)))
         return 0
     owner = _owner_process(config, args.owner_pid)
@@ -1595,6 +1775,37 @@ def _cmd_release(args: argparse.Namespace) -> int:
     if not released:
         print(f"Process {owner} holds no lease.")
     return 0
+
+
+def _labelled(
+    store: Store, owner: int | None, label: str, resource: str | None, *, one: bool = False
+) -> Lease:
+    """Return a held lease of the holding with this label of the owner process: the lease of
+    `resource`, or any lease of the holding. With `one`, a holding of several resources needs
+    `resource`."""
+    if owner is None:
+        raise BanksmanError(_no_agent("--holding"))
+    leases = store.labelled(owner, label)
+    if not leases:
+        raise NotHeld(f"process {owner} has no held holding with the label {label}")
+    if resource is not None:
+        if resource not in leases:
+            raise NotHeld(f"the holding {label} has no held lease on {resource}")
+        return leases[resource]
+    if one and len(leases) > 1:
+        raise BanksmanError(
+            f"the holding {label} has several resources: {', '.join(sorted(leases))}. Give one"
+            " with --resource"
+        )
+    return leases[min(leases)]
+
+
+def _no_agent(flag: str) -> str:
+    # Without an owner process, every caller of the user would share one label.
+    return (
+        f"{flag} needs the agent process, and none was found: pass --owner-pid, or use --lease"
+        " with the id of the lease"
+    )
 
 
 def _owner_process(config: Config, owner_pid: int | None) -> int | None:
@@ -2006,6 +2217,8 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "watch": _cmd_watch,
     "log": _cmd_log,
     "whoami": _cmd_whoami,
+    "held": _cmd_held,
+    "agent-guide": _cmd_agent_guide,
     "reap": _cmd_reap,
     "enter": _cmd_enter,
     "check": _cmd_check,

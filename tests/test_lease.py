@@ -123,7 +123,19 @@ def test_json_round_trip():
     paired = replace(LEASE, accounts=("qa@example.test", "qb@example.test"))
     addressed = replace(LEASE, serial="emulator-5554", serial_seen=START + 5)
     reserved = replace(LEASE, serial="localhost:49920", handle="fakeid0000001")
-    for lease in (LEASE, OWNED, booting, draining, users, described, paired, addressed, reserved):
+    labelled = replace(OWNED, label="login-tests")
+    for lease in (
+        LEASE,
+        OWNED,
+        booting,
+        draining,
+        users,
+        described,
+        paired,
+        addressed,
+        reserved,
+        labelled,
+    ):
         assert Lease.from_json(lease.to_json()) == lease
 
 
@@ -132,11 +144,11 @@ def test_the_lease_file_carries_the_schema():
 
 
 def test_a_lease_file_of_an_earlier_schema_is_refused():
-    # Schema 6 had no handle. Two banksman versions must not share one state directory.
+    # Schema 7 had no label. Two banksman versions must not share one state directory.
     data = LEASE.to_json()
-    del data["handle"]
-    data["schema"] = 6
-    with pytest.raises(LeaseFormatError, match="does not have schema 7"):
+    del data["label"]
+    data["schema"] = 7
+    with pytest.raises(LeaseFormatError, match="does not have schema 8"):
         Lease.from_json(data)
 
 
@@ -193,6 +205,12 @@ def _user(**changes):
         lambda data: data.update(serial=""),
         lambda data: data.update(serial=5554),
         lambda data: data["awake"].update(serial_seen=float("nan")),
+        lambda data: data.update(label=""),
+        lambda data: data.update(label="two words"),
+        lambda data: data.update(label="tests\x1b[2J"),
+        lambda data: data.update(label="-tests"),
+        lambda data: data.update(label="x" * 65),
+        lambda data: data.update(label=7),
         _without_awake,
     ],
 )
