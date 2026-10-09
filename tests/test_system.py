@@ -201,3 +201,24 @@ def _wait_until_zombie(pid):
             return
         time.sleep(0.01)
     raise AssertionError(f"process {pid} did not become a zombie")
+
+
+def test_the_command_lines_have_each_argument_as_the_process_got_it():
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "one argument", ""],
+    )
+    try:
+        process = Machine().commands()[child.pid]
+        assert process.arguments[1:] == ("-c", "import time; time.sleep(30)", "one argument", "")
+        assert process.started == Machine().running([child.pid])[child.pid]
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_the_arguments_of_procargs2():
+    count = (3).to_bytes(4, sys.byteorder)
+    data = count + b"/bin/zsh\0\0\0\0zsh\0-c\0echo -avd x\0HOME=/home/me\0"
+    assert system._procargs(data) == ("zsh", "-c", "echo -avd x")
+    # A value that has fewer arguments than it says is not trusted.
+    assert system._procargs((9).to_bytes(4, sys.byteorder) + b"/bin/zsh\0zsh\0") == ()

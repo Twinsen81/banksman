@@ -661,9 +661,13 @@ holdings apart (section 9).
   accounts. When adb cannot list the running emulators, `running` is left out. An emulator that
   adb lists as `offline`, because the adb daemon in it has not started yet, for example while
   it boots, runs too: its console gives its AVD name, so its serial is known from the start,
-  and its accounts are not known yet. An AVD also runs when the process list has an emulator
-  with `-avd <name>` or `@<name>` on its command line: adb does not list an emulator in the
-  first seconds of its start, or one whose console port is outside the range that adb scans.
+  and its accounts are not known yet. An AVD also runs when a process has the arguments
+  `-avd <name>`, or an emulator program has the argument `@<name>`: adb does not list an
+  emulator in the first seconds of its start, or one whose console port is outside the range
+  that adb scans. banksman reads each argument as the process got it, from `/proc` on Linux
+  and from the kernel on macOS, so a shell whose script starts an emulator is not an emulator.
+  An AVD that runs as several emulators, for example with `-read-only`, has no serial, because
+  banksman cannot tell which of them a lease has; a held lease keeps its own.
   `preset = "android-device"` finds the physical devices that adb lists, with the facts
   `serial`, `manufacturer`, `model`, `codename`, `api`, `abi`, `form`, and `running`, which
   is always true, and their accounts. The facts are what the device gives: a Samsung phone
@@ -700,8 +704,11 @@ holdings apart (section 9).
   **The record.** `<kind>-emulators.json` lists the emulators that banksman knows: the ones that
   it started, and the ones that ran when a lease of their AVD ended (section 6), each with its
   pid, its start time, the boot of the machine, and whether banksman started it. An entry
-  whose process has ended, or that belongs to an earlier boot, goes. An emulator of an
-  allowed AVD that runs without an entry is unmanaged. The record and the logs are in the
+  whose process has ended, or that belongs to an earlier boot, goes. An allowed AVD that runs
+  is managed only while the emulator of its entry is its only emulator. So an AVD that also
+  runs as another emulator, for example one with `-read-only` that a person started, is
+  unmanaged, and when an AVD runs as several emulators at the end of a lease, banksman records
+  none of them. The record and the logs are in the
   emulator directory, `~/.local/state/banksman/emulator`, outside `/tmp`, because an emulator
   can run for days; next to the state directory when only `BANKSMAN_STATE_DIR` is set; or in
   `BANKSMAN_EMULATOR_DIR`. Without a record that banksman can read, no emulator counts as one

@@ -105,6 +105,8 @@ def states(capsys):
         (("/sdk/emulator/qemu/darwin-aarch64/qemu-system-aarch64-headless", "-avd", "qa"), "qa"),
         (("/sdk/emulator/emulator", "@qa_phone", "-no-window"), "qa_phone"),
         (("/usr/bin/javac", "@qa_phone"), None),
+        # A shell gets its script as one argument, so the emulator command in it is not its own.
+        (("/bin/zsh", "-c", "banksman acquire --start && emulator -avd qa_phone"), None),
         (("/sdk/emulator/emulator", "-list-avds"), None),
         (("/sdk/emulator/emulator", "-avd"), None),
         ((), None),
@@ -112,6 +114,22 @@ def states(capsys):
 )
 def test_the_avd_of_a_command_line(arguments, avd):
     assert emulator.avd_of(arguments) == avd
+
+
+def test_a_shell_whose_script_starts_an_emulator_is_not_an_emulator():
+    # As the shell tool of an agent runs a command: the whole script is one argument.
+    shell = subprocess.Popen(
+        ["/bin/sh", "-c", "sleep 30; emulator -avd qa_shell_avd -no-window"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        table = Machine().commands()
+        assert table[shell.pid].arguments[-1].startswith("sleep 30; emulator -avd")
+        assert "qa_shell_avd" not in emulator.by_avd(table)
+    finally:
+        shell.kill()
+        shell.wait()
 
 
 # The record of the emulators that banksman knows.
@@ -388,21 +406,65 @@ def test_with_grant_an_unmanaged_emulator_comes_after_the_ones_that_banksman_kno
     capsys, config_path, sdk
 ):
     configure(config_path, sdk, 'unmanaged = "grant"\n')
-    sdk.running({"emulator-5554": "qa_phone", "emulator-5556": "qa_tablet"})
-    machine = Machine()
-    me = os.getpid()
-    with emulator.changing(kind(), machine) as record:
-        # This process stands for the emulator of qa_tablet. banksman did not start it, so no
-        # take-back ever signals it.
-        record["qa_tablet"] = emulator.Known(
-            "qa_tablet", me, machine.running([me])[me], machine.boot_id(), False, time.time()
-        )
+    sdk.running({"emulator-5554": "qa_phone"})
+    # A holder started this one under a lease that has ended, so banksman knows it.
+    sdk.start_emulator("qa_tablet", 5556)
+    wait_for(lambda: listed(sdk, "emulator-5556"))
+    emulator.adopt(kind(), "qa_tablet")
     granted = []
     for _ in AVDS:
         status, values, err = acquire(capsys, "--where", "kind=emulator")
         assert status == 0, err
         granted.append(values["RESOURCE"])
     assert granted == ["qa_tablet", "qa_phone", "qa_watch"]
+
+
+def test_a_second_emulator_of_an_avd_makes_it_unmanaged_and_without_a_serial(
+    capsys, config_path, sdk
+):
+    configure(config_path, sdk, 'start_args = ["-read-only"]\n')
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    # A person starts a second, read-only emulator of the same AVD, and adb lists both.
+    sdk.start_emulator("qa_phone", 5600)
+    wait_for(lambda: listed(sdk, "emulator-5600"))
+    capsys.readouterr()
+    assert main(["status", "--json"]) == 0
+    (phone,) = [
+        each
+        for each in json.loads(capsys.readouterr().out)["resources"]
+        if each["resource"] == "qa_phone"
+    ]
+    assert (phone["state"], phone["serial"]) == ("unmanaged", None)
+    status, _, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 4, err
+    assert len(sdk.emulator_calls()) == 2
+
+
+def test_a_held_lease_keeps_its_serial_when_a_second_emulator_of_its_avd_starts(
+    capsys, config_path, sdk
+):
+    configure(config_path, sdk, 'start_args = ["-read-only"]\n')
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    sdk.start_emulator("qa_phone", 5600)
+    wait_for(lambda: listed(sdk, "emulator-5600"))
+    assert main(["status"]) == 0
+    assert leases()["qa_phone"].serial == values["SERIAL"] == "emulator-5554"
+
+
+def test_a_release_records_nothing_when_the_avd_runs_as_several_emulators(
+    capsys, config_path, sdk
+):
+    configure(config_path, sdk)
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone")
+    assert status == 0, err
+    sdk.start_emulator("qa_phone", 5556)
+    sdk.start_emulator("qa_phone", 5558)
+    wait_for(lambda: listed(sdk, "emulator-5556") and listed(sdk, "emulator-5558"))
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    assert known() == {}
 
 
 def test_a_release_records_the_emulator_that_the_holder_started(capsys, config_path, sdk):

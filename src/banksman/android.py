@@ -80,7 +80,8 @@ def emulators(settings: Android, run: Run | None = None, *, accounts: bool = Tru
     notes: list[str] = []
     home = avd_home(settings)
     avds = _avds(home, notes)
-    running: dict[str, str] = {}
+    # The serial of each AVD that runs, or None when it runs as several emulators.
+    running: dict[str, str | None] = {}
     booting: set[str] = set()
     listed = True
     try:
@@ -93,6 +94,11 @@ def emulators(settings: Android, run: Run | None = None, *, accounts: bool = Tru
             name = _avd_name(run, adb, serial, shell=state == "device")
             if name is None:
                 notes.append(f"cannot read the AVD name of the running {serial}")
+            elif name in running:
+                # A second emulator of one AVD, with -read-only. banksman cannot tell which of
+                # them a lease has, so neither serial is used.
+                notes.append(f"{name} runs as several emulators, so it has no serial")
+                running[name] = None
             else:
                 running[name] = serial
                 if state != "device":
@@ -107,7 +113,7 @@ def emulators(settings: Android, run: Run | None = None, *, accounts: bool = Tru
         # An emulator that does not run must be started before use. Without the list of running
         # emulators, that is not known, so the fact is left out.
         if listed:
-            instance["facts"]["running"] = serial is not None
+            instance["facts"]["running"] = name in running
         if serial is not None:
             instance["facts"]["serial"] = serial
             # The accounts of an emulator that boots cannot be read yet, so they are not known.

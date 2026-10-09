@@ -9,7 +9,7 @@ import contextlib
 import os
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -20,6 +20,9 @@ _TIMEOUT_SECONDS = 5.0
 _MAX_MACOS_PID = 99_999
 # With LC_ALL=C, ps prints a start time as "Fri Oct  2 10:09:25 2026".
 _LSTART_FIELDS = 5
+_CTL_KERN = 1
+_KERN_ARGMAX = 8
+_KERN_PROCARGS2 = 49
 OUTSIDE_SANDBOX = (
     "If banksman runs inside an agent's sandbox, let the agent run it outside the sandbox."
 )
@@ -38,8 +41,7 @@ class Process:
     # The executable as the process list shows it: a full path on macOS, and the program name,
     # at most 15 characters, on Linux.
     program: str = ""
-    # The command line, only from `commands`. On macOS, ps joins the arguments with spaces, so an
-    # argument with a space becomes several here.
+    # The command line, each argument as the process got it. Only `commands` reads it.
     arguments: tuple[str, ...] = ()
 
 
@@ -204,7 +206,9 @@ def _commands_from_proc() -> dict[int, Process]:
             raw = Path(f"/proc/{name}/cmdline").read_bytes()
         except OSError:
             continue
-        arguments = tuple(part.decode(errors="replace") for part in raw.split(b"\0") if part)
+        # Each argument ends with a NUL, and an argument can be empty.
+        parts = raw.split(b"\0")[:-1] if raw.endswith(b"\0") else raw.split(b"\0")
+        arguments = tuple(part.decode(errors="replace") for part in parts if raw)
         table[process.pid] = replace(process, arguments=arguments)
     return table
 
@@ -261,19 +265,62 @@ def _table_from_ps() -> dict[int, Process]:
 
 
 def _commands_from_ps() -> dict[int, Process]:
+    # ps joins the arguments of a command line with spaces, so a shell command such as
+    # zsh -c "emulator -avd x" would look like the emulator itself. The kernel gives each
+    # argument as it is.
+    arguments_of = _darwin_arguments()
     table = {}
-    output = _ps(["-ww", "-A", "-o", "pid=,ppid=,pgid=,stat=,lstart=,command="])
-    for line in output.splitlines():
-        fields = line.split(None, 4 + _LSTART_FIELDS)
-        if len(fields) < 4 + _LSTART_FIELDS or not all(field.isdigit() for field in fields[:3]):
-            continue
-        if fields[3].startswith("Z"):
-            continue
-        pid, ppid, pgid = (int(field) for field in fields[:3])
-        started = " ".join(fields[4 : 4 + _LSTART_FIELDS])
-        arguments = tuple(fields[4 + _LSTART_FIELDS].split()) if len(fields) > 9 else ()
-        table[pid] = Process(pid, ppid, pgid, started, arguments=arguments)
+    for pid, process in _table_from_ps().items():
+        table[pid] = replace(process, arguments=arguments_of(pid))
     return table
+
+
+def _darwin_arguments() -> Callable[[int], tuple[str, ...]]:
+    """Return a function that reads the arguments of a process with sysctl KERN_PROCARGS2, or
+    an empty tuple when it cannot, for example for a process of another user."""
+    import ctypes  # Not at the top: the adb guard imports this module for every adb call.
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    sysctl = libc.sysctl
+    sysctl.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.c_uint,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+    ]
+    sysctl.restype = ctypes.c_int
+    largest = ctypes.c_int(0)
+    size = ctypes.c_size_t(ctypes.sizeof(largest))
+    name = (ctypes.c_int * 2)(_CTL_KERN, _KERN_ARGMAX)
+    if sysctl(name, 2, ctypes.byref(largest), ctypes.byref(size), None, 0) != 0:
+        raise MachineError(f"cannot read the arguments of processes. {OUTSIDE_SANDBOX}")
+    buffer = ctypes.create_string_buffer(largest.value)
+
+    def arguments_of(pid: int) -> tuple[str, ...]:
+        name = (ctypes.c_int * 3)(_CTL_KERN, _KERN_PROCARGS2, pid)
+        size = ctypes.c_size_t(largest.value)
+        if sysctl(name, 3, buffer, ctypes.byref(size), None, 0) != 0 or size.value < 4:
+            return ()
+        return _procargs(ctypes.string_at(buffer, size.value))
+
+    return arguments_of
+
+
+def _procargs(data: bytes) -> tuple[str, ...]:
+    """Return the arguments in the value of KERN_PROCARGS2: the number of arguments, the path of
+    the executable and its padding, then each argument ended by a NUL, then the environment."""
+    count = int.from_bytes(data[:4], sys.byteorder)
+    rest = data[4:]
+    end = rest.find(b"\0")
+    if end < 0:
+        return ()
+    rest = rest[end:].lstrip(b"\0")
+    parts = rest.split(b"\0")
+    if count > len(parts):
+        return ()
+    return tuple(part.decode(errors="replace") for part in parts[:count])
 
 
 def _ps(arguments: list[str]) -> str:

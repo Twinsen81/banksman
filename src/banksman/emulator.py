@@ -152,27 +152,51 @@ def discover(
     system = Machine() if system is None else system
     document = android.emulators(settings, accounts=accounts)
     notes = document.setdefault("notes", [])
+    processes: dict[str, list[Process]] | None
     try:
         processes = by_avd(system.commands())
     except BanksmanError as exc:
         notes.append(f"cannot read the command lines of the processes: {exc}")
-        processes = {}
+        processes = None
     for instance in document["instances"]:
-        if instance["name"] in processes:
+        running = (processes or {}).get(instance["name"], [])
+        if running:
             instance["facts"]["running"] = True
+        if len(running) > 1:
+            # Several emulators of one AVD, with -read-only. adb gave the serial of one of them,
+            # and banksman cannot tell which, so a lease keeps its own serial.
+            instance["facts"].pop("serial", None)
+            instance.pop("accounts", None)
+            name = instance["name"]
+            notes.append(f"{name} runs as {len(running)} emulators, so it has no serial")
     try:
-        known = managed(kind, system)
+        known = load(kind, system)
     except BanksmanError as exc:
         # Without the record, no emulator counts as one that banksman knows, so none is given
         # to a request that it could take from somebody.
         notes.append(str(exc))
-        known = set()
+        known = {}
     unmanaged = {
         instance["name"]
         for instance in document["instances"]
-        if instance["facts"].get("running") is True and instance["name"] not in known
+        if instance["facts"].get("running") is True
+        and not _only_known(instance["name"], processes, known)
     }
     return document, unmanaged
+
+
+def _only_known(
+    resource: str, processes: Mapping[str, list[Process]] | None, known: Mapping[str, Known]
+) -> bool:
+    """Whether the only emulator of an AVD that runs is the one that banksman knows.
+
+    The record names one process for each AVD. A second emulator of the AVD, for example one
+    with -read-only that a person started, can be the one at the serial that adb gives.
+    """
+    entry = known.get(resource)
+    if entry is None or processes is None:
+        return False
+    return [process.pid for process in processes.get(resource, [])] == [entry.pid]
 
 
 # The record of the emulators that banksman knows.
@@ -221,10 +245,11 @@ def adopt(kind: Kind, resource: str, system: System | None = None) -> None:
     not start it, so the reaper never ends it.
     """
     system = Machine() if system is None else system
-    running = by_avd(system.commands()).get(resource)
-    if not running:
+    running = by_avd(system.commands()).get(resource, [])
+    # With several emulators of the AVD, banksman cannot tell which one the holder used.
+    if len(running) != 1:
         return
-    process = running[0]
+    (process,) = running
     boot = system.boot_id()
     with changing(kind, system) as known:
         if resource not in known:
