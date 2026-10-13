@@ -32,6 +32,9 @@ STARTED = (ANDROID_EMULATOR, ANDROID_REMOTE)
 SKIP = "skip"
 GRANT = "grant"
 UNMANAGED = (SKIP, GRANT)
+# The modes of the adb guard that `strict = true` and `strict = "warn"` in [guard] choose.
+STRICT = "strict"
+WARN = "warn"
 # The agents whose commands banksman recognizes. Each is the last part of the path of the
 # agent's executable, as the process list shows it.
 DEFAULT_AGENTS = ("claude", "codex")
@@ -156,9 +159,11 @@ class Android:
 class Guard:
     """How the adb guard decides."""
 
-    # Also refuse an agent's device command on a device that no lease of its holding has, for
-    # example a free device, or a personal phone that the inventory does not allow.
-    strict: bool = False
+    # STRICT also refuses an agent's device command on a device that no lease of its holding
+    # has, for example a free device, or a personal phone that the inventory does not allow.
+    # WARN lets such a call run, but warns the agent and records the call in the log, so that the
+    # operator sees which flows still use devices without a lease before turning STRICT on.
+    strict: str | None = None
 
 
 @dataclass(frozen=True)
@@ -312,7 +317,12 @@ def _android(table: dict[str, object]) -> Android:
 
 def _guard(table: dict[str, object]) -> Guard:
     _check_keys(table, "guard", ("strict",))
-    return Guard(strict=_boolean(table.get("strict", False), "guard.strict"))
+    strict = table.get("strict", False)
+    if strict == WARN:
+        return Guard(strict=WARN)
+    if not isinstance(strict, bool):
+        raise _Invalid("guard.strict", f'must be true, false, or "{WARN}"')
+    return Guard(strict=STRICT if strict else None)
 
 
 def _absolute_path(value: object, where: str) -> Path | None:

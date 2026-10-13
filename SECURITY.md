@@ -179,5 +179,8 @@ runs the adb of the SDK of the configuration, or the adb that it saved, never on
 holder as `status` does, with the purpose, which is untrusted text, and with terminal control
 sequences removed. When banksman cannot decide, or cannot start, the call runs with a warning:
 the guard fails open, so a broken configuration or installation costs protection, not every
-device.
+device. A refused call, and a call that warn mode lets run, adds an event to the log that
+names the caller and the device, with only the words that name the adb command: never the rest
+of the command line, which can carry tokens, and never the text of the refusal, which can carry
+the purpose of another holder.
 

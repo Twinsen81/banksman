@@ -48,7 +48,7 @@ from banksman.discovery import (
     serials_seen,
 )
 from banksman.errors import BanksmanError
-from banksman.history import Event, History
+from banksman.history import EVENTS, Event, History
 from banksman.identity import find_agent, find_holder
 from banksman.inventory import (
     Decisions,
@@ -164,7 +164,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     log = commands.add_parser(
         "log",
-        help="show the history of acquire, release, void, reap, and quarantine events",
+        help="show the history of acquire, release, void, reap, and quarantine events, and of"
+        " the adb calls that the adb guard refused or warned about",
         allow_abbrev=False,
     )
     log.add_argument(
@@ -175,6 +176,13 @@ def _build_parser() -> argparse.ArgumentParser:
         " date and time, such as 2026-10-02T03:00",
     )
     log.add_argument("--resource", help="only the events of this resource")
+    log.add_argument("--event", choices=EVENTS, help="only the events of this kind")
+    log.add_argument(
+        "--count",
+        action="store_true",
+        help="count the events by event, device, worktree, and agent instead of listing them;"
+        " with --event guard, it shows which flows still bypass banksman",
+    )
     log.add_argument("--json", action="store_true", help="print JSON")
     _verbose_argument(log)
 
@@ -887,20 +895,23 @@ def _cmd_log(args: argparse.Namespace) -> int:
         for event in events
         if (args.since is None or event.at >= args.since)
         and (args.resource is None or event.resource == args.resource)
+        and (args.event is None or event.event == args.event)
     ]
+    grouped = console.groups(events) if args.count else []
     if args.json:
-        _print_json(
-            {
-                "schema": OUTPUT_SCHEMA,
-                "events": [console.event_json(event, verbose=args.verbose) for event in events],
-                "skipped": skipped,
-            }
+        listed: dict[str, object] = (
+            {"counts": [console.count_json(group) for group in grouped]}
+            if args.count
+            else {"events": [console.event_json(event, verbose=args.verbose) for event in events]}
         )
+        _print_json({"schema": OUTPUT_SCHEMA, **listed, "skipped": skipped})
         return 0
-    if events:
-        _print_table(console.LOG_HEADER, console.log_rows(events))
-    else:
+    if not events:
         print("No events.")
+    elif args.count:
+        _print_table(console.COUNT_HEADER, console.count_rows(grouped))
+    else:
+        _print_table(console.LOG_HEADER, console.log_rows(events))
     if skipped:
         print(f"note: {skipped} lines of the log are not valid events, so they are left out")
     return 0

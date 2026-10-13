@@ -23,8 +23,21 @@ from banksman import android, cli, guard
 from banksman.android import Transport
 from banksman.config import load_config
 from banksman.guard import ALL, DEVICE, HOST, Call, parse
+from banksman.history import (
+    COMMAND,
+    EVERY_DEVICE,
+    GUARD,
+    LOST,
+    NOT_LEASED,
+    OTHER_HOLDER,
+    REFUSED,
+    UNREADABLE,
+    WARNED,
+    Event,
+    History,
+)
 from banksman.lease import Holder, SerialSeen
-from banksman.store import Choice, Need, Store
+from banksman.store import Choice, Need, Store, log_lock
 from banksman.system import MachineError
 
 ME = os.getpid()
@@ -99,8 +112,17 @@ def lease(store, system, resource, holder, serial=None, kind="emulator"):
     return granted
 
 
-def check(system, *arguments, env=None, adb=no_adb):
+def verdict(system, *arguments, env=None, adb=no_adb):
     return guard.check(list(arguments), load_config(), env or {}, system, adb)
+
+
+def check(system, *arguments, env=None, adb=no_adb):
+    """Return the text of a refusal, or None when the call runs without a warning."""
+    found = verdict(system, *arguments, env=env, adb=adb)
+    if found is None:
+        return None
+    assert found.action == REFUSED, found.text
+    return found.text
 
 
 # Reading the command line.
@@ -190,7 +212,7 @@ def test_a_device_command_on_the_device_of_another_holding_is_refused(store, sys
     assert refusal == (
         "adb shell: refused: another holder leases emulator-5554 (e2e_phone), and the lease is"
         " ready: codex · #123 · verify the tablet layout. Use a device of your own lease;"
-        " banksman status shows who holds what"
+        " banksman status shows who holds what. Run banksman agent-guide and follow it"
     )
 
 
@@ -474,7 +496,7 @@ def strict(config_path):
 def test_strict_refuses_a_device_that_no_lease_of_the_caller_has(store, system, strict):
     assert check(system, "-s", "emulator-5556", "shell") == (
         "adb shell: refused: emulator-5556 is not a device of your leases, and the adb guard is"
-        " strict. Get a device with banksman acquire"
+        " strict. Get a device through banksman: run banksman agent-guide and follow it"
     )
 
 
@@ -491,6 +513,38 @@ def test_strict_passes_a_person(store, system, strict):
 def test_strict_passes_a_command_that_adb_refuses_itself(store, system, strict):
     devices = listing(Transport("emulator-5554", "device"), Transport("emulator-5556", "device"))
     assert check(system, "shell", adb=devices) is None
+
+
+# Warn mode.
+
+
+@pytest.fixture
+def warn(config_path):
+    write_config(config_path, '[guard]\nstrict = "warn"\n')
+
+
+def test_warn_lets_a_device_that_no_lease_of_the_caller_has_run_with_a_warning(
+    store, system, warn
+):
+    found = verdict(system, "-s", "emulator-5556", "shell")
+    assert (found.action, found.reason, found.serial) == (WARNED, NOT_LEASED, "emulator-5556")
+    assert found.text == (
+        "warning: adb shell: emulator-5556 is not a device of your leases, and a strict adb guard"
+        " would refuse this call. Get a device through banksman: run banksman agent-guide and"
+        " follow it"
+    )
+
+
+def test_warn_still_refuses_the_device_of_another_holding(store, system, warn):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    assert "another holder" in check(system, "-s", "emulator-5554", "shell")
+
+
+def test_warn_passes_the_device_of_the_caller_and_a_person(store, system, warn):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    assert verdict(system, "-s", "emulator-5554", "shell") is None
+    system.parents[ME] = 1
+    assert verdict(system, "-s", "emulator-5556", "shell") is None
 
 
 # Commands that act on every device.
@@ -598,6 +652,18 @@ def test_a_guard_that_fails_lets_the_call_run_and_says_so(
     assert printed.err.startswith("banksman: adb guard: this adb call is not checked: ")
 
 
+def test_a_warned_call_runs_and_says_so_in_one_line(machine, warn, capsys):
+    assert guarded("-s", "emulator-5556", "shell", "ls", fallback="/opt/adb") == 0
+    printed = capsys.readouterr()
+    assert printed.out == "/opt/adb\n"
+    # The agent learns from its first call that bypasses banksman how to get a device.
+    assert printed.err.splitlines() == [
+        "banksman: warning: adb shell: emulator-5556 is not a device of your leases, and a strict"
+        " adb guard would refuse this call. Get a device through banksman: run banksman"
+        " agent-guide and follow it"
+    ]
+
+
 @pytest.mark.parametrize(
     "configuration", [None, "[holder]\nagents = []\n", "[guard]\nstrict = 'yes'\n"]
 )
@@ -666,6 +732,188 @@ def test_the_launcher_starts_the_guard_without_the_command_line(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["banksman", "guard", "adb", "--", "devices"])
     assert launcher.main() == 0
     assert calls == [["adb", "--", "devices"]]
+
+
+# The log of refused and warned calls.
+
+CALLER = Holder("/work/tree-a", owner_pid=AGENT, agent="claude")
+
+
+@pytest.fixture
+def worktree(tmp_path, monkeypatch):
+    # The caller runs adb in a worktree of a session of its agent.
+    path = tmp_path / "tree-a"
+    (path / ".git").mkdir(parents=True)
+    monkeypatch.chdir(path)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "session-1")
+    return os.path.realpath(path)
+
+
+def logged(log_path):
+    events, skipped = History(log_path).read()
+    assert skipped == 0
+    return events
+
+
+def test_a_warned_call_is_in_the_log_with_the_caller(machine, system, warn, worktree, log_path):
+    assert guarded("-s", "emulator-5556", "shell", "ls") == 0
+    assert logged(log_path) == [
+        Event(
+            system.wall_clock(),
+            GUARD,
+            "emulator-5556",
+            owner=worktree,
+            owner_pid=AGENT,
+            agent="claude",
+            session="session-1",
+            reason=NOT_LEASED,
+            action=WARNED,
+            command="shell",
+            serial="emulator-5556",
+        )
+    ]
+
+
+@pytest.mark.parametrize("mode", [None, "true", '"warn"'])
+def test_a_refused_call_is_in_the_log_in_every_mode(
+    machine, store, system, config_path, worktree, log_path, mode
+):
+    if mode is not None:
+        write_config(config_path, f"[guard]\nstrict = {mode}\n")
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    assert guarded("-s", "emulator-5554", "install", "app.apk") == guard.EXIT_REFUSED
+    (event,) = logged(log_path)
+    assert (event.action, event.reason, event.command, event.serial) == (
+        REFUSED,
+        OTHER_HOLDER,
+        "install",
+        "emulator-5554",
+    )
+    assert (event.resource, event.kind, event.state) == ("e2e_phone", "emulator", "ready")
+    # The event names the caller, not the holder of the lease, whose purpose is untrusted text.
+    assert (event.owner, event.agent, event.lease_id, event.purpose) == (
+        worktree,
+        "claude",
+        None,
+        None,
+    )
+
+
+def test_a_strict_refusal_is_in_the_log(machine, system, strict, worktree, log_path):
+    assert guarded("-s", "emulator-5556", "shell") == guard.EXIT_REFUSED
+    (event,) = logged(log_path)
+    assert (event.action, event.reason, event.resource, event.kind) == (
+        REFUSED,
+        NOT_LEASED,
+        "emulator-5556",
+        None,
+    )
+
+
+def test_a_lost_lease_and_a_lease_file_that_cannot_be_read_have_their_reasons(
+    store, system, state_dir
+):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    edit_lease(state_dir, "e2e_phone", drain)
+    (state_dir / "R5CR1234ABC.json").write_text("{not json")
+    found = [verdict(system, "-s", serial, "shell") for serial in ("emulator-5554", "R5CR1234ABC")]
+    shown = [
+        (event.reason, event.resource, event.state, event.serial)
+        for each in found
+        for event in guard.events(each, CALLER, 1.0)
+    ]
+    assert shown == [
+        (LOST, "e2e_phone", "draining", "emulator-5554"),
+        (UNREADABLE, "R5CR1234ABC", None, "R5CR1234ABC"),
+    ]
+
+
+def test_a_command_for_every_device_has_an_event_for_each_device_of_another_holder(
+    store, system
+):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    lease(store, system, "e2e_tablet", other(), serial="emulator-5556")
+    lease(store, system, "e2e_mine", mine(), serial="emulator-5558")
+    found = guard.events(verdict(system, "kill-server"), CALLER, 1.0)
+    assert [(event.reason, event.resource, event.serial, event.command) for event in found] == [
+        (EVERY_DEVICE, "e2e_phone", "emulator-5554", "kill-server"),
+        (EVERY_DEVICE, "e2e_tablet", "emulator-5556", "kill-server"),
+    ]
+
+
+def test_the_log_never_has_the_arguments_of_adb(machine, store, system, worktree, log_path):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    arguments = ["shell", "am", "start", "--es", "token", "s3cr3t-value"]
+    assert guarded("-s", "emulator-5554", *arguments) == guard.EXIT_REFUSED
+    # A word in the place of the command that adb does not know can be a token too, also a
+    # quoted one with a command and a space in it.
+    for word in ("Bearer_s3cr3t", "s3cr3t-value", "shell s3cr3t-value"):
+        assert guarded("-s", "emulator-5554", word) == guard.EXIT_REFUSED
+    assert "s3cr3t" not in log_path.read_text()
+    assert "token" not in log_path.read_text()
+    assert [event.command for event in logged(log_path)] == ["shell", None, None, None]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["wait-for-usb-device", "install", "app.apk"],
+        ["forward", "--remove-all"],
+        ["reconnect", "offline"],
+        ["install-multiple", "a.apk", "b.apk"],
+    ],
+)
+def test_the_log_names_the_commands_that_adb_knows(arguments):
+    assert COMMAND.fullmatch(parse(arguments).command)
+
+
+def test_a_serial_that_is_not_a_valid_name_is_not_in_the_log(system, strict):
+    found = verdict(system, "-s", "\x1b]0;title\x07emulator-5556", "shell")
+    assert found.action == REFUSED
+    assert guard.events(found, CALLER, 1.0) == []
+
+
+def test_a_call_without_a_refusal_or_a_warning_takes_no_lock(
+    machine, store, system, warn, log_path, monkeypatch, capsys
+):
+    locks = []
+    monkeypatch.setattr(guard, "log_lock", lambda *arguments: locks.append(arguments))
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    assert guarded("-s", "emulator-5554", "shell") == 0
+    assert guarded("devices") == 0
+    system.parents[ME] = 1
+    assert guarded("-s", "emulator-5556", "shell") == 0
+    assert locks == []
+    assert capsys.readouterr().err == ""
+    assert not log_path.exists()
+
+
+@pytest.mark.parametrize(("mode", "status"), [('"warn"', 0), ("true", guard.EXIT_REFUSED)])
+def test_a_log_that_cannot_be_written_does_not_change_the_decision(
+    machine, config_path, tmp_path, monkeypatch, capsys, mode, status
+):
+    write_config(config_path, f"[guard]\nstrict = {mode}\n")
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("")
+    monkeypatch.setenv("BANKSMAN_LOG", str(blocker / "log.jsonl"))
+    assert guarded("-s", "emulator-5556", "shell", fallback="/opt/adb") == status
+    printed = capsys.readouterr()
+    assert printed.out == ("/opt/adb\n" if status == 0 else "")
+    assert printed.err.splitlines()[-1].startswith(
+        "banksman: adb guard: warning: this adb call is not in the log: "
+    )
+
+
+def test_the_guard_waits_only_shortly_for_the_lock(
+    machine, warn, state_dir, log_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(guard, "LOG_LOCK_WAIT", 0.05)
+    with log_lock(state_dir, 1):
+        start = time.monotonic()
+        assert guarded("-s", "emulator-5556", "shell", fallback="/opt/adb") == 0
+        assert time.monotonic() - start < 1
+    assert "this adb call is not in the log: another banksman process" in capsys.readouterr().err
+    assert not log_path.exists()
 
 
 # The wrapper: banksman admin adb-shim.

@@ -11,7 +11,17 @@ from helpers import drain, edit_lease, hook, table_rows, write_config
 
 from banksman import OUTPUT_SCHEMA, cli, console
 from banksman.cli import main
-from banksman.history import Event, Process
+from banksman.history import (
+    ACQUIRE,
+    GUARD,
+    NOT_LEASED,
+    OTHER_HOLDER,
+    REFUSED,
+    WARNED,
+    Event,
+    History,
+    Process,
+)
 from banksman.inventory import Decisions, Inventory, save_inventory
 from banksman.lease import Holder
 from banksman.store import Store
@@ -349,6 +359,130 @@ def test_a_log_that_cannot_be_written_does_not_fail_the_command(
     captured = capsys.readouterr()
     assert "LEASE=" in captured.out
     assert captured.err.startswith("banksman: warning: an event is not in the log:")
+
+
+def warned(at, command, serial="emulator-5556"):
+    return Event(
+        at,
+        GUARD,
+        serial,
+        owner="/work/tree-a",
+        owner_pid=101,
+        agent="claude",
+        reason=NOT_LEASED,
+        action=WARNED,
+        command=command,
+        serial=serial,
+    )
+
+
+@pytest.fixture
+def guard_events(log_path):
+    history = History(log_path)
+    for event in (
+        warned(1_790_000_000.0, "shell"),
+        warned(1_790_000_010.0, "install"),
+        Event(1_790_000_020.0, ACQUIRE, "qa_phone", kind="emulator", owner="/work/tree-b"),
+        warned(1_790_000_030.0, "shell"),
+        Event(
+            1_790_000_040.0,
+            GUARD,
+            "qa_phone",
+            kind="emulator",
+            state="ready",
+            owner="/work/tree-c",
+            owner_pid=202,
+            agent="codex",
+            reason=OTHER_HOLDER,
+            action=REFUSED,
+            command="reboot",
+            serial="emulator-5554",
+        ),
+    ):
+        history.append(event)
+
+
+def test_log_lists_the_calls_that_the_adb_guard_refused_or_warned_about(capsys, guard_events):
+    assert main(["log", "--event", "guard"]) == 0
+    rows = table_rows(capsys.readouterr().out)
+    assert [(row["EVENT"], row["RESOURCE"]) for row in rows] == [
+        ("guard", "emulator-5556"),
+        ("guard", "emulator-5556"),
+        ("guard", "emulator-5556"),
+        ("guard", "qa_phone"),
+    ]
+    assert rows[0]["DETAILS"] == (
+        "warned adb shell on emulator-5556: no lease of the caller has the device; a strict adb"
+        " guard refuses the call"
+    )
+    assert rows[3]["DETAILS"] == (
+        "refused adb reboot on emulator-5554: another holder leases the device, and the lease is"
+        " ready"
+    )
+    # The holder of a guard event is the caller.
+    assert [row["HOLDER"] for row in rows[2:]] == ["claude · tree-a", "codex · tree-c"]
+
+
+def test_log_counts_the_flows_that_bypass_banksman(capsys, guard_events):
+    assert main(["log", "--event", "guard", "--count"]) == 0
+    rows = table_rows(capsys.readouterr().out)
+    assert [(row["COUNT"], row["RESOURCE"], row["DETAILS"], row["HOLDER"]) for row in rows] == [
+        (
+            "3",
+            "emulator-5556",
+            "warned adb install, shell on emulator-5556: no lease of the caller has the device;"
+            " a strict adb guard refuses the call",
+            "claude · tree-a",
+        ),
+        (
+            "1",
+            "qa_phone",
+            "refused adb reboot on emulator-5554: another holder leases the device, and the lease"
+            " is ready",
+            "codex · tree-c",
+        ),
+    ]
+    assert main(["log", "--count", "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert "events" not in shown
+    counts = shown["counts"]
+    assert [(each["event"], each["count"], each["commands"]) for each in counts] == [
+        ("guard", 3, ["install", "shell"]),
+        ("acquire", 1, []),
+        ("guard", 1, ["reboot"]),
+    ]
+    assert counts[0]["first"].endswith("Z") and counts[0]["first"] < counts[0]["last"]
+    assert (counts[0]["action"], counts[0]["reason"], counts[0]["serial"]) == (
+        "warned",
+        "not_leased",
+        "emulator-5556",
+    )
+
+
+def test_the_count_of_events_that_were_added_out_of_order_keeps_their_times_in_order(
+    capsys, log_path
+):
+    # Two guard processes take their times before they wait for the lock, so the one with the
+    # later time can add its event first.
+    history = History(log_path)
+    history.append(warned(1_790_000_060.0, "shell"))
+    history.append(warned(1_790_000_000.0, "shell"))
+    assert main(["log", "--count", "--json"]) == 0
+    (count,) = json.loads(capsys.readouterr().out)["counts"]
+    assert (count["first"], count["last"]) == (
+        console.utc(1_790_000_000.0),
+        console.utc(1_790_000_060.0),
+    )
+    assert main(["log", "--count"]) == 0
+    (row,) = table_rows(capsys.readouterr().out)
+    assert row["FIRST"] < row["LAST"]
+
+
+def test_log_filters_by_event(capsys, guard_events):
+    assert main(["log", "--event", "acquire", "--json"]) == 0
+    assert [event["event"] for event in json.loads(capsys.readouterr().out)["events"]] == [
+        "acquire"
+    ]
 
 
 def test_the_log_text_shows_why_a_lease_was_void(capsys):

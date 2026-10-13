@@ -67,8 +67,10 @@ banksman release --holding login-tests
 - 3: the lease is lost, or your agent process has no holding with that label. Stop using the
   device, and acquire one again.
 - When `adb` exits with status 3 and banksman says that the call is refused, another holder
-  leases the device, or your lease of it is lost. Do not run the command again: use a device of
-  your own holding.
+  leases the device, your lease of it is lost, or the device is not in your holding. Do not run
+  the command again: use a device of your own holding.
+- When banksman warns that a strict adb guard would refuse an `adb` call, the call ran on a
+  device that is not in your holding. Get a device as this guide says, and use only that one.
 
 ## Time limits
 

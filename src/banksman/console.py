@@ -10,11 +10,25 @@ import math
 import os
 import time
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 from banksman.discovery import ENDS, FactValue, handle_of, serial_of
-from banksman.history import ACQUIRE, FORCE_RELEASE, QUARANTINE, RELEASE, VOID, Event
+from banksman.history import (
+    ACQUIRE,
+    EVERY_DEVICE,
+    FORCE_RELEASE,
+    GUARD,
+    LOST,
+    NOT_LEASED,
+    OTHER_HOLDER,
+    QUARANTINE,
+    RELEASE,
+    UNREADABLE,
+    VOID,
+    WARNED,
+    Event,
+)
 from banksman.lease import DRAINING, FREE_TIMEOUT, VOID_REASONS, Lease, User, free_by
 from banksman.request import Search
 from banksman.sanitize import clean
@@ -363,7 +377,7 @@ LOG_HEADER = ("TIME", "EVENT", "RESOURCE", "KIND", "DETAILS", "HOLDER")
 def log_rows(events: Sequence[Event]) -> list[list[str]]:
     return [
         [
-            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(event.at)),
+            _local_time(event.at),
             event.event,
             event.resource,
             event.kind or NONE,
@@ -372,6 +386,73 @@ def log_rows(events: Sequence[Event]) -> list[list[str]]:
         ]
         for event in events
     ]
+
+
+COUNT_HEADER = ("COUNT", "FIRST", "LAST", "EVENT", "RESOURCE", "DETAILS", "HOLDER")
+
+
+def groups(events: Sequence[Event]) -> list[list[Event]]:
+    """Group the events by what happened and who caused it, in the order of their first event.
+
+    The events of a group have the same event, action, reason, resource, serial, worktree, and
+    agent. So the guard events of a flow that still uses devices without a lease are one group
+    for each device, however many adb calls the flow makes.
+    """
+    found: dict[tuple[object, ...], list[Event]] = {}
+    for event in events:
+        key = (
+            event.event,
+            event.action,
+            event.reason,
+            event.resource,
+            event.serial,
+            event.owner,
+            event.agent,
+        )
+        found.setdefault(key, []).append(event)
+    return list(found.values())
+
+
+def count_rows(grouped: Sequence[Sequence[Event]]) -> list[list[str]]:
+    rows = []
+    for group in grouped:
+        last = group[-1]
+        if last.event == GUARD:
+            details = _guard_details(last, _commands(group))
+        else:
+            details = void_text(last.reason) if last.reason else NONE
+        rows.append(
+            [
+                str(len(group)),
+                _local_time(min(event.at for event in group)),
+                _local_time(max(event.at for event in group)),
+                last.event,
+                last.resource,
+                details,
+                # The purpose can differ within a group.
+                NONE if last.owner is None else holder_label(replace(last, purpose=None)),
+            ]
+        )
+    return rows
+
+
+def count_json(group: Sequence[Event]) -> dict[str, object]:
+    last = group[-1]
+    return {
+        "count": len(group),
+        # Two guard processes can add their events in another order than the order of their
+        # times, so the first and the last are the earliest and the latest time.
+        "first": utc(min(event.at for event in group)),
+        "last": utc(max(event.at for event in group)),
+        "event": last.event,
+        "action": last.action,
+        "reason": last.reason,
+        "resource": last.resource,
+        "serial": last.serial,
+        "owner": last.owner,
+        "agent": last.agent,
+        "commands": _commands(group),
+    }
 
 
 def event_json(event: Event, *, verbose: bool) -> dict[str, object]:
@@ -384,7 +465,39 @@ def event_json(event: Event, *, verbose: bool) -> dict[str, object]:
     return shown
 
 
+_GUARD_REASONS = {
+    NOT_LEASED: "no lease of the caller has the device",
+    OTHER_HOLDER: "another holder leases the device",
+    LOST: "the lease of the caller is lost",
+    UNREADABLE: "the lease file of the device cannot be read",
+    EVERY_DEVICE: "the command acts on every device, also on this device of another holder",
+}
+
+
+def _local_time(wall: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(wall))
+
+
+def _guard_details(event: Event, commands: Sequence[str]) -> str:
+    # For example "refused adb shell on emulator-5554: another holder leases the device, and the
+    # lease is ready".
+    command = f"adb {', '.join(commands)}" if commands else "an adb command"
+    device = "" if event.serial is None else f" on {event.serial}"
+    why = _GUARD_REASONS.get(event.reason or "", "unknown")
+    if event.state is not None:
+        why += f", and the lease is {event.state}"
+    if event.action == WARNED:
+        why += "; a strict adb guard refuses the call"
+    return f"{event.action} {command}{device}: {why}"
+
+
+def _commands(group: Sequence[Event]) -> list[str]:
+    return sorted({event.command for event in group if event.command is not None})
+
+
 def _details(event: Event) -> str:
+    if event.event == GUARD:
+        return _guard_details(event, _commands([event]))
     if event.event == ACQUIRE:
         return f"with the accounts {','.join(event.accounts)}" if event.accounts else NONE
     if event.event == RELEASE:

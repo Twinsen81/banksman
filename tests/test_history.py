@@ -14,10 +14,13 @@ from banksman import OUTPUT_SCHEMA
 from banksman.history import (
     ACQUIRE,
     FORCE_RELEASE,
+    GUARD,
+    NOT_LEASED,
     QUARANTINE,
     REAP,
     RELEASE,
     VOID,
+    WARNED,
     Event,
     READABLE_SCHEMAS,
     History,
@@ -226,6 +229,12 @@ def test_the_log_starts_again_and_keeps_the_earlier_file(tmp_path):
         {"reason": []},
         {"state": {}},
         {"event": ["acquire"]},
+        {"action": "allowed"},
+        {"command": "shell; rm -rf /"},
+        {"command": "SHELL"},
+        {"command": "shell s3cr3t-value"},
+        {"command": "s3cr3t-value"},
+        {"serial": "\x1b[2Jemulator-5554"},
     ],
 )
 def test_a_line_that_is_not_a_valid_event_is_left_out(tmp_path, change):
@@ -238,6 +247,24 @@ def test_a_line_that_is_not_a_valid_event_is_left_out(tmp_path, change):
         file.write("not json\n")
     events, skipped = history.read()
     assert ([event.resource for event in events], skipped) == (["phone-1"], 2)
+
+
+def test_a_guard_event_has_a_reason_of_the_guard_and_no_other_event_has_one(tmp_path):
+    history = History(tmp_path / "log.jsonl")
+    warned = Event(
+        1_790_000_000.0,
+        GUARD,
+        "emulator-5556",
+        owner=OWNER,
+        reason=NOT_LEASED,
+        action=WARNED,
+        command="shell",
+        serial="emulator-5556",
+    )
+    history.append(warned)
+    history.append(Event(1_790_000_001.0, VOID, "phone-1", reason=NOT_LEASED))
+    history.append(Event(1_790_000_002.0, GUARD, "phone-1", reason="idle"))
+    assert history.read() == ([warned], 2)
 
 
 def test_the_lines_of_an_earlier_banksman_are_read(tmp_path):
