@@ -39,6 +39,7 @@ from banksman.store import (
     RELEASED,
     Busy,
     Choice,
+    LastUse,
     LockTimeout,
     Need,
     NotHeld,
@@ -48,6 +49,7 @@ from banksman.store import (
     StoreError,
     Unreadable,
     Unused,
+    default_ended_path,
     default_quarantine_dir,
     default_state_dir,
     peek,
@@ -1449,34 +1451,34 @@ def test_the_end_of_a_take_back_is_recorded_when_its_lease_is_deleted(state_dir,
         grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=discovered[0])
 
 
-def test_a_restart_forgets_the_ends_of_the_earlier_boot(state_dir, system):
+def test_a_restart_keeps_the_ends_of_the_earlier_boot_out_of_the_check(
+    state_dir, system, ended_path
+):
     store = Store(state_dir, system)
     since = ended_while_discovering(store, system)
     system.boot = "boot-2"
     granted = grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
     assert granted.lease.resource == "phone-1"
     store.release("phone-1", granted.lease.lease_id)
-    record = json.loads((state_dir / ".ended.json").read_text())
-    assert (record["schema"], record["boot_id"], list(record["ended"])) == (
-        1,
-        "boot-2",
-        ["phone-1"],
-    )
+    record = json.loads(ended_path.read_text())
+    assert record["schema"] == 2
+    assert record["resources"]["phone-1"]["boot_id"] == "boot-2"
 
 
 @pytest.mark.parametrize(
     "text",
     [
         "{",
-        json.dumps({"schema": 2, "boot_id": "boot-1", "ended": {"phone-1": 10_000}}),
-        json.dumps({"schema": 1, "boot_id": "boot-1", "ended": ["phone-1"]}),
+        json.dumps({"schema": 3, "resources": {}}),
+        json.dumps({"schema": 1, "boot_id": "boot-1", "ended": {"phone-1": 10_000}}),
+        json.dumps({"schema": 2, "resources": ["phone-1"]}),
     ],
 )
 def test_a_record_of_ends_that_cannot_be_read_counts_as_empty_and_is_replaced(
-    store, system, state_dir, text
+    store, system, ended_path, text
 ):
     since = ended_while_discovering(store, system)
-    (state_dir / ".ended.json").write_text(text)
+    ended_path.write_text(text)
     granted = grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
     assert granted.lease.resource == "phone-1"
     store.release("phone-1", granted.lease.lease_id)
@@ -1485,28 +1487,207 @@ def test_a_record_of_ends_that_cannot_be_read_counts_as_empty_and_is_replaced(
 
 
 def test_a_record_of_ends_that_others_can_write_to_is_not_used_and_is_replaced(
-    store, system, state_dir
+    store, system, ended_path
 ):
     since = ended_while_discovering(store, system)
-    (state_dir / ".ended.json").chmod(0o666)
+    ended_path.chmod(0o666)
     granted = grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
     store.release("phone-1", granted.lease.lease_id)
-    assert stat.S_IMODE((state_dir / ".ended.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE(ended_path.stat().st_mode) == 0o600
     with pytest.raises(Outdated):
         grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
 
 
-def test_an_entry_that_is_not_valid_is_dropped(store, system, state_dir):
+def test_an_entry_that_is_not_valid_is_dropped(store, system, ended_path):
     since = ended_while_discovering(store, system)
-    ended = {"phone-1": float(system.clock()), "../x": 1e9, "phone-2": True, "phone-3": "now"}
-    (state_dir / ".ended.json").write_text(
-        json.dumps({"schema": 1, "boot_id": "boot-1", "ended": ended})
+    record = json.loads(ended_path.read_text())
+    entry = record["resources"]["phone-1"]
+    record["resources"].update(
+        {
+            "../x": entry,
+            "phone-2": {**entry, "at": True},
+            "phone-3": {**entry, "last_use": {**entry["last_use"], "how": "lost"}},
+            "phone-4": {**entry, "last_use": {**entry["last_use"], "owner": "a\x1bb"}},
+            "phone-5": {**entry, "last_use": {**entry["last_use"], "reason": ["idle"]}},
+        }
     )
+    ended_path.write_text(json.dumps(record))
     with pytest.raises(Outdated):
         grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
     store.release("phone-9", store.acquire("phone-9", "device", Holder(OTHER)).lease_id)
-    record = json.loads((state_dir / ".ended.json").read_text())
-    assert sorted(record["ended"]) == ["phone-1", "phone-9"]
+    record = json.loads(ended_path.read_text())
+    assert sorted(record["resources"]) == ["phone-1", "phone-9"]
+
+
+def test_a_record_of_ends_that_cannot_be_written_does_not_stop_the_release(
+    state_dir, system, ended_path
+):
+    warnings = []
+    store = Store(state_dir, system, warn=warnings.append)
+    lease = store.acquire("phone-1", "device", Holder(OWNER))
+    store.release("phone-1", lease.lease_id)
+    lease = store.acquire("phone-1", "device", Holder(OTHER))
+    ended_path.parent.chmod(0o777)
+    assert store.release("phone-1", lease.lease_id) is None
+    assert resources(store) == []
+    assert warnings == [
+        f"the end of the lease on phone-1 is not recorded: group or others can write to"
+        f" {ended_path.parent}"
+    ]
+    # The record of the release by OWNER is gone too, so OWNER does not count as the last holder.
+    assert not ended_path.exists()
+    assert grant_one(store, [Choice("phone-1", "device")], Holder(OWNER)).previous is None
+
+
+def test_the_record_of_ends_is_kept_outside_the_state_directory(monkeypatch, tmp_path):
+    monkeypatch.delenv("BANKSMAN_ENDED")
+    assert default_ended_path() == tmp_path / "state-ended.json"
+    monkeypatch.delenv("BANKSMAN_STATE_DIR")
+    home = pwd.getpwuid(os.geteuid()).pw_dir
+    assert default_ended_path() == Path(home) / ".local" / "state" / "banksman" / "ended.json"
+
+
+# The last lease of each resource that a holder could use.
+
+
+def last_use(store, resource="phone-1"):
+    end = store.ends().get(resource)
+    return None if end is None else end.last_use
+
+
+def test_a_release_records_who_used_the_resource_last(store, system):
+    holder = Holder(OWNER, owner_pid=os.getpid(), issue="#12")
+    lease = grant_one(store, [Choice("phone-1", "device")], holder, label="login").lease
+    store.release("phone-1", lease.lease_id)
+    assert last_use(store) == LastUse(
+        OWNER, "boot-1", system.wall, "release", label="login", issue="#12"
+    )
+    assert last_use(store).left_as_is(OWNER, "boot-1", None)
+    assert not last_use(store).left_as_is(OTHER, "boot-1", None)
+    assert not last_use(store).left_as_is(OWNER, "boot-2", None)
+    assert not last_use(store).left_as_is(OWNER, "boot-1", "reservation-2")
+
+
+def test_a_release_while_scripts_run_is_a_release(state_dir, system):
+    store = Store(state_dir, system)
+    lease = store.acquire("phone-1", "device", Holder(OWNER))
+    system.spawn(4242)
+    store.enter("phone-1", lease.lease_id, 4242)
+    assert store.release("phone-1", lease.lease_id).state == DRAINING
+    system.end(4242)
+    assert reaped(store) == [("phone-1", RELEASE, RELEASED)]
+    assert last_use(store).how == "release"
+    assert last_use(store).left_as_is(OWNER, "boot-1", None)
+
+
+@pytest.mark.parametrize("on_void", [False, True])
+def test_a_void_lease_records_its_reason_and_whether_a_hook_ran(state_dir, system, on_void):
+    store = Store(state_dir, system, hooked=lambda lease: on_void)
+    store.acquire("phone-1", "device", Holder(OWNER))
+    system.advance(20 * 60)
+    assert reaped(store) == [("phone-1", IDLE, RELEASED)]
+    assert (last_use(store).how, last_use(store).reason, last_use(store).hook) == (
+        "void",
+        IDLE,
+        on_void,
+    )
+    assert not last_use(store).left_as_is(OWNER, "boot-1", None)
+
+
+def test_a_forced_release_records_the_holder_and_an_unreadable_file_records_nobody(
+    store, state_dir
+):
+    store.acquire("phone-1", "device", Holder(OWNER))
+    store.force_release("phone-1")
+    assert (last_use(store).owner, last_use(store).how) == (OWNER, "force_release")
+    (state_dir / "phone-1.json").write_text("not json")
+    store.force_release("phone-1")
+    assert "phone-1" in store.ends()
+    assert last_use(store) is None
+
+
+def test_the_record_survives_a_restart(store, system):
+    lease = store.acquire("phone-1", "device", Holder(OWNER))
+    store.release("phone-1", lease.lease_id)
+    system.boot = "boot-2"
+    assert last_use(store).owner == OWNER
+    assert not last_use(store).left_as_is(OWNER, "boot-2", None)
+
+
+def test_a_lease_that_another_worktree_used_in_between_replaces_the_record(store):
+    for owner in (OWNER, OTHER):
+        lease = store.acquire("phone-1", "device", Holder(owner))
+        store.release("phone-1", lease.lease_id)
+    assert last_use(store).owner == OTHER
+    assert not last_use(store).left_as_is(OWNER, "boot-1", None)
+
+
+@pytest.mark.parametrize("on_void", [False, True])
+def test_the_reapers_end_of_a_free_instance_keeps_the_holder_before_it(
+    state_dir, system, on_void
+):
+    store = Store(state_dir, system, hooked=lambda lease: on_void)
+    lease = store.acquire("qa_phone", "emulator", Holder(OWNER))
+    store.release("qa_phone", lease.lease_id)
+    store = Store(state_dir, system, hooked=lambda lease: on_void, unused=ending("qa_phone"))
+    assert reaped(store) == [("qa_phone", FREE_TIMEOUT, RELEASED)]
+    use = last_use(store, "qa_phone")
+    assert (use.owner, use.how, use.hook) == (OWNER, "release", on_void)
+    assert use.left_as_is(OWNER, "boot-1", None) is not on_void
+
+
+def test_after_a_restart_the_reapers_quarantined_lease_keeps_the_holder_before_it(
+    state_dir, system
+):
+    store = Store(state_dir, system)
+    lease = store.acquire("qa_phone", "emulator", Holder(OWNER))
+    store.release("qa_phone", lease.lease_id)
+    failing = Store(state_dir, system, take_back=lambda lease: False, unused=ending("qa_phone"))
+    assert reaped(failing) == [("qa_phone", FREE_TIMEOUT, QUARANTINED)]
+    # The take-back after the restart gives the reaper's lease the reason rebooted.
+    system.boot = "boot-2"
+    assert reaped(store) == [("qa_phone", REBOOTED, RELEASED)]
+    use = last_use(store, "qa_phone")
+    assert (use.owner, use.how, use.boot_id) == (OWNER, "release", "boot-1")
+
+
+def test_a_lease_that_was_never_ready_keeps_the_holder_before_it(store, system):
+    lease = store.acquire("emu-1", "emulator", Holder(OTHER))
+    store.release("emu-1", lease.lease_id)
+    # A start of the instance for another worktree fails, and its lease is given back.
+    booting = store.reserve("emu-1", "emulator", Holder(OWNER))
+    store.release("emu-1", booting.lease_id)
+    assert last_use(store, "emu-1").owner == OTHER
+    # A start that stops in the middle is taken back as a void lease.
+    booting = store.reserve("emu-1", "emulator", Holder(OWNER))
+    system.advance(6 * 60)
+    assert reaped(store) == [("emu-1", BOOT_TIMEOUT, RELEASED)]
+    assert (last_use(store, "emu-1").owner, last_use(store, "emu-1").how) == (OTHER, "release")
+    assert store.ends()["emu-1"].at == system.clock()
+
+
+def test_a_forced_release_of_a_lease_that_was_never_ready_counts_against_the_holder_before_it(
+    store,
+):
+    lease = store.acquire("emu-1", "emulator", Holder(OWNER))
+    store.release("emu-1", lease.lease_id)
+    store.reserve("emu-1", "emulator", Holder(OTHER))
+    store.force_release("emu-1")
+    assert (last_use(store, "emu-1").owner, last_use(store, "emu-1").how) == (
+        OWNER,
+        "force_release",
+    )
+
+
+def test_a_grant_comes_with_the_last_use_of_its_resource(store):
+    lease = store.acquire("phone-1", "device", Holder(OWNER))
+    store.release("phone-1", lease.lease_id)
+    granted = grant_one(store, [Choice("phone-1", "device")], Holder(OTHER))
+    assert granted.previous.owner == OWNER
+    choices = [Choice("phone-1", "device")]
+    kept = grant_one(store, choices, Holder(OTHER), keep=granted.lease.lease_id)
+    assert (kept.kept, kept.previous) == (True, None)
+    assert grant_one(store, [Choice("phone-2", "device")], Holder(OWNER)).previous is None
 
 
 # Free instances that the reaper ends.
@@ -1639,13 +1820,11 @@ def test_a_quarantine_is_also_kept_outside_the_state_directory(state_dir, quaran
     assert stat.S_IMODE(record.stat().st_mode) == 0o600
 
 
-def test_without_a_quarantine_nothing_is_written_outside_the_state_directory(
-    store, system, tmp_path
-):
+def test_without_a_quarantine_no_quarantine_directory_is_made(store, system, quarantine_dir):
     store.acquire("phone-1", "device", Holder(OWNER))
     system.advance(20 * 60)
     store.reap()
-    assert not (tmp_path / "home").exists()
+    assert not quarantine_dir.exists()
 
 
 def test_a_quarantine_that_a_cleaner_of_temporary_files_deleted_comes_back(state_dir, system):

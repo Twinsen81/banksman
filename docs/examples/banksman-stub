@@ -18,14 +18,17 @@ case $1 in
         fi
         lease=stub-lease
         kept=false
+        previous=${BANKSMAN_STUB_PREVIOUS:-other}
         while [ "$#" -gt 0 ]; do
             if [ "$1" = --lease ]; then
                 lease=$2
                 kept=true
+                previous=self
             fi
             shift
         done
         printf 'RESOURCE=stub-0\nKIND=stub\nLEASE=%s\nSTATE=ready\nKEPT=%s\n' "$lease" "$kept"
+        printf 'PREVIOUS=%s\n' "$previous"
         printf 'SERIAL=stub-serial\n'
         ;;
     run)

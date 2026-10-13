@@ -21,7 +21,14 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
 - Run the same command again to keep the same device, for example after you lost the output:
   banksman then prints `KEPT=true`. You do not need to remember the lease id.
 - banksman prints `KEY=value` lines: `RESOURCE` (the device), `SERIAL` (its serial, when it
-  runs), and `LEASE` (the lease id).
+  runs), `LEASE` (the lease id), and `PREVIOUS`.
+- `PREVIOUS=self` says that your worktree used the device last, gave it back with a release,
+  and banksman knows of nothing that changed it since. What you installed or signed in can
+  still be there: check it quickly, and skip only the setup that is still done. `self` is not a
+  proof, because a person can have used the device. `PREVIOUS=other` says that another holder,
+  a restart, or a take-back came between: set the device up again.
+- banksman gives your worktree the free device that it used last first. To get a specific
+  device, ask for it with `--where`, for example `avd=<name>`.
 - Ask for properties with `--where`, such as `form=tablet`, `'api>=33'`, or `avd=<name>`.
   `banksman status` shows the devices that exist, and who holds them.
 - Add `--start` to get a device that runs: banksman then starts a granted emulator that does
@@ -56,7 +63,9 @@ banksman release --holding login-tests
 ```
 
 - Release the holding when you are done, and before you stop to wait for a person. A device that
-  waits for a person blocks every other agent.
+  waits for a person blocks every other agent. A release does not undo what you set up on the
+  device: after the wait, `acquire` gives you the same device first when it is free, with
+  `PREVIOUS=self` when nobody used it in between.
 - Do not use `banksman release --all`: it gives back the holdings of every subagent of your
   session.
 

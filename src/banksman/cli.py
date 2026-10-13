@@ -87,6 +87,7 @@ from banksman.store import (
     Choice,
     FindUnused,
     Granted,
+    Hooked,
     Need,
     NotHeld,
     Outdated,
@@ -96,6 +97,7 @@ from banksman.store import (
     Store,
     TakeBack,
     Unused,
+    Warn,
     default_log_path,
     default_state_dir,
     satisfiable,
@@ -110,6 +112,10 @@ EXIT_LOST = 3
 # Every resource that matches is in use, also after the wait. A caller can treat this as a busy
 # machine, not as a failure of its own work.
 EXIT_BUSY = 4
+# The values of PREVIOUS: the instance is as the caller's worktree left it, as far as banksman
+# knows, or it is not.
+SELF = "self"
+OTHER = "other"
 # How often a waiting acquire looks again. Each look runs discovery, for example adb.
 POLL_SECONDS = 5.0
 # How often watch shows the table again by default. Each refresh also runs discovery.
@@ -667,6 +673,8 @@ def _open_store(config: Config) -> Store:
         stopping=_stopping(config),
         record=_recorder(),
         unused=_unused(config, machine),
+        hooked=_hooked(config),
+        warn=_warn_once(),
     )
 
 
@@ -689,6 +697,27 @@ def _recorder() -> Record:
                 warned = True
 
     return record
+
+
+def _warn_once() -> Warn:
+    warned = False
+
+    def warn(text: str) -> None:
+        nonlocal warned
+        if not warned:
+            _warn(f"warning: {text}")
+            warned = True
+
+    return warn
+
+
+def _hooked(config: Config) -> Hooked:
+    # Read from the current configuration, as the take-back itself.
+    def hooked(lease: Lease) -> bool:
+        kind = config.kinds.get(lease.kind)
+        return kind is not None and kind.on_void is not None
+
+    return hooked
 
 
 def _take_back(config: Config) -> TakeBack:
@@ -1277,6 +1306,9 @@ class _Grant:
     config: Config
     granted: list[Granted]
     leases: list[Lease]
+    # For each part, whether the instance is as the caller's worktree left it, as far as
+    # banksman knows.
+    previous: list[bool]
 
 
 def _acquire(
@@ -1315,8 +1347,13 @@ def _acquire(
         # operator removes stops at once, also for a caller that waits.
         config = load_config()
         store, _ = _reaped_store(config)
+        mine = {
+            resource
+            for resource, end in store.ends().items()
+            if end.last_use is not None and end.last_use.owner == holder.owner
+        }
         looked = machine.clock()
-        found = search(config, load_inventory(), parts, clock=machine.clock)
+        found = search(config, load_inventory(), parts, clock=machine.clock, preferred=mine)
         needs = [
             Need(
                 tuple(_choice(candidate, config, start) for candidate in candidates),
@@ -1445,7 +1482,35 @@ def _acquire(
             else lease
             for lease in leases
         ]
-    return _Grant(store, config, granted, leases)
+    boot_id = store.system.boot_id()
+    unmanaged = {each.resource for every in found.candidates for each in every if each.unmanaged}
+    previous = [
+        _left_as_is(grant, lease, holder.owner, config.kinds[lease.kind], boot_id, unmanaged)
+        for grant, lease in zip(granted, leases)
+    ]
+    return _Grant(store, config, granted, leases, previous)
+
+
+def _left_as_is(
+    grant: Granted,
+    lease: Lease,
+    owner: str,
+    kind: Kind,
+    boot_id: str,
+    unmanaged: Collection[str],
+) -> bool:
+    """Whether the caller's worktree used the instance last and gave it back with a plain release
+    on this boot, and banksman knows of nothing that changed it since.
+
+    It is a hint, not a proof: a person or a program outside banksman can have used the instance.
+    """
+    if grant.kept:
+        return True
+    # The reset hook changes the instance for every new lease, and a person or a program outside
+    # banksman can use an unmanaged instance.
+    if kind.on_acquire is not None or lease.resource in unmanaged:
+        return False
+    return grant.previous is not None and grant.previous.left_as_is(owner, boot_id, lease.handle)
 
 
 def _reconnect_kept(
@@ -1759,6 +1824,7 @@ def _print_grant(parts: Sequence[Part], grant: _Grant, as_json: bool) -> None:
     granted, leases = grant.granted, grant.leases
     serials = [lease.serial for lease in leases]
     paid = [_is_paid(grant.config, lease.kind) for lease in leases]
+    previous = [SELF if each else OTHER for each in grant.previous]
     if as_json:
         _print_json(
             {
@@ -1775,9 +1841,10 @@ def _print_grant(parts: Sequence[Part], grant: _Grant, as_json: bool) -> None:
                         "paid": each_paid,
                         "accounts": list(each.accounts),
                         "kept": each.kept,
+                        "previous": each_previous,
                     }
-                    for part, each, lease, serial, each_paid in zip(
-                        parts, granted, leases, serials, paid
+                    for part, each, lease, serial, each_paid, each_previous in zip(
+                        parts, granted, leases, serials, paid, previous
                     )
                 ],
             }
@@ -1790,13 +1857,16 @@ def _print_grant(parts: Sequence[Part], grant: _Grant, as_json: bool) -> None:
             ("LEASE", leases[0].lease_id),
             ("STATE", leases[0].state),
             ("KEPT", _flag(granted[0].kept)),
+            ("PREVIOUS", previous[0]),
         ]
         lines += [("SERIAL", serials[0])] if serials[0] is not None else []
         lines += [("HANDLE", leases[0].handle)] if leases[0].handle is not None else []
         lines += [("ACCOUNTS", ",".join(granted[0].accounts))] if parts[0].accounts else []
     else:
         lines = []
-        for part, each, lease, serial in zip(parts, granted, leases, serials):
+        for part, each, lease, serial, each_previous in zip(
+            parts, granted, leases, serials, previous
+        ):
             prefix = f"{part.name.upper()}_"  # type: ignore[union-attr]
             lines += [
                 (f"{prefix}RESOURCE", lease.resource),
@@ -1804,6 +1874,7 @@ def _print_grant(parts: Sequence[Part], grant: _Grant, as_json: bool) -> None:
                 (f"{prefix}LEASE", lease.lease_id),
                 (f"{prefix}STATE", lease.state),
                 (f"{prefix}KEPT", _flag(each.kept)),
+                (f"{prefix}PREVIOUS", each_previous),
             ]
             lines += [(f"{prefix}SERIAL", serial)] if serial is not None else []
             lines += [(f"{prefix}HANDLE", lease.handle)] if lease.handle is not None else []

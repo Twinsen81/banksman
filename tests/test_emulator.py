@@ -16,6 +16,7 @@ from helpers import (
     edit_lease,
     reap_in_child,
     table_rows,
+    work_in,
     write_config,
 )
 
@@ -891,6 +892,57 @@ def test_a_free_timeout_that_is_off_keeps_free_emulators(capsys, config_path, sd
     free_for(state_dir, "qa_phone", 24 * 60 * 60)
     assert main(["reap"]) == 0
     assert runs(known()["qa_phone"].pid)
+
+
+# The AVD that the worktree used last.
+
+
+@pytest.mark.parametrize("on_void", [False, True])
+def test_after_the_free_timeout_a_worktree_starts_its_own_avd_before_one_that_runs(
+    capsys, config_path, sdk, state_dir, tmp_path, monkeypatch, on_void
+):
+    keys = 'free_timeout = "30m"\n'
+    if on_void:
+        keys += f"on_void = {json.dumps([sys.executable, '-c', 'pass'])}\n"
+    configure(config_path, sdk, keys)
+    work_in(monkeypatch, tmp_path / "tree-a")
+    status, mine, err = acquire(capsys, "--where", "avd=qa_tablet", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", mine["LEASE"]]) == 0
+    work_in(monkeypatch, tmp_path / "tree-b")
+    status, other, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", other["LEASE"]]) == 0
+    free_for(state_dir, "qa_tablet", 30 * 60)
+    assert main(["reap"]) == 0
+    assert list(known()) == ["qa_phone"]
+    capsys.readouterr()
+    # The reaper ended the emulator of qa_tablet, but its disk keeps what tree-a set up. A hook
+    # can have changed it.
+    work_in(monkeypatch, tmp_path / "tree-a")
+    status, again, err = acquire(capsys, "--where", "kind=emulator", "--start")
+    assert status == 0, err
+    assert (again["RESOURCE"], again["PREVIOUS"]) == ("qa_tablet", "other" if on_void else "self")
+    assert len(sdk.emulator_calls()) == 3
+
+
+def test_an_unmanaged_instance_never_counts_as_the_worktrees_own(capsys, config_path, sdk):
+    configure(config_path, sdk, 'unmanaged = "grant"\n')
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone")
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    # A person starts qa_phone, and a holder started qa_tablet under a lease that has ended.
+    sdk.running({"emulator-5554": "qa_phone"})
+    sdk.start_emulator("qa_tablet", 5556)
+    wait_for(lambda: listed(sdk, "emulator-5556"))
+    emulator.adopt(kind(), "qa_tablet")
+    _, first, _ = acquire(capsys, "--where", "kind=emulator")
+    _, second, _ = acquire(capsys, "--where", "kind=emulator")
+    assert (first["RESOURCE"], second["RESOURCE"], second["PREVIOUS"]) == (
+        "qa_tablet",
+        "qa_phone",
+        "other",
+    )
 
 
 def _android(sdk):

@@ -86,6 +86,12 @@ def test_a_kind_can_list_its_instances_by_name(config_path, store):
     assert (lease.resource, lease.kind) == ("9102", "port")
 
 
+def test_affinity_is_on_unless_a_kind_turns_it_off(config_path):
+    write_config(config_path, "[kinds.emulator]\naffinity = false\n[kinds.device]\n")
+    kinds = load_config().kinds
+    assert (kinds["emulator"].affinity, kinds["device"].affinity) == (False, True)
+
+
 def test_stopping_is_off_unless_a_kind_turns_it_on(config_path):
     write_config(config_path, "[kinds.emulator]\nstop = true\n[kinds.device]\n")
     kinds = load_config().kinds
@@ -325,6 +331,7 @@ def test_text_that_is_not_a_duration_is_refused(text):
         ("[kinds.emulator]\nrank = true", "kinds.emulator.rank"),
         ("[kinds.emulator]\nstop = 'yes'", "kinds.emulator.stop"),
         ("[kinds.emulator]\nstop = 1", "kinds.emulator.stop"),
+        ("[kinds.emulator]\naffinity = 'no'", "kinds.emulator.affinity"),
         ("[defaults]\nstop = true", "defaults.stop"),
         ("[defaults]\ndrain_timeout = '0s'", "defaults.drain_timeout"),
         ("[kinds.emulator]\ndrain_timeout = 'off'", "kinds.emulator.drain_timeout"),

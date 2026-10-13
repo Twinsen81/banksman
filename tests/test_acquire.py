@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 import pytest
-from helpers import age_lease, hook, table_rows, write_config
+from helpers import age_lease, hook, table_rows, work_in, write_config
 
 from banksman import cli
 from banksman.cli import main
@@ -79,6 +79,7 @@ def test_acquire_prints_the_lease_as_key_value_lines(capsys, config_path):
         "LEASE": lease.lease_id,
         "STATE": "ready",
         "KEPT": "false",
+        "PREVIOUS": "other",
         "SERIAL": "emulator-5554",
     }
     assert (lease.purpose, lease.owner_pid) == ("verify the layout", None)
@@ -103,6 +104,7 @@ def test_acquire_prints_json(capsys, config_path):
                 "paid": False,
                 "accounts": [],
                 "kept": False,
+                "previous": "other",
             }
         ],
     }
@@ -554,6 +556,7 @@ def test_an_account_is_leased_with_its_device(capsys, config_path):
         "LEASE": leases()["R5CR0001"].lease_id,
         "STATE": "ready",
         "KEPT": "false",
+        "PREVIOUS": "other",
         "SERIAL": "R5CR0001",
         "ACCOUNTS": "qa@example.test",
     }
@@ -620,17 +623,20 @@ def test_a_joint_acquire_prints_each_part_under_its_name(capsys, config_path):
         "PHONE_LEASE": held["qa_phone"].lease_id,
         "PHONE_STATE": "ready",
         "PHONE_KEPT": "false",
+        "PHONE_PREVIOUS": "other",
         "PHONE_SERIAL": "emulator-5554",
         "TABLET_RESOURCE": "qa_tablet",
         "TABLET_KIND": "emulator",
         "TABLET_LEASE": held["qa_tablet"].lease_id,
         "TABLET_STATE": "ready",
         "TABLET_KEPT": "false",
+        "TABLET_PREVIOUS": "other",
         "BUILD_RESOURCE": "build-0",
         "BUILD_KIND": "build",
         "BUILD_LEASE": held["build-0"].lease_id,
         "BUILD_STATE": "ready",
         "BUILD_KEPT": "false",
+        "BUILD_PREVIOUS": "other",
     }
     # Each lease has its own token for its scripts, and the three form one holding.
     assert len({lease.lease_id for lease in held.values()}) == 3
@@ -773,3 +779,121 @@ def test_test_accounts_of_a_server_can_be_a_kind_that_is_leased_with_a_device(
     )
     status, _, _ = acquire(capsys, *request)
     assert status == cli.EXIT_BUSY
+
+
+# The instance that the worktree used last.
+
+
+@pytest.fixture
+def tree_a(tmp_path, monkeypatch):
+    work_in(monkeypatch, tmp_path / "tree-a")
+
+
+def used(capsys, *arguments):
+    """Acquire a resource, give it back, and return the values of the grant."""
+    status, values, err = acquire(capsys, *arguments)
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    capsys.readouterr()
+    return values
+
+
+def test_a_worktree_gets_back_the_instance_that_it_used_last_also_when_it_does_not_run(
+    capsys, config_path, tree_a
+):
+    configure(config_path)
+    used(capsys, "--where", "form=tablet")
+    # qa_phone runs and qa_tablet does not, but qa_tablet can still have what the worktree set up.
+    status, values, _ = acquire(capsys, "--where", "api>=33")
+    assert (status, values["RESOURCE"], values["PREVIOUS"]) == (0, "qa_tablet", "self")
+
+
+def test_another_worktree_does_not_get_the_preference(
+    capsys, config_path, tree_a, tmp_path, monkeypatch
+):
+    configure(config_path)
+    used(capsys, "--where", "form=tablet")
+    work_in(monkeypatch, tmp_path / "tree-b")
+    _, values, _ = acquire(capsys, "--where", "api>=33")
+    assert (values["RESOURCE"], values["PREVIOUS"]) == ("qa_phone", "other")
+
+
+def test_a_lease_of_another_worktree_in_between_makes_the_instance_other(
+    capsys, config_path, tree_a, tmp_path, monkeypatch
+):
+    configure(config_path)
+    used(capsys, "--where", "form=tablet")
+    work_in(monkeypatch, tmp_path / "tree-b")
+    used(capsys, "--where", "form=tablet")
+    work_in(monkeypatch, tmp_path / "tree-a")
+    # qa_tablet is the instance that tree-b used last now.
+    _, values, _ = acquire(capsys, "--where", "api>=33")
+    assert (values["RESOURCE"], values["PREVIOUS"]) == ("qa_phone", "other")
+    _, values, _ = acquire(capsys, "--where", "form=tablet")
+    assert (values["RESOURCE"], values["PREVIOUS"]) == ("qa_tablet", "other")
+
+
+def test_after_a_restart_the_instance_comes_first_but_is_other(
+    capsys, config_path, tree_a, monkeypatch
+):
+    configure(config_path)
+    used(capsys, "--where", "form=tablet")
+    monkeypatch.setattr(Machine, "boot_id", lambda self: "a-later-boot")
+    _, values, _ = acquire(capsys, "--where", "api>=33")
+    assert (values["RESOURCE"], values["PREVIOUS"]) == ("qa_tablet", "other")
+
+
+@pytest.mark.parametrize("on_void", [False, True])
+def test_after_a_void_lease_the_instance_comes_first_but_is_other(
+    capsys, config_path, tree_a, state_dir, tmp_path, on_void
+):
+    record = tmp_path / "taken-back"
+    extra = f"on_void = {json.dumps(hook(RECORD, str(record)))}\n" if on_void else ""
+    configure(config_path, extra=extra)
+    status, _, _ = acquire(capsys, "--where", "form=tablet")
+    assert status == 0
+    age_lease(state_dir, "qa_tablet", 21 * 60)
+    assert main(["reap"]) == 0
+    capsys.readouterr()
+    assert record.exists() is on_void
+    _, values, _ = acquire(capsys, "--where", "api>=33")
+    assert (values["RESOURCE"], values["PREVIOUS"]) == ("qa_tablet", "other")
+
+
+def test_a_kind_without_affinity_keeps_the_order_of_choice(capsys, config_path, tree_a):
+    configure(config_path, extra="affinity = false\n")
+    used(capsys, "--where", "form=tablet")
+    _, values, _ = acquire(capsys, "--where", "api>=33")
+    assert (values["RESOURCE"], values["PREVIOUS"]) == ("qa_phone", "other")
+    # The hint does not depend on the order.
+    _, values, _ = acquire(capsys, "--where", "api>=33")
+    assert (values["RESOURCE"], values["PREVIOUS"]) == ("qa_tablet", "self")
+
+
+def test_a_reset_hook_makes_the_instance_other(capsys, config_path, tree_a):
+    configure(config_path, extra=f"on_acquire = {json.dumps(hook('pass'))}\n")
+    used(capsys, "--where", "form=tablet")
+    _, values, _ = acquire(capsys, "--where", "api>=33")
+    assert (values["RESOURCE"], values["PREVIOUS"]) == ("qa_tablet", "other")
+
+
+def test_a_kept_lease_is_as_the_worktree_left_it(capsys, config_path, tree_a):
+    configure(config_path)
+    _, first, _ = acquire(capsys, "--where", "kind=build")
+    _, kept, _ = acquire(capsys, "--where", "kind=build", "--lease", first["LEASE"])
+    assert (kept["KEPT"], kept["PREVIOUS"]) == ("true", "self")
+
+
+def test_each_part_of_a_joint_acquire_says_whether_it_is_as_the_worktree_left_it(
+    capsys, config_path, tree_a
+):
+    configure(config_path)
+    used(capsys, "--where", "kind=build")
+    arguments = ["--as", "build", "--where", "kind=build", "--as", "phone", "--where", "form=phone"]
+    _, values, _ = acquire(capsys, *arguments)
+    assert (values["BUILD_PREVIOUS"], values["PHONE_PREVIOUS"]) == ("self", "other")
+    assert main(["release", "--lease", values["BUILD_LEASE"]]) == 0
+    capsys.readouterr()
+    assert main(["acquire", *arguments, "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert [part["previous"] for part in shown["parts"]] == ["self", "self"]

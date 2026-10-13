@@ -11,7 +11,7 @@ from __future__ import annotations
 import fnmatch
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from banksman import android, remote
@@ -137,9 +137,13 @@ def search(
     *,
     discover: Discover = discover_now,
     clock: Callable[[], float] = time.monotonic,
+    preferred: Collection[str] = frozenset(),
 ) -> Search:
     """Find, for each part, the permitted resources that are present now and match every clause
     of the part.
+
+    `preferred` are the resources that the worktree of the caller used last. Each comes first
+    among the resources of its rank, for a kind with affinity.
 
     Discovery runs once for each kind that the `kind` clauses of a part allow. An attribute that
     is neither known nor a fact that discovery found now for the kinds of its part is an error,
@@ -229,11 +233,19 @@ def search(
         # a request that does not name a kind gets, for example, an emulator before a physical
         # device. Then an instance that runs before one that must be started, which saves the
         # time and the memory of a start, and one that banksman started before one that it did
-        # not, which a person or another program can still use.
+        # not, which a person or another program can still use. Before both, the instance that
+        # the caller's worktree used last: it can still have what the worktree installed or
+        # signed in, and to set that up again costs more than a start. An unmanaged instance is
+        # never the caller's, because a person can use it.
         matching.sort(
             key=lambda candidate: (
                 candidate.paid,
                 candidate.rank,
+                not (
+                    candidate.resource in preferred
+                    and config.kinds[candidate.kind].affinity
+                    and not candidate.unmanaged
+                ),
                 candidate.cold,
                 candidate.unmanaged,
                 candidate.resource,

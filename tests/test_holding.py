@@ -382,6 +382,8 @@ def test_agent_guide_prints_a_skill_for_the_installed_version(capsys):
     # It is text for agents, so it says what the agents must not do.
     assert "Never run `banksman admin`" in guide
     assert "Do not use `banksman release --all`" in guide
+    # It says when the agent can skip the setup of a device.
+    assert "`PREVIOUS=self` says that your worktree used the device last" in guide
 
 
 def test_the_guide_waits_less_than_the_time_limit_of_an_agent(capsys):

@@ -112,7 +112,7 @@ project, and source it from the scripts that use a device. It is POSIX `sh`.
 
 | Function | With banksman | Without banksman |
 |---|---|---|
-| `banksman_acquire [OPTION ...]` | Runs `banksman acquire` with the options, and sets `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_LEASE`, and `BANKSMAN_SERIAL`, `BANKSMAN_HANDLE`, and `BANKSMAN_ACCOUNTS` when the grant has them. Returns the status of `acquire`, for example 4 when every matching resource is in use. | Returns 0, and sets nothing. |
+| `banksman_acquire [OPTION ...]` | Runs `banksman acquire` with the options, and sets `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_LEASE`, `BANKSMAN_PREVIOUS`, and `BANKSMAN_SERIAL`, `BANKSMAN_HANDLE`, and `BANKSMAN_ACCOUNTS` when the grant has them. Returns the status of `acquire`, for example 4 when every matching resource is in use. | Returns 0, and sets nothing. |
 | `banksman_run COMMAND [ARGUMENT ...]` | Runs the command with `banksman run` under the lease. Returns the status of the command, or 3 when the lease was lost. | Runs the command as it is. |
 | `banksman_release` | Gives back the new lease that `banksman_acquire` got in this script. A lease that `acquire` kept stays with the caller. | Does nothing. |
 
@@ -152,6 +152,31 @@ uses that lease in the same way, and the lease keeps the run as its owner proces
 
 The helper reads only a grant with one part. A script that needs several resources at the same
 time calls `banksman acquire` with `--as` itself.
+
+## Setup that the device still has
+
+An instance keeps what its last holder set up, such as an installed build or a signed-in
+account. banksman gives a worktree the free instance that it used last first, also when that
+instance does not run and another one does. The grant says whether the instance is as the
+worktree left it: `PREVIOUS=self` when the last lease of the instance was of the same worktree,
+ended with a release on this boot of the machine, and banksman knows of nothing that changed it
+since. In every other case it says `PREVIOUS=other` (DESIGN.md, section 6).
+
+`self` is not a proof: a person or a program outside banksman can have used the instance. So the
+script still checks quickly, and skips only the full setup:
+
+```sh
+banksman_acquire --where form=phone --start --for "UI tests" --wait 3m || exit
+if [ "${BANKSMAN_PREVIOUS:-}" = self ] && ./scripts/app-is-ready.sh "$BANKSMAN_SERIAL"; then
+    echo "The device has the setup of this worktree."
+else
+    ./scripts/set-up-device.sh "$BANKSMAN_SERIAL"
+fi
+```
+
+Without banksman, `BANKSMAN_PREVIOUS` is empty, and the script sets the device up as before. A
+release does not lose the setup, so release the lease before a wait for a person: after the
+wait, the worktree gets the same instance first, when it is free.
 
 ## Emulators that banksman starts
 
@@ -195,9 +220,9 @@ the tests of the project, and put it on `PATH` as `banksman`:
 
 - It appends each call to the file that `BANKSMAN_STUB_LOG` names, one line for each call.
 - `acquire` grants the resource `stub-0` with the lease `stub-lease` and the serial
-  `stub-serial`. With `--lease`, it keeps that lease (`KEPT=true`). With
-  `BANKSMAN_STUB_STATUS` set, for example to 4 for a busy machine, it prints nothing and exits
-  with that status.
+  `stub-serial`, and prints `PREVIOUS=other`, or the value of `BANKSMAN_STUB_PREVIOUS`. With
+  `--lease`, it keeps that lease (`KEPT=true`, `PREVIOUS=self`). With `BANKSMAN_STUB_STATUS`
+  set, for example to 4 for a busy machine, it prints nothing and exits with that status.
 - `run` runs the command after `--` as `banksman run --lease` runs it for a device:
   with `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, and `BANKSMAN_LEASE`, with `stub-serial` in
   `BANKSMAN_SERIAL` and `ANDROID_SERIAL`, and with each argument `{serial}` and `{resource}`

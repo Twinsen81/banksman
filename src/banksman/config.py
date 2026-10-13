@@ -52,6 +52,7 @@ _KIND_KEYS = (
     "free_timeout",
     "paid",
     "rank",
+    "affinity",
     "on_acquire",
     "on_void",
     "stop",
@@ -88,6 +89,9 @@ class Kind:
     # When a request matches instances of several kinds, the kinds with a lower rank are chosen
     # first.
     rank: int = 0
+    # Among free instances of the same rank, a request gets the one that its worktree used last
+    # first.
+    affinity: bool = True
     # The command that resets an instance before a run gets it.
     on_acquire: tuple[str, ...] | None = None
     # The command that ends a void instance. The reaper ends an instance only if the operator
@@ -417,6 +421,7 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
         count=_count(table.get("count"), f"{where}.count"),
         listed=_instances(table.get("instances"), f"{where}.instances"),
         rank=_rank(rank, f"{where}.rank"),
+        affinity=_boolean(table.get("affinity", True), f"{where}.affinity"),
         on_acquire=_command(table.get("on_acquire"), f"{where}.on_acquire"),
         on_void=_command(table.get("on_void"), f"{where}.on_void"),
         stop=_boolean(table.get("stop", False), f"{where}.stop"),

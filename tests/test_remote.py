@@ -19,6 +19,7 @@ from helpers import (
     hook,
     reap_in_child,
     table_rows,
+    work_in,
     write_config,
 )
 
@@ -902,6 +903,41 @@ def test_a_release_keeps_the_reservation_for_the_next_request(capsys, config_pat
         FIRST,
     )
     assert cli.calls().count("device remote create tokay/34 --connect") == 1
+
+
+def test_a_worktree_gets_back_the_model_that_it_used_last_with_its_reservation(
+    capsys, config_path, sdk, cli, tmp_path, monkeypatch
+):
+    work_in(monkeypatch, tmp_path / "tree-a")
+    values, _ = start_one(capsys, config_path, sdk, cli)
+    assert values["PREVIOUS"] == "other"
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    capsys.readouterr()
+    # The connection ended, so no model runs; the account still has the reservation.
+    lifecycle(cli, listed=LIST)
+    # By name, OP573DL1:34 comes first, and a second reservation would cost money too.
+    status, again, err = acquire(capsys, "--where", "kind=remote", "--paid", "--start")
+    assert status == 0, err
+    assert (again["RESOURCE"], again["HANDLE"], again["PREVIOUS"]) == ("tokay:34", FIRST, "self")
+
+
+def test_a_new_reservation_of_the_model_is_another_device(
+    capsys, config_path, sdk, cli, tmp_path, monkeypatch
+):
+    work_in(monkeypatch, tmp_path / "tree-a")
+    values, _ = start_one(capsys, config_path, sdk, cli)
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    capsys.readouterr()
+    # The reservation has ended, and the start creates a new one.
+    adb_lists(sdk, [49523])
+    answers = lifecycle(cli, create=create_answer(cli, handle=SECOND, port=49523))
+    answers[f"device remote extend {SECOND} --duration=*"] = answers.pop(
+        f"device remote extend {FIRST} --duration=*"
+    )
+    cli.answer(answers)
+    status, again, err = acquire(capsys, "--where", "kind=remote", "--paid", "--start")
+    assert status == 0, err
+    assert (again["RESOURCE"], again["HANDLE"], again["PREVIOUS"]) == ("tokay:34", SECOND, "other")
 
 
 # Devices that banksman did not start.
