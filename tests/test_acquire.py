@@ -236,6 +236,48 @@ def test_a_request_that_waits_stops_when_its_owner_process_ends(capsys, config_p
     )
 
 
+def released_during_discovery(monkeypatch, times):
+    """Make another holder hold build-0 while each of the first `times` discoveries runs, and
+    give it back before the grant. Return the list of looks."""
+    search = cli.search
+    looks = []
+
+    def released_meanwhile(*arguments, **options):
+        store = Store(cli.default_state_dir(), Machine())
+        held = store.acquire("build-0", "build", Holder("/w/b")) if len(looks) < times else None
+        looks.append(search(*arguments, **options))
+        if held is not None:
+            store.release("build-0", held.lease_id)
+        return looks[-1]
+
+    monkeypatch.setattr(cli, "search", released_meanwhile)
+    return looks
+
+
+def test_a_lease_that_ends_during_the_discovery_of_a_request_makes_it_look_again_at_once(
+    capsys, config_path, monkeypatch
+):
+    configure(config_path)
+    looks = released_during_discovery(monkeypatch, times=1)
+
+    def no_pause(self, seconds):
+        pytest.fail("the request waited")
+
+    monkeypatch.setattr(Machine, "sleep", no_pause)
+    status, values, err = acquire(capsys, "--where", "kind=build", "--wait", "15m")
+    assert (status, values["RESOURCE"], len(looks)) == (0, "build-0", 2), err
+    assert err == ""
+
+
+def test_a_request_looks_again_at_once_only_once_in_a_row(capsys, config_path, monkeypatch):
+    configure(config_path)
+    looks = released_during_discovery(monkeypatch, times=3)
+    status, _, err = acquire(capsys, "--where", "kind=build")
+    assert (status, len(looks)) == (cli.EXIT_BUSY, 2)
+    assert err == "banksman: every matching resource is in use: build-0\n"
+    assert leases() == {}
+
+
 def test_a_request_that_nothing_permitted_matches_fails_at_once(
     capsys, config_path, monkeypatch
 ):

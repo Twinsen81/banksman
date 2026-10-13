@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import math
 import os
 import pwd
 import stat
@@ -40,6 +41,7 @@ from banksman.lease import (
     READY,
     REBOOTED,
     RELEASE,
+    RESOURCE_NAME,
     VOID_REASONS,
     Holder,
     Lease,
@@ -65,7 +67,14 @@ TAKE_BACK_ATTEMPTS = 3
 # The owner of the lease that the reaper writes for a free instance that it ends.
 REAPER_OWNER = "banksman"
 
+# The version of the record of lease ends. No lease file changes with it, so it is not the lease
+# schema. A record of another version counts as empty, and the next end replaces it.
+ENDS_SCHEMA = 1
+
 _LOCK_FILE = ".lock"
+# The awake time of the last end of a lease on each resource, on this boot. The scan skips names
+# that start with a dot.
+_ENDS_FILE = ".ended.json"
 _TEMP_PREFIX = ".tmp-"
 _LEASE_SUFFIX = ".json"
 
@@ -84,6 +93,10 @@ class Busy(BanksmanError):
 
 class NotHeld(BanksmanError):
     """The caller does not hold a valid lease on the resource."""
+
+
+class Outdated(BanksmanError):
+    """A lease on a resource that the request could get ended after its discovery started."""
 
 
 @dataclass(frozen=True)
@@ -307,6 +320,7 @@ class Store:
         seen: Iterable[SerialSeen] = (),
         paid: bool = False,
         label: str | None = None,
+        since: float | None = None,
     ) -> list[Granted] | None:
         """Grant a resource for every need, all or nothing, or return None while that cannot be
         done because resources or accounts are in use.
@@ -337,6 +351,11 @@ class Store:
         A holding that has a booting lease is not kept, and the request waits as for a resource
         in use: the acquire that starts or resets its instance has not given it to anybody yet,
         and can have ended before it was done.
+
+        `since` is the awake time at which the discovery of the request started. A resource whose
+        lease ended at that time or later counts as in use: its holder or its take-back can have
+        changed the instance after discovery saw it. When only such resources keep the request
+        from being met, this raises Outdated, and the caller runs discovery again.
         """
         for need in needs:
             for choice in need.choices:
@@ -366,9 +385,15 @@ class Store:
                 kept = {}
             if any(lease.state == BOOTING for lease in kept.values()):
                 return None
-            parts = [_part(need, held, taken, kept, paid) for need in needs]
-            picks = assign(parts)
+            ended = set() if since is None else self._ended_since(since) - held
+            picks = assign([_part(need, held | ended, taken, kept, paid) for need in needs])
             if picks is None:
+                parts = [_part(need, held, taken, kept, paid) for need in needs]
+                if ended and assign(parts) is not None:
+                    raise Outdated(
+                        f"a lease on {', '.join(sorted(ended))} ended after the discovery of the"
+                        " request started"
+                    )
                 return None
             # A request that keeps no lease starts a holding of its own. The new leases of a kept
             # holding get its label.
@@ -1150,12 +1175,49 @@ class Store:
 
     def _delete(self, resource: str) -> None:
         name = self._path(resource).name
+        # The end first: a command that ends between the two steps leaves an end without its
+        # deletion, which costs a request one more discovery, never a deletion that a request
+        # does not see.
+        self._record_end(resource)
         # The record outside the state directory first: a command that ends between the two
         # steps leaves a lease file without its record, never a released quarantine that the
         # next command restores.
         for directory in (self.quarantine_dir, self.directory):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(directory / name)
+
+    def _ended_since(self, since: float) -> set[str]:
+        return {resource for resource, at in self._ends().items() if at >= since}
+
+    def _record_end(self, resource: str) -> None:
+        ends = {**self._ends(), resource: self.system.clock()}
+        record = {"schema": ENDS_SCHEMA, "boot_id": self.system.boot_id(), "ended": ends}
+        _replace_file(self.directory, _ENDS_FILE, (json.dumps(record, indent=2) + "\n").encode())
+
+    def _ends(self) -> dict[str, float]:
+        """Return the awake time of the last end of a lease on each resource, on this boot.
+
+        The record holds one time for each resource, so it does not grow with the number of
+        leases. Awake times of an earlier boot cannot be compared with this boot's, so they go.
+        """
+        try:
+            data = json.loads(_read_file(self.directory / _ENDS_FILE))
+        except (FileNotFoundError, ValueError, StoreError):
+            # Also a file that others can write to: its times are not used, and the next end
+            # replaces it with a file of this user.
+            return {}
+        if (
+            not isinstance(data, dict)
+            or data.get("schema") != ENDS_SCHEMA
+            or data.get("boot_id") != self.system.boot_id()
+            or not isinstance(data.get("ended"), dict)
+        ):
+            return {}
+        return {
+            resource: at
+            for resource, at in data["ended"].items()
+            if RESOURCE_NAME.fullmatch(resource) is not None and _is_number(at)
+        }
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
@@ -1264,6 +1326,10 @@ def _part(
         if choice.resource not in held and not choice.in_use and (paid or not choice.paid)
     )
     return Part(tuple(options), need.accounts)
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _check_label(label: str, owner_pid: int | None) -> None:

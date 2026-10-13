@@ -9,7 +9,15 @@ import sys
 import time
 
 import pytest
-from helpers import SRC, FakeSdk, FakeSystem, edit_lease, table_rows, write_config
+from helpers import (
+    SRC,
+    FakeSdk,
+    FakeSystem,
+    edit_lease,
+    reap_in_child,
+    table_rows,
+    write_config,
+)
 
 from banksman import cli, emulator
 from banksman.cli import main
@@ -815,8 +823,8 @@ def test_a_request_waits_while_the_reaper_ends_a_free_emulator(
     assert leases() == {}
 
 
-def test_an_emulator_that_ends_after_the_discovery_of_a_request_is_started_again(
-    capsys, config_path, sdk, monkeypatch
+def test_an_emulator_that_the_reaper_ends_after_the_discovery_of_a_request_is_started_again(
+    capsys, config_path, sdk, state_dir, monkeypatch
 ):
     configure(config_path, sdk, 'free_timeout = "30m"\n')
     status, first, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
@@ -828,10 +836,10 @@ def test_an_emulator_that_ends_after_the_discovery_of_a_request_is_started_again
     def ended_meanwhile(*arguments, **options):
         found = search(*arguments, **options)
         if not looks:
-            # The reaper of another command ends the emulator after this discovery saw it run,
-            # and deletes its own lease before the grant.
-            record = known()["qa_phone"]
-            assert emulator.stop(Machine(), record.pid, record.started)
+            # The reaper of another command ends the emulator after its free timeout, after this
+            # discovery saw it run, and deletes its own lease before the grant.
+            free_for(state_dir, "qa_phone", 30 * 60)
+            assert [each["void_reason"] for each in reap_in_child(state_dir)] == ["free_timeout"]
         looks.append(found)
         return found
 
@@ -841,6 +849,38 @@ def test_an_emulator_that_ends_after_the_discovery_of_a_request_is_started_again
     # The second look found the AVD stopped, so the request started it again.
     assert len(sdk.emulator_calls()) == 2
     assert runs(known()["qa_phone"].pid)
+
+
+def test_a_failed_start_of_another_request_does_not_give_its_ended_emulator(
+    capsys, config_path, sdk, monkeypatch
+):
+    configure(config_path, sdk, 'boot_timeout = "3s"\n')
+    sdk.emulator_behaves(boot=None)
+    search = cli.search
+    looks = []
+
+    def failed_meanwhile(*arguments, **options):
+        if looks:
+            return search(*arguments, **options)
+        # Another request starts the AVD, and this discovery sees its emulator boot.
+        other = acquire_in_child("--where", "avd=qa_phone", "--start")
+        wait_for(lambda: "qa_phone" in known())
+        found = search(*arguments, **options)
+        looks.append(found)
+        # Its boot does not complete, so it ends the emulator and gives its lease back before
+        # the grant of this request.
+        assert other.wait(timeout=60) == 1
+        sdk.emulator_behaves(boot=0)
+        return found
+
+    monkeypatch.setattr(cli, "search", failed_meanwhile)
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert (status, values["STATE"]) == (0, "ready"), err
+    # The request started the AVD again: it did not get the emulator that had ended as running.
+    first, second = sdk.emulator_pids()
+    assert not runs(first)
+    assert known()["qa_phone"].pid == second
+    assert runs(second)
 
 
 def test_a_free_timeout_that_is_off_keeps_free_emulators(capsys, config_path, sdk, state_dir):
