@@ -177,17 +177,23 @@ leases instead.
   take-back can have changed the instance meanwhile: the reaper ended an emulator or removed a
   reservation, the failed start of another request ended its emulator, or the holder stopped
   its emulator and then released it. So every end of a lease, by a release, a take-back, or
-  `admin release --force`, records its awake time under the lock, in `.ended.json` in the
-  state directory. The file has one time for each resource, and the scan of the lease files
-  skips it, as every name that starts with a dot. For the grant, a resource whose lease ended
-  at or after the start of the discovery counts as in use. When only such resources keep the
-  request from being met, `acquire` looks again at once, also without `--wait`, and the new
-  discovery sees the instance as it is now. A second such look in a row counts as a look that
-  found the resources in use, so that leases that end in every look never keep a request
-  looking without a pause. A file of an earlier boot, of another schema, or that cannot be read
-  counts as empty, and the next end replaces it. An instance that ends while no lease of it
-  ends, for example an emulator that crashes, is not covered: for the holder, that is the
-  same as an instance that ends just after the grant.
+  `admin release --force`, records its awake time and the boot id under the lock, in the
+  record of the ends of leases, `~/.local/state/banksman/ended.json`. The record has one entry
+  for each resource, and the entry also keeps the last lease of the resource that a holder
+  used (section 6), so the file is outside `/tmp`, as the quarantines. For the grant, a
+  resource whose lease ended on this boot, at or after the start of the discovery, counts as
+  in use. When only such resources keep the request from being met, `acquire` looks again at
+  once, also without `--wait`, and the new discovery sees the instance as it is now. A second
+  such look in a row counts as a look that found the resources in use, so that leases that end
+  in every look never keep a request looking without a pause. The awake time of an earlier
+  boot cannot be compared with this boot's, so such an end does not count. A file of another
+  schema, or that cannot be read, counts as empty, and the next end replaces it. A file that
+  cannot be written does not stop the end of the lease: the command warns, and a request can
+  then use facts from before that end, as before the record existed. `BANKSMAN_ENDED` changes
+  the path for tests. When only `BANKSMAN_STATE_DIR` is set, the file is next to that
+  directory. An instance that ends while no lease of it ends, for example an emulator that
+  crashes, is not covered: for the holder, that is the same as an instance that ends just after
+  the grant.
 - **Damaged lease files.** A lease file with a newer lease schema stops every command,
   because two versions of banksman must not share one state directory. A lease file that
   cannot be read keeps its resource out of use, and `status` shows it. Other resources are
@@ -408,6 +414,11 @@ not code.
   emulator then runs until a void lease of its AVD ends it, or the machine restarts. Like the
   hook, the reaper reads it from the current configuration, so a change applies at once, also
   to the emulators that run now.
+- **`affinity = false`** turns off, for one kind, the preference for the instance that the
+  caller's worktree used last (section 6). It is on by default for every kind, because it only
+  chooses among free instances that are otherwise equal. The paid kind needs it most: a request
+  that gets another model creates a second paid reservation, while the release keeps the first
+  one alive for up to 3 hours (section 8).
 - **`on_acquire`** is a command that resets an instance before a run gets it. `acquire` runs
   it for each new lease of the kind, after it writes the lease and outside the lock, with the
   hook contract above. Its serial is the one that the discovery of the request found, seconds
@@ -455,10 +466,14 @@ When several resources match, banksman chooses in a fixed order:
 2. A resource that costs nothing before a paid one, whatever the ranks are (section 5).
 3. A kind with a lower `rank` (section 5). So a request that does not name a kind gets an
    emulator before a physical device, and a physical device before a remote one.
-4. An instance that runs before one that does not run, which saves the time and the memory
+4. The instance that the caller's worktree used last, for a kind with affinity (section 5).
+   It comes before an instance that runs: a stopped AVD keeps on its disk what the worktree
+   installed and signed in, and to set that up again costs more than a start. An unmanaged
+   instance never counts as the caller's, because a person can use it.
+5. An instance that runs before one that does not run, which saves the time and the memory
    of a start. Of the instances that run, one that banksman knows comes before an unmanaged
    one, which a request gets only with `unmanaged = "grant"`.
-5. The resource name.
+6. The resource name.
 
 `acquire` without `--lease` or `--holding` never grants a held resource, also not to the same
 worktree:
@@ -467,13 +482,45 @@ holdings apart (section 9).
 
 - **The grant.** `acquire` prints `KEY=value` lines: `RESOURCE`, `KIND`, `LEASE` (the lease
   id that the scripts pass back), `STATE`, `KEPT` (`true` for a lease of the caller's holding
-  that `--lease` or `--holding` kept, otherwise `false`), `SERIAL` when the lease records it,
+  that `--lease` or `--holding` kept, otherwise `false`), `PREVIOUS` (`self` or `other`, see
+  below), `SERIAL` when the lease records it,
   `HANDLE` when the lease records the id of a reservation (section 3), and `ACCOUNTS` when the
   request asks for accounts (section 7). A kept lease can have another id than the
   one that the caller passed, because each lease of a holding has its own id. Each value has only the characters of a
   resource name, so that a shell script can use it as it is: a serial with other characters
   is not printed. With `--json`, it prints a list `parts` with the same values for each part
   of the request, and `paid` for each part.
+- **The instance that the worktree used last.** An instance keeps the state of its last
+  holder, such as an installed build or a signed-in account, and that state can take minutes
+  to set up again. So among free instances that are otherwise equal, a request gets the one
+  that its worktree used last first. The key is the worktree, because the state comes from the
+  code of the worktree: not the issue, because two worktrees can have different code for one
+  issue, and not the agent process, because a restart changes it. Two agents in one worktree
+  share the preference, which is harmless, because it only orders free instances. The entry of
+  each resource in the record of the ends of leases (section 3) keeps the last lease of the
+  resource that a holder used: its worktree, label, issue, and handle, the boot and the time of
+  its end, how it ended, and whether a take-back hook ran at its end or later. The record
+  survives a restart of the machine, because the disk of an AVD and the state of a device do
+  too. A lease that no holder used does not replace the entry: the reaper's lease of a free
+  emulator (section 8), and a lease whose start or reset did not finish. Their end counts only
+  when it runs an `on_void` hook, or is forced. Affinity is a preference, never a wait: a
+  request never waits for the instance that it used last while another one matches, and
+  `--where avd=<name>` stays the way to ask for an exact instance. banksman does not yet prefer
+  an instance that no other worktree used: a caller without history would then start a stopped
+  AVD, with its memory and its minutes, to protect the state of another worktree, and that
+  cost needs a measurement first.
+- **`PREVIOUS`** says whether the instance is as the caller's worktree left it, as far as
+  banksman knows. It is `self` when the last lease that a holder used was of the caller's
+  worktree and ended with a release on this boot, no take-back hook ran since, the kind has no
+  `on_acquire` hook, which changes the instance for every new lease, the instance is not
+  unmanaged, and it has the same handle, so for a remote device the same reservation. A kept
+  lease is `self` too. In every other case it is `other`: a lease of another worktree, a void
+  lease, a forced release, a restart of the machine, a new reservation, or no entry. Two values
+  keep the logic of a project to one branch. `self` is not a proof: a person or a program
+  outside banksman can have used the instance, and an emulator can have stopped. So the project
+  still checks quickly, for example whether its app is installed and signed in, and skips only
+  the full setup. banksman reports the history of the leases only, and knows no app. `status`
+  does not show the record, so that agents do not choose instances by it.
 - **Paid resources need an acknowledgement.** Without `--paid`, the resources of a paid kind
   (section 5) are not candidates. A request whose candidates are all paid, for example
   `--where kind=remote`, fails at once with exit status 1, and says that the resources are
@@ -562,6 +609,7 @@ holdings apart (section 9).
   PHONE_LEASE=4f1c2b0e9d7a4c55a0f3e6b1c2d3e4f5
   PHONE_STATE=ready
   PHONE_KEPT=false
+  PHONE_PREVIOUS=other
   PHONE_SERIAL=R5CR1234ABC
   PHONE_ACCOUNTS=qa@example.test
   TABLET_RESOURCE=qa_tablet
@@ -569,6 +617,7 @@ holdings apart (section 9).
   TABLET_LEASE=9e8d7c6b5a4f4e3d2c1b0a9f8e7d6c5b
   TABLET_STATE=ready
   TABLET_KEPT=false
+  TABLET_PREVIOUS=self
   ```
 
   A part name has lowercase letters, digits, and `_`, and becomes the prefix of the keys of
@@ -863,7 +912,11 @@ holdings apart (section 9).
 
   **The end.** A release keeps the reservation: the model is then a free instance that runs,
   until the reservation ends, and the next request gets it without a new reservation, as an
-  emulator that a release leaves running. The reaper ends only what banksman started: for a
+  emulator that a release leaves running. When the connection has ended meanwhile, the next
+  `acquire --start` of the model adopts the reservation, and affinity makes the model the first
+  choice of the worktree that used it (section 6), so that it does not pay for a second
+  reservation. A new handle means a new device, so `PREVIOUS` is then `other`. The reaper ends
+  only what banksman started: for a
   void lease whose handle the record lists as created by banksman, it runs
   `android device remote remove <id>`. A reservation that has ended already counts as gone.
   A live connection whose reservation is not in banksman's record is unmanaged (section 6).
@@ -1363,7 +1416,8 @@ permission rules can refuse all of them with one pattern, including ones added l
   catalogue and the record of reservations of the `android-remote` preset, and the record of
   the emulators of the `android-emulator` preset. That record has schema 2, which added since
   when no lease of each AVD has existed; banksman also reads schema 1, without that time. The
-  record of the ends of leases in the state directory (section 3) has schema 1. It is not
+  record of the ends of leases (section 3) has schema 2, which added the last lease that a
+  holder used, and the boot id of each entry; a record of schema 1 counts as empty. It is not
   part of the lease schema, because no lease file changes with it.
 - The surfaces treated as public API are the CLI (commands, flags, exit codes, `KEY=value`
   output), the JSON output, the lease file format, the log file format, the configuration
@@ -1515,12 +1569,13 @@ Done:
   unless the kind says so.
 - The free timeout: the reaper ends a free emulator that banksman started after a set time
   without a lease, under a lease of its own, so that no request gets it meanwhile.
+- Affinity: a request gets the free instance that its worktree used last first, and the grant
+  says with `PREVIOUS` whether the instance is as the worktree left it.
 
 Next:
 
 - `explain`, and a queue for the callers that wait.
-- Keeping a lease while an agent waits for a person, and getting the same resource back
-  after a lease ends.
+- Keeping a lease while an agent waits for a person.
 
 ## 17. Open questions
 
@@ -1554,6 +1609,9 @@ Next:
 - The adb guard reads the process list with `ps` when the lease id does not decide, and on
   macOS that alone takes about 20 ms. Is the time that the guard adds a problem for a test that
   calls adb many times? A direct read of the process table, with `sysctl`, would be faster.
+- Should a request without history prefer an instance that no other worktree used, so that it
+  does not take the state of another worktree? It would then start a stopped AVD before it gets
+  one that runs. How much memory and time does that cost on a typical machine?
 - Only a quarantined lease is kept outside `/tmp`. A void lease whose scripts still run, and
   that no command reaps, is kept only in `/tmp`. If no banksman command runs for 3 days, a
   cleaner of temporary files can delete it before it is quarantined. Should every lease with

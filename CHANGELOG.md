@@ -301,6 +301,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for half a second at most. The strict refusal and the refusal for the device of another
   holder now end with "Run banksman agent-guide and follow it". The output schema stays 6, and
   an earlier banksman leaves the guard events out of its `log`.
+- Affinity: a request gets the free instance that its worktree used last first, among the
+  instances of the same rank, also before one that runs, so that banksman starts the stopped AVD
+  of the worktree instead of granting the running AVD of another worktree. An unmanaged
+  instance never counts as the worktree's. `affinity = false` turns it off for a kind. The grant
+  prints the new line `PREVIOUS`, and its JSON the new field `previous`: `self` when the last
+  lease of the instance that a holder used was of the same worktree, ended with a release on
+  this boot, and banksman knows of nothing that changed the instance since, otherwise `other`.
+  A take-back hook, a void lease, a forced release, a restart, a new reservation of a remote
+  device, and an `on_acquire` hook all make it `other`; a kept lease is `self`. The helper of
+  a project sets `BANKSMAN_PREVIOUS`, and the stub prints `PREVIOUS`. The record of the ends of
+  leases moved from `.ended.json` in the state directory to
+  `~/.local/state/banksman/ended.json`, so that it outlives a restart, and it now keeps the
+  last lease that a holder used for each resource; its schema is now 2, and a record of
+  schema 1 counts as empty. A record that cannot be written no longer stops the end of a
+  lease: the command warns. `BANKSMAN_ENDED` changes its path for tests. The lease schema and
+  the output schema do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

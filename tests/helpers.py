@@ -120,6 +120,12 @@ def hook(code: str, *args: str) -> list[str]:
     return [sys.executable, "-c", code, *args]
 
 
+def work_in(monkeypatch, path: Path) -> None:
+    """Make `path` the worktree of the commands that the test runs from now on."""
+    path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(path)
+
+
 def edit_lease(state_dir: Path, resource: str, change) -> None:
     """Change a lease file in place, as a crash or another banksman could leave it."""
     path = state_dir / f"{resource}.json"

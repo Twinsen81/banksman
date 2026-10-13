@@ -98,6 +98,16 @@ Every program of the user can change it, an agent too, so banksman checks each l
 reads it, as it checks a lease file, and leaves out a line that is not a valid event. The JSON
 of `banksman log` carries the purpose only with `--verbose`, as `status` does.
 
+**The record of the ends of leases is a hint.** `~/.local/state/banksman/ended.json` keeps,
+for each resource, when its last lease ended, and the worktree, label, and issue of the last
+holder that used it. It orders the free instances and gives `PREVIOUS` (DESIGN.md, section 6),
+and `status` does not show it. banksman writes it with mode `0600` in a directory that only the
+user can change, does not use a file that another user owns or that group or others can write
+to, and replaces such a file at the next end of a lease. Every program of the user can change
+it, an agent too: it can then make a request look once more, change the order of the free
+instances, or make the grant say `PREVIOUS=self`. So a project checks the instance before it
+skips its setup.
+
 **Discovered values are untrusted.** Device names, models, and notes come from devices and
 from discover hooks. banksman refuses an instance name that is not a valid resource name,
 keeps only short facts without control characters, removes terminal control sequences from

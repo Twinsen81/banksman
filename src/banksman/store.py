@@ -11,6 +11,7 @@ import json
 import math
 import os
 import pwd
+import re
 import stat
 import time
 import uuid
@@ -37,6 +38,7 @@ from banksman.lease import (
     DRAINING,
     FREE_TIMEOUT,
     HELD,
+    ISSUE,
     QUARANTINED,
     READY,
     REBOOTED,
@@ -53,6 +55,8 @@ from banksman.lease import (
     check_resource,
     checked_pids,
     is_label,
+    is_owner,
+    is_wall_time,
     void_reason,
 )
 from banksman.system import OUTSIDE_SANDBOX, System
@@ -60,6 +64,7 @@ from banksman.system import OUTSIDE_SANDBOX, System
 STATE_DIR_ENV = "BANKSMAN_STATE_DIR"
 QUARANTINE_DIR_ENV = "BANKSMAN_QUARANTINE_DIR"
 LOG_ENV = "BANKSMAN_LOG"
+ENDED_ENV = "BANKSMAN_ENDED"
 LOCK_WAIT_SECONDS = 10.0
 RELEASED = "released"
 # A take-back that this many reapers started and none finished is quarantined.
@@ -69,12 +74,11 @@ REAPER_OWNER = "banksman"
 
 # The version of the record of lease ends. No lease file changes with it, so it is not the lease
 # schema. A record of another version counts as empty, and the next end replaces it.
-ENDS_SCHEMA = 1
+ENDS_SCHEMA = 2
+# How a lease ended, as the events of the log name it.
+ENDS = (RELEASE_EVENT, VOID, FORCE_RELEASE)
 
 _LOCK_FILE = ".lock"
-# The awake time of the last end of a lease on each resource, on this boot. The scan skips names
-# that start with a dot.
-_ENDS_FILE = ".ended.json"
 _TEMP_PREFIX = ".tmp-"
 _LEASE_SUFFIX = ".json"
 
@@ -147,12 +151,118 @@ class Need:
 
 
 @dataclass(frozen=True)
+class LastUse:
+    """The last lease of a resource that a holder could use, and what banksman did to the
+    instance after it."""
+
+    # The worktree of the holder.
+    owner: str
+    # The boot on which the lease ended, and the wall time of its end.
+    boot_id: str
+    ended_at: float
+    # How it ended: by a release, a void, or a forced release. A forced release of a later lease
+    # that no holder used counts as a forced release too.
+    how: str
+    # A take-back ran a hook of the kind at its end, or at the end of a later lease that no holder
+    # used, such as the reaper's lease of a free emulator. banksman does not know what the hook did
+    # to the instance.
+    hook: bool = False
+    reason: str | None = None
+    label: str | None = None
+    issue: str | None = None
+    # The reservation of a remote device. Another reservation is another device.
+    handle: str | None = None
+
+    def left_as_is(self, owner: str, boot_id: str, handle: str | None) -> bool:
+        """Whether `owner` gave the instance back with a plain release on this boot, banksman ran
+        nothing on it since, and it is the same instance."""
+        return (
+            self.owner == owner
+            and self.how == RELEASE_EVENT
+            and not self.hook
+            and self.boot_id == boot_id
+            and self.handle == handle
+        )
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "owner": self.owner,
+            "boot_id": self.boot_id,
+            "ended_at": self.ended_at,
+            "how": self.how,
+            "reason": self.reason,
+            "hook": self.hook,
+            "label": self.label,
+            "issue": self.issue,
+            "handle": self.handle,
+        }
+
+    @classmethod
+    def from_json(cls, data: object) -> LastUse | None:
+        if not isinstance(data, dict):
+            return None
+        use = cls(
+            owner=data.get("owner"),  # type: ignore[arg-type]
+            boot_id=data.get("boot_id"),  # type: ignore[arg-type]
+            ended_at=data.get("ended_at"),  # type: ignore[arg-type]
+            how=data.get("how"),  # type: ignore[arg-type]
+            hook=data.get("hook"),  # type: ignore[arg-type]
+            reason=data.get("reason"),
+            label=data.get("label"),
+            issue=data.get("issue"),
+            handle=data.get("handle"),
+        )
+        valid = (
+            is_owner(use.owner)
+            and _is_text(use.boot_id)
+            and is_wall_time(use.ended_at)
+            and use.how in ENDS
+            and isinstance(use.hook, bool)
+            and (use.reason is None or (isinstance(use.reason, str) and use.reason in VOID_REASONS))
+            and (use.label is None or is_label(use.label))
+            and (use.issue is None or _matches(ISSUE, use.issue))
+            and (use.handle is None or _matches(RESOURCE_NAME, use.handle))
+        )
+        return use if valid else None
+
+
+@dataclass(frozen=True)
+class Ended:
+    """The last end of a lease on a resource."""
+
+    boot_id: str
+    # Awake time on that boot.
+    at: float
+    # The lease before it that a holder could use, if any.
+    last_use: LastUse | None = None
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "boot_id": self.boot_id,
+            "at": self.at,
+            "last_use": None if self.last_use is None else self.last_use.to_json(),
+        }
+
+    @classmethod
+    def from_json(cls, data: object) -> Ended | None:
+        if not isinstance(data, dict):
+            return None
+        boot_id, at, use = data.get("boot_id"), data.get("at"), data.get("last_use")
+        last_use = None if use is None else LastUse.from_json(use)
+        if not _is_text(boot_id) or not _is_number(at) or (use is not None and last_use is None):
+            return None
+        return cls(boot_id, at, last_use)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
 class Granted:
     lease: Lease
     # The accounts that the part got. A kept lease can list more.
     accounts: tuple[str, ...] = ()
     # The caller already held this lease, and passed its id to keep it.
     kept: bool = False
+    # The last lease of the resource that a holder could use, before this new lease.
+    previous: LastUse | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +300,10 @@ FindUnused = Callable[[frozenset[str], float], Sequence[Unused]]
 # Adds an event to the log. It runs under the lock, and it must not raise: a lease that changed
 # stays changed when its event cannot be written.
 Record = Callable[[Event], None]
+# Whether the take-back of a void lease runs a hook of its kind.
+Hooked = Callable[[Lease], bool]
+# Tells the user about a problem that does not stop the command.
+Warn = Callable[[str], None]
 
 
 def default_state_dir() -> Path:
@@ -228,6 +342,18 @@ def default_log_path() -> Path:
     return lasting_dir(LOG_ENV) / "log.jsonl"
 
 
+def default_ended_path() -> Path:
+    override = os.environ.get(ENDED_ENV)
+    if override:
+        return Path(override)
+    state_dir = os.environ.get(STATE_DIR_ENV)
+    if state_dir:
+        return Path(state_dir).with_name(f"{Path(state_dir).name}-ended.json")
+    # Outside /tmp: the disk of an AVD and the state of a device outlive a restart, and so must
+    # the record of who used them last.
+    return lasting_dir(ENDED_ENV) / "ended.json"
+
+
 def lasting_dir(variable: str) -> Path:
     # The home directory comes from the user database, as for the configuration file, so that
     # every caller of one user finds the same files.
@@ -252,6 +378,14 @@ def _record_nothing(event: Event) -> None:
     pass
 
 
+def _hook_nothing(lease: Lease) -> bool:
+    return False
+
+
+def _warn_nothing(text: str) -> None:
+    pass
+
+
 def _unused_nothing(leased: frozenset[str], now: float) -> Sequence[Unused]:
     return ()
 
@@ -266,18 +400,24 @@ class Store:
         stopping: Stopping = _stop_nothing,
         record: Record = _record_nothing,
         unused: FindUnused = _unused_nothing,
+        hooked: Hooked = _hook_nothing,
+        warn: Warn = _warn_nothing,
         quarantine_dir: Path | None = None,
+        ended_path: Path | None = None,
         lock_wait: float = LOCK_WAIT_SECONDS,
     ) -> None:
         self.directory = Path(directory)
         self.quarantine_dir = (
             default_quarantine_dir() if quarantine_dir is None else Path(quarantine_dir)
         )
+        self.ended_path = default_ended_path() if ended_path is None else Path(ended_path)
         self.system = system
         self._take_back = take_back
         self._stopping = stopping
         self._record = record
         self._unused = unused
+        self._hooked = hooked
+        self._warn = warn
         self._lock_wait = lock_wait
         self._locked = False
 
@@ -356,6 +496,8 @@ class Store:
         lease ended at that time or later counts as in use: its holder or its take-back can have
         changed the instance after discovery saw it. When only such resources keep the request
         from being met, this raises Outdated, and the caller runs discovery again.
+
+        Each new lease comes with the last lease of its resource that a holder could use.
         """
         for need in needs:
             for choice in need.choices:
@@ -385,7 +527,18 @@ class Store:
                 kept = {}
             if any(lease.state == BOOTING for lease in kept.values()):
                 return None
-            ended = set() if since is None else self._ended_since(since) - held
+            ends = self._ends()
+            boot_id = self.system.boot_id()
+            ended = (
+                set()
+                if since is None
+                else {
+                    resource
+                    for resource, end in ends.items()
+                    if end.boot_id == boot_id and end.at >= since
+                }
+                - held
+            )
             picks = assign([_part(need, held | ended, taken, kept, paid) for need in needs])
             if picks is None:
                 parts = [_part(need, held, taken, kept, paid) for need in needs]
@@ -458,7 +611,12 @@ class Store:
                 self._log(ACQUIRE, lease)
             # A later lease of the request can take the serial of an earlier one.
             return [
-                Granted(serials[resource], accounts, kept=kept)
+                Granted(
+                    serials[resource],
+                    accounts,
+                    kept=kept,
+                    previous=None if kept or resource not in ends else ends[resource].last_use,
+                )
                 for resource, accounts, kept in granted
             ]
 
@@ -478,6 +636,11 @@ class Store:
         with self._lock():
             _, serials = self._see(self._scan(), seen)
         return serials
+
+    def ends(self) -> dict[str, Ended]:
+        """Return the last end of a lease on each resource, also of an earlier boot."""
+        with self._lock():
+            return self._ends()
 
     def holding(self, lease_id: str) -> dict[str, Lease]:
         """Return the valid held leases of the holding of this lease, by resource."""
@@ -685,7 +848,7 @@ class Store:
                     " now; run this command again when that process has ended"
                 )
             running = self._running_users(current) if isinstance(current, Lease) else ()
-            self._delete(resource)
+            self._delete(resource, current if isinstance(current, Lease) else None, FORCE_RELEASE)
             if isinstance(current, Lease):
                 self._log(FORCE_RELEASE, current, state=current.state, running=processes(running))
             else:
@@ -819,7 +982,8 @@ class Store:
 
     def _finish(self, lease: Lease, outcome: str, users: tuple[User, ...]) -> Reaped:
         if outcome == RELEASED:
-            self._delete(lease.resource)
+            how = RELEASE_EVENT if lease.void_reason == RELEASE else VOID
+            self._delete(lease.resource, lease, how)
             self._log(REAP, lease, reason=lease.void_reason)
             return Reaped(lease, RELEASED)
         quarantined = self._write(_quarantined(replace(lease, users=users)))
@@ -850,7 +1014,7 @@ class Store:
         if not self._reset_runs(lease):
             lease = replace(lease, reaper_pid=None, reaper_started=None)
             if not running:
-                self._delete(lease.resource)
+                self._delete(lease.resource, lease, RELEASE_EVENT)
                 self._log(RELEASE_EVENT, lease, drained=False, **spent)
                 return None
         # The scripts, and a reset by another banksman process, must end before the resource is
@@ -1173,12 +1337,14 @@ class Store:
         _replace_file(self.directory, name, data)
         return lease
 
-    def _delete(self, resource: str) -> None:
+    def _delete(self, resource: str, lease: Lease | None, how: str) -> None:
+        """Delete the lease on a resource, which ended `how`. `lease` is None for a lease file
+        that cannot be read."""
         name = self._path(resource).name
         # The end first: a command that ends between the two steps leaves an end without its
         # deletion, which costs a request one more discovery, never a deletion that a request
         # does not see.
-        self._record_end(resource)
+        self._record_end(resource, lease, how)
         # The record outside the state directory first: a command that ends between the two
         # steps leaves a lease file without its record, never a released quarantine that the
         # next command restores.
@@ -1186,38 +1352,74 @@ class Store:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(directory / name)
 
-    def _ended_since(self, since: float) -> set[str]:
-        return {resource for resource, at in self._ends().items() if at >= since}
+    def _record_end(self, resource: str, lease: Lease | None, how: str) -> None:
+        ends = self._ends()
+        boot_id = self.system.boot_id()
+        hook = how == VOID and lease is not None and self._hooked(lease)
+        before = ends[resource].last_use if resource in ends else None
+        if lease is None:
+            # Nobody knows who held a lease file that cannot be read.
+            last_use = None
+        elif _used(lease):
+            last_use = LastUse(
+                lease.owner,
+                boot_id,
+                self.system.wall_clock(),
+                how,
+                hook,
+                lease.void_reason if how == VOID else None,
+                lease.label,
+                lease.issue,
+                lease.handle,
+            )
+        elif before is not None and (hook or how == FORCE_RELEASE):
+            # No holder could use the instance under this lease, so the holder before it stays
+            # the last one. But its end can have changed the instance.
+            last_use = replace(before, hook=before.hook or hook, how=_forced(how, before.how))
+        else:
+            last_use = before
+        ends[resource] = Ended(boot_id, self.system.clock(), last_use)
+        record = {
+            "schema": ENDS_SCHEMA,
+            "resources": {name: end.to_json() for name, end in sorted(ends.items())},
+        }
+        try:
+            _ensure_parent(self.ended_path)
+            _replace_file(
+                self.ended_path.parent,
+                self.ended_path.name,
+                (json.dumps(record, indent=2) + "\n").encode(),
+            )
+        except (StoreError, OSError) as exc:
+            # The lease ends all the same. Without the record, the next request can use facts
+            # from before this end, and gets no preference for the instance that it used last.
+            reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+            self._warn(f"the end of the lease on {resource} is not recorded: {reason}")
 
-    def _record_end(self, resource: str) -> None:
-        ends = {**self._ends(), resource: self.system.clock()}
-        record = {"schema": ENDS_SCHEMA, "boot_id": self.system.boot_id(), "ended": ends}
-        _replace_file(self.directory, _ENDS_FILE, (json.dumps(record, indent=2) + "\n").encode())
+    def _ends(self) -> dict[str, Ended]:
+        """Return the last end of a lease on each resource, also of an earlier boot.
 
-    def _ends(self) -> dict[str, float]:
-        """Return the awake time of the last end of a lease on each resource, on this boot.
-
-        The record holds one time for each resource, so it does not grow with the number of
-        leases. Awake times of an earlier boot cannot be compared with this boot's, so they go.
+        The record holds one entry for each resource, so it does not grow with the number of
+        leases.
         """
         try:
-            data = json.loads(_read_file(self.directory / _ENDS_FILE))
+            data = json.loads(_read_file(self.ended_path))
         except (FileNotFoundError, ValueError, StoreError):
-            # Also a file that others can write to: its times are not used, and the next end
-            # replaces it with a file of this user.
+            # Also a file that others can write to: it is not used, and the next end replaces it
+            # with a file of this user.
             return {}
         if (
             not isinstance(data, dict)
             or data.get("schema") != ENDS_SCHEMA
-            or data.get("boot_id") != self.system.boot_id()
-            or not isinstance(data.get("ended"), dict)
+            or not isinstance(data.get("resources"), dict)
         ):
             return {}
-        return {
-            resource: at
-            for resource, at in data["ended"].items()
-            if RESOURCE_NAME.fullmatch(resource) is not None and _is_number(at)
-        }
+        ends = {}
+        for resource, entry in data["resources"].items():
+            end = Ended.from_json(entry)
+            if end is not None and _matches(RESOURCE_NAME, resource):
+                ends[resource] = end
+        return ends
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
@@ -1287,8 +1489,27 @@ def _part(
     return Part(tuple(options), need.accounts)
 
 
+def _used(lease: Lease) -> bool:
+    """Whether a holder could use the instance under the lease: it was ready, and it is not the
+    reaper's lease of a free instance."""
+    # A booting lease has a boot deadline until it is ready, also after it became void.
+    return lease.boot_deadline is None and lease.void_reason != FREE_TIMEOUT
+
+
+def _forced(how: str, before: str) -> str:
+    return FORCE_RELEASE if how == FORCE_RELEASE else before
+
+
 def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _is_text(value: object) -> bool:
+    return isinstance(value, str) and value != ""
+
+
+def _matches(pattern: re.Pattern[str], value: object) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
 
 
 def _check_label(label: str, owner_pid: int | None) -> None:
@@ -1562,6 +1783,14 @@ def _take_lock(path: Path, wait: float) -> int:
             )
         time.sleep(pause)
         pause = min(pause * 2, 0.05)
+
+
+def _ensure_parent(path: Path) -> None:
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise StoreError(f"cannot create {path.parent}: {exc.strerror}") from exc
+    _check_directory(path.parent)
 
 
 def _ensure_directory(directory: Path) -> None:

@@ -7,7 +7,7 @@ from helpers import FakeSystem
 from banksman import cli
 from banksman.config import CONFIG_ENV
 from banksman.inventory import INVENTORY_ENV
-from banksman.store import LOG_ENV, QUARANTINE_DIR_ENV, STATE_DIR_ENV, Store
+from banksman.store import ENDED_ENV, LOG_ENV, QUARANTINE_DIR_ENV, STATE_DIR_ENV, Store
 
 
 @pytest.fixture(autouse=True)
@@ -31,6 +31,14 @@ def log_path(tmp_path, monkeypatch):
     # No test may write into the real log.
     path = tmp_path / "home" / ".local" / "state" / "banksman" / "log.jsonl"
     monkeypatch.setenv(LOG_ENV, str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
+def ended_path(tmp_path, monkeypatch):
+    # No test may write into the real record of the ends of leases.
+    path = tmp_path / "home" / ".local" / "state" / "banksman" / "ended.json"
+    monkeypatch.setenv(ENDED_ENV, str(path))
     return path
 
 
