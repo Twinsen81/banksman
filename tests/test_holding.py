@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -384,11 +385,37 @@ def test_agent_guide_prints_a_skill_for_the_installed_version(capsys):
 
 
 def test_the_guide_waits_less_than_the_time_limit_of_an_agent(capsys):
-    # Claude Code stops a command of its Bash tool after 10 minutes at most.
+    # The Bash tool of Claude Code waits 10 minutes at most for a command, and then moves it to
+    # the background, so a longer wait does not give its result in the same call.
     assert main(["agent-guide"]) == 0
     waits = re.findall(r"--wait ([0-9]+[smh])", capsys.readouterr().out)
     assert waits
     assert all(parse_duration(wait) < 10 * 60 for wait in waits)
+
+
+def guide_commands(guide):
+    """Return the banksman commands that the guide shows: the lines of its code blocks, and
+    its inline code."""
+    blocks = re.findall(r"^```sh\n(.*?)^```", guide, flags=re.MULTILINE | re.DOTALL)
+    lines = [line for block in blocks for line in block.splitlines()]
+    inline = re.findall(r"`(banksman [^`]+)`", guide)
+    return [command for command in (*lines, *inline) if command.startswith("banksman ")]
+
+
+def test_every_command_in_the_guide_is_one_that_banksman_takes(capsys):
+    assert main(["agent-guide"]) == 0
+    commands = guide_commands(capsys.readouterr().out)
+    assert "banksman held" in commands
+    parser = cli._build_parser()
+    for command in commands:
+        words = shlex.split(command)[1:]
+        if words == ["admin"]:
+            # The guide names it only to forbid it.
+            continue
+        try:
+            parser.parse_args(words)
+        except SystemExit:
+            pytest.fail(f"the guide shows a command that banksman does not take: {command}")
 
 
 def test_agents_may_run_the_guide(capsys):
