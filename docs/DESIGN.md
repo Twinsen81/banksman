@@ -1336,14 +1336,27 @@ this section names.
   skill, and agents may run the command, so the text always matches the installed banksman.
   The instructions of the project then only add what is its own, such as the scripts that take
   the serial.
-- Keep every wait shorter than the time limit of the shell tool of the agent. Claude Code
-  stops a command of its Bash tool after 10 minutes at most, so a longer `--wait` is stopped
-  before it ends. A long run of tests under `banksman run` runs in the background of the tool.
+- Keep every wait shorter than the timeout of the shell tool of the agent, so that the agent
+  gets the result in the same call. A long run of tests under `banksman run` runs in the
+  background of the tool. The shell tools behave as follows; the guide for agents tells each
+  agent what to do.
+  - Claude Code 2.1.296: the Bash tool waits 2 minutes for a command unless the agent gives a
+    longer timeout, and 10 minutes at most. Then it moves the command to the background, where
+    the command continues, and stops it after 10 more minutes there; Claude Code 2.1.286 in the
+    Agent SDK stops it after 30 minutes. With `run_in_background`, the timeout limits the time
+    in the background: 10 minutes by default, and 2 hours at most. A stop sends SIGTERM to
+    every process below the command, by parent process, also to one in a session of its own,
+    such as an emulator that `acquire` started, and SIGKILL about 1.4 seconds later.
+  - Codex 0.159.2, with `codex exec`: the shell tool returns after 10 seconds while the command
+    continues, and the agent reads its output again, every 5 seconds by default, until it
+    ends. When the turn ends, Codex kills the process group of a command that still runs, with
+    SIGKILL. A process in a session of its own, such as an emulator, continues, and the next
+    banksman command ends it when banksman started it (section 3).
 - Let banksman start an emulator with `--start`, or start the granted instance when it does
   not run, and handle one that already runs. Start it before `banksman run`, not inside it:
   `run` waits for every process that its command leaves in its group. With `--start`,
   `acquire` lasts until the boot completes, so `--wait` and the `boot_timeout` of the kind
-  together must be shorter than the time limit of the shell tool, or `acquire` runs in the
+  together should be shorter than the timeout of the shell tool, or `acquire` continues in the
   background of the tool. When the tool stops `acquire` during the boot, the next command
   ends what banksman started, and the request with the same label starts the boot again.
 - Release leases before waiting for a person, so that a run that waits overnight does not

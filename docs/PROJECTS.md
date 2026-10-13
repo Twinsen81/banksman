@@ -131,11 +131,15 @@ The `|| status=$?` keeps the status of the command and lets the script go on to
 `banksman_release`, also under `set -e`. A script that can end earlier, for example on an
 error, gives the lease back in a trap: `trap banksman_release EXIT`.
 
-A wait must be shorter than the time limit of the shell tool of the agent that runs the
-script. Claude Code stops a command of its Bash tool after 2 minutes unless the agent gives a
-longer timeout, and after 10 minutes at most, so an example that waits 15 minutes is stopped
-before its wait ends. With `--start`, the boot of an emulator comes after the wait. A run of
-tests that takes longer runs in the background of the tool.
+A wait should be shorter than the timeout of the shell tool of the agent that runs the
+script, so that the agent gets the result in the same call. Claude Code waits 2 minutes for a
+command of its Bash tool unless the agent gives a longer timeout, and 10 minutes at most. Then
+the command continues in the background, and the tool stops it there after 10 more minutes,
+so an example that waits 25 minutes is stopped before its wait ends. Codex returns after about
+10 seconds, and the agent reads the output again until the command ends; when the turn ends,
+Codex can kill a command that still runs. With `--start`, the boot of an emulator comes after
+the wait. A run of tests that takes longer runs in the background of the tool (DESIGN.md,
+section 15).
 
 A script that is given a lease keeps it. When `BANKSMAN_LEASE` is set when the script starts,
 for example because an agent runs `BANKSMAN_LEASE=<id> ./scripts/ui-tests.sh`,
@@ -337,7 +341,7 @@ after the command name, so the text for the agents below asks them to write it t
 
 `banksman agent-guide` prints a guide for agents in the format of a skill. It tells an agent how
 to get a device with a label of its own (`--holding`), run work on it, and give it back; what
-exit statuses 3 and 4 mean; that a wait must be shorter than the time limit of its shell tool;
+exit statuses 3 and 4 mean; how the shell tools of Claude Code and Codex limit a command;
 and the rules for paid devices and for `banksman admin`. The guide asks each agent for a label
 that names its own task, because the subagents of one session share one agent process, and
 two subagents with the same label would share one device (DESIGN.md, section 9). Agents may

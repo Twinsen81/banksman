@@ -72,16 +72,26 @@ banksman release --holding login-tests
 
 ## Time limits
 
-- Your shell tool stops a command after a time limit. In Claude Code, the Bash tool stops a
-  command after 2 minutes unless you give it a longer timeout, and after 10 minutes at most.
-- Keep every `--wait` shorter than that limit, and give the tool a timeout that is longer than
-  the wait, for example `--wait 5m` with a timeout of 6 minutes.
+- Your shell tool waits only for a limited time for a command. In Claude Code, the Bash tool
+  waits 2 minutes unless you give it a longer timeout, and 10 minutes at most. Then it moves
+  the command to the background, where the command continues, and stops it after 10 more
+  minutes. You get a notice when the command ends.
+- In Codex, the shell tool returns after about 10 seconds while the command continues. Read
+  the output of the same command again until it ends: when your turn ends, Codex can kill a
+  command that still runs.
+- Give the tool a timeout that is longer than the `--wait`, for example `--wait 5m` with a
+  timeout of 6 minutes, so that you get the result of `acquire` in the same call.
 - With `--start`, the boot of an emulator comes after the wait, and can take some minutes.
   Keep the wait short, for example `--wait 3m` with a timeout of 10 minutes. When the tool
   stops the command during the boot, banksman ends what it started, and the request with the
   same label starts the boot again.
+- When `acquire` continues in the background, you do not need its output: `banksman held`
+  shows your holding and its state. While it boots, a new request with the same label exits
+  with status 4, or waits with `--wait`.
 - Run a command that takes longer, such as a long test run under `banksman run`, in the
-  background of your tool. When the tool stops `banksman run`, banksman stops the command too.
+  background of your tool, with a time limit that is long enough. In Claude Code, the timeout
+  of a command with `run_in_background` is its time in the background: 10 minutes by default,
+  and 2 hours at most. When the tool stops `banksman run`, banksman stops the command too.
 
 ## Devices that cost money
 

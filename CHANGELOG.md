@@ -220,7 +220,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the shell tools of agents, and the rules for paid devices and for `banksman admin`. Agents
   may run it, so the text always matches the installed banksman, and the operator can save it
   as a skill. The examples in the documentation now wait 5 minutes, less than the longest time
-  for which Claude Code lets a command of its Bash tool run.
+  for which the Bash tool of Claude Code waits for a command.
+- The guide for agents describes the time limits of the shell tools as they were measured.
+  The Bash tool of Claude Code moves a command that passes its timeout to the background,
+  where it continues, and stops it after 10 more minutes; a stop signals every process below
+  the command. The shell tool of Codex returns after about 10 seconds while the command
+  continues, so the agent reads the output again until the command ends. The guide also says
+  that `banksman held` shows a holding whose `acquire` continues in the background, and how to
+  give a long command a background time limit. A test parses every `banksman` command that
+  the guide shows, so the guide cannot show an option that banksman does not take.
 - `acquire --start` and `run --where --start` start emulators too. For a granted AVD of the
   `android-emulator` preset that does not run, banksman chooses a free console port from 5554
   to 5584 and records its serial in the booting lease before the start, under the lock of the
