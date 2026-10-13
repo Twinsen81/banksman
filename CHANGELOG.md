@@ -244,6 +244,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emulator. When a lease ends, banksman records the instance that runs then, so an emulator
   that a holder started under its lease is free afterwards, not unmanaged. The lease schema and
   the output schema do not change; `status --json` has the new state value `unmanaged`.
+- The free timeout. With the new kind key `free_timeout`, for example `"30m"`, valid only for
+  the `android-emulator` preset and off by default, the reaper ends a free emulator that
+  banksman started when no lease of its AVD has existed for that time, counted in awake time.
+  Under the lock of the lease store, it first writes a `draining` lease of its own for the AVD,
+  with the owner `banksman` and the new void reason `free_timeout`, then ends the emulator and
+  runs the `on_void` hook as for a take-back, and deletes the lease. So a request during the end
+  waits, and never gets an emulator that ends. When the end finishes after the discovery of a
+  request and before its grant, the request gives the new leases back and looks again, so it
+  never gets the serial of an emulator that has ended. An emulator that banksman did not start
+  is never ended. The log records the end as a `reap` event with the reason `free_timeout`. The
+  reaper runs only at the start of a command, so run `banksman reap` at a fixed interval to end
+  free emulators also while no agent works. The record of the emulators keeps since when each
+  AVD has no lease, so its schema is now 2; banksman also reads schema 1. The lease schema is
+  now 9 for the new void reason, and banksman also reads lease files of schema 8, so the upgrade
+  keeps the leases. The output schema stays 6: `void_reason` and the `reason` of the log have a
+  new value.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

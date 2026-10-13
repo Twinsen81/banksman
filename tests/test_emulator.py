@@ -11,7 +11,7 @@ import time
 import pytest
 from helpers import SRC, FakeSdk, FakeSystem, edit_lease, table_rows, write_config
 
-from banksman import emulator
+from banksman import cli, emulator
 from banksman.cli import main
 from banksman.config import Kind
 from banksman.errors import BanksmanError
@@ -145,6 +145,87 @@ def test_the_record_keeps_only_emulators_that_still_run_on_this_boot(system):
     assert sorted(emulator.load(kind(), system)) == ["qa_phone"]
     system.boot = "boot-2"
     assert emulator.load(kind(), system) == {}
+
+
+def test_a_record_of_schema_1_is_read_without_free_times(system):
+    system.spawn(300)
+    entry = {
+        "resource": "qa_phone",
+        "pid": 300,
+        "started": "start-300",
+        "boot": "boot-1",
+        "created": True,
+        "at": 1.0,
+        "port": 5554,
+    }
+    path = emulator.default_emulator_dir() / "emulator-emulators.json"
+    path.parent.mkdir(mode=0o700, parents=True)
+    path.write_text(json.dumps({"schema": 1, "emulators": [entry]}))
+    path.chmod(0o600)
+    record = emulator.load(kind(), system)["qa_phone"]
+    assert (record.free_since, record.serial) == (None, "emulator-5554")
+
+
+@pytest.mark.parametrize("schema", [[], {}, True, 3])
+def test_a_record_with_a_schema_that_banksman_does_not_read_is_not_valid(system, schema):
+    path = emulator.default_emulator_dir() / "emulator-emulators.json"
+    path.parent.mkdir(mode=0o700, parents=True)
+    path.write_text(json.dumps({"schema": schema, "emulators": []}))
+    path.chmod(0o600)
+    with pytest.raises(emulator.EmulatorError, match="is not valid"):
+        emulator.load(kind(), system)
+
+
+def started_by_banksman(system, *names):
+    for pid, name in enumerate(names, 300):
+        system.spawn(pid)
+        with emulator.changing(kind(), system) as record:
+            record[name] = emulator.Known(name, pid, f"start-{pid}", "boot-1", True, 1.0, 5554)
+
+
+def free_since(system):
+    return {name: entry.free_since for name, entry in emulator.load(kind(), system).items()}
+
+
+def test_the_free_time_of_an_avd_counts_from_when_its_last_lease_ended(system):
+    free = kind(free_timeout=30 * 60)
+    started_by_banksman(system, "qa_phone", "qa_tablet")
+    start = system.clock()
+    assert emulator.unused(free, {"qa_tablet"}, start, system) == []
+    assert free_since(system) == {"qa_phone": start, "qa_tablet": None}
+    system.advance(30 * 60 - 1)
+    assert emulator.unused(free, {"qa_tablet"}, system.clock(), system) == []
+    system.advance(1)
+    assert [each.resource for each in emulator.unused(free, set(), system.clock(), system)] == [
+        "qa_phone"
+    ]
+    # A lease of an AVD sets its free time back.
+    assert emulator.unused(free, {"qa_phone"}, system.clock(), system) == []
+    assert free_since(system) == {"qa_phone": None, "qa_tablet": start + 30 * 60}
+
+
+def test_without_a_free_timeout_the_record_does_not_change(system):
+    started_by_banksman(system, "qa_phone")
+    assert emulator.unused(kind(), set(), system.clock(), system) == []
+    assert free_since(system) == {"qa_phone": None}
+
+
+def test_the_free_timeout_never_ends_an_emulator_that_banksman_did_not_start(system):
+    system.spawn(300)
+    system.arguments[300] = ("/sdk/emulator/emulator", "-avd", "qa_phone")
+    emulator.adopt(kind(), "qa_phone", system)
+    assert free_since(system) == {"qa_phone": system.clock()}
+    system.advance(24 * 60 * 60)
+    assert emulator.unused(kind(free_timeout=60), set(), system.clock(), system) == []
+
+
+def test_a_release_records_when_the_lease_of_the_avd_ended(system):
+    started_by_banksman(system, "qa_phone")
+    system.arguments[300] = ("/sdk/emulator/emulator", "-avd", "qa_phone")
+    system.advance(60)
+    emulator.adopt(kind(), "qa_phone", system)
+    record = emulator.load(kind(), system)["qa_phone"]
+    assert (record.created, record.free_since) == (True, system.clock())
 
 
 def test_a_stop_ends_the_emulator_process_only(system):
@@ -588,6 +669,155 @@ def test_a_hook_of_the_kind_runs_after_the_end(capsys, config_path, sdk, state_d
     assert main(["reap"]) == 0
     # The emulator has ended, so the hook gets no serial.
     assert out.read_text() == "-"
+
+
+# The end of free emulators.
+
+
+def free_for(state_dir, avd, seconds):
+    """Move the time since when the AVD has no lease back by `seconds`."""
+    path = emulator.default_emulator_dir() / "emulator-emulators.json"
+    data = json.loads(path.read_text())
+    for entry in data["emulators"]:
+        if entry["resource"] == avd:
+            entry["free_since"] -= seconds
+    path.write_text(json.dumps(data))
+
+
+def test_a_free_emulator_that_banksman_started_ends_after_the_free_timeout(
+    capsys, config_path, sdk, state_dir
+):
+    configure(config_path, sdk, 'free_timeout = "30m"\n')
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    pid = known()["qa_phone"].pid
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    free_for(state_dir, "qa_phone", 30 * 60 - 60)
+    assert main(["reap"]) == 0
+    assert runs(pid)
+    free_for(state_dir, "qa_phone", 60)
+    capsys.readouterr()
+    assert main(["reap"]) == 0
+    assert capsys.readouterr().out == (
+        "qa_phone: released, because the instance had no lease for the free timeout of its kind\n"
+    )
+    assert not runs(pid)
+    assert (leases(), known()) == ({}, {})
+    assert main(["log", "--json"]) == 0
+    last = json.loads(capsys.readouterr().out)["events"][-1]
+    assert (last["event"], last["resource"], last["reason"], last["owner"]) == (
+        "reap",
+        "qa_phone",
+        "free_timeout",
+        "banksman",
+    )
+    # The next request starts the AVD again.
+    status, _, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert len(sdk.emulator_calls()) == 2
+
+
+def test_a_free_emulator_that_the_holder_started_never_ends(capsys, config_path, sdk, state_dir):
+    configure(config_path, sdk, 'free_timeout = "30m"\n')
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone")
+    assert status == 0, err
+    holder = sdk.start_emulator("qa_phone", 5556)
+    wait_for(lambda: listed(sdk, "emulator-5556"))
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    free_for(state_dir, "qa_phone", 24 * 60 * 60)
+    assert main(["reap"]) == 0
+    assert runs(holder.pid)
+    assert states(capsys)["qa_phone"] == "free"
+
+
+def test_an_emulator_with_a_lease_does_not_end_after_the_free_timeout(
+    capsys, config_path, sdk, state_dir
+):
+    configure(config_path, sdk, 'free_timeout = "30m"\n')
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    status, again, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    free_for(state_dir, "qa_phone", 24 * 60 * 60)
+    assert main(["reap"]) == 0
+    # The reaper saw the new lease, so the free time of the AVD starts again at its end.
+    assert known()["qa_phone"].free_since is None
+    assert main(["release", "--lease", again["LEASE"]]) == 0
+    free_for(state_dir, "qa_phone", 30 * 60 - 60)
+    assert main(["reap"]) == 0
+    assert runs(known()["qa_phone"].pid)
+
+
+def test_a_request_waits_while_the_reaper_ends_a_free_emulator(
+    capsys, config_path, sdk, state_dir, monkeypatch
+):
+    configure(config_path, sdk, 'free_timeout = "30m"\n')
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    free_for(state_dir, "qa_phone", 30 * 60)
+    stop = emulator.stop
+    during = []
+
+    def stopping(system, pid, started, **options):
+        lease = leases()["qa_phone"]
+        during.append((lease.state, lease.owner, lease.serial, lease.void_reason))
+        # Another process asks for the AVD meanwhile, and does not get it.
+        result = subprocess.run(
+            [sys.executable, "-m", "banksman", "acquire", "--where", "avd=qa_phone"],
+            env={**os.environ, "PYTHONPATH": SRC},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        during.append((result.returncode, result.stderr))
+        return stop(system, pid, started, **options)
+
+    monkeypatch.setattr(emulator, "stop", stopping)
+    assert main(["reap"]) == 0
+    (lease, (code, err)) = during
+    assert lease == ("draining", "banksman", values["SERIAL"], "free_timeout")
+    assert code == 4 and "in use" in err, err
+    assert leases() == {}
+
+
+def test_an_emulator_that_ends_after_the_discovery_of_a_request_is_started_again(
+    capsys, config_path, sdk, monkeypatch
+):
+    configure(config_path, sdk, 'free_timeout = "30m"\n')
+    status, first, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", first["LEASE"]]) == 0
+    search = cli.search
+    looks = []
+
+    def ended_meanwhile(*arguments, **options):
+        found = search(*arguments, **options)
+        if not looks:
+            # The reaper of another command ends the emulator after this discovery saw it run,
+            # and deletes its own lease before the grant.
+            record = known()["qa_phone"]
+            assert emulator.stop(Machine(), record.pid, record.started)
+        looks.append(found)
+        return found
+
+    monkeypatch.setattr(cli, "search", ended_meanwhile)
+    status, again, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert (status, again["STATE"], len(looks)) == (0, "ready", 2), err
+    # The second look found the AVD stopped, so the request started it again.
+    assert len(sdk.emulator_calls()) == 2
+    assert runs(known()["qa_phone"].pid)
+
+
+def test_a_free_timeout_that_is_off_keeps_free_emulators(capsys, config_path, sdk, state_dir):
+    configure(config_path, sdk)
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    free_for(state_dir, "qa_phone", 24 * 60 * 60)
+    assert main(["reap"]) == 0
+    assert runs(known()["qa_phone"].pid)
 
 
 def _android(sdk):

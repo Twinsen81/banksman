@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from banksman import LEASE_SCHEMA
+from banksman import LEASE_SCHEMA, READABLE_LEASE_SCHEMAS
 from banksman.errors import BanksmanError
 
 BOOTING = "booting"
@@ -25,6 +25,9 @@ HARD_CAP = "hard_cap"
 OWNER_GONE = "owner_gone"
 IDLE = "idle"
 RELEASE = "release"
+# The reason of the lease that the reaper writes for a free instance that it ends. No holder had
+# that lease.
+FREE_TIMEOUT = "free_timeout"
 VOID_REASONS = {
     REBOOTED: "the machine restarted after the lease was written",
     BOOT_TIMEOUT: "the resource was not ready by its boot deadline",
@@ -32,6 +35,7 @@ VOID_REASONS = {
     OWNER_GONE: "the owner process ended, and nothing touched the lease for the grace period",
     IDLE: "nothing touched the lease for the idle timeout",
     RELEASE: "the holder released the lease while its scripts still ran",
+    FREE_TIMEOUT: "the instance had no lease for the free timeout of its kind",
 }
 
 RESOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}")
@@ -255,7 +259,7 @@ class Lease:
     def from_json(cls, data: object) -> Lease:
         if not isinstance(data, dict):
             raise LeaseFormatError("the file does not hold a JSON object")
-        if data.get("schema") != LEASE_SCHEMA:
+        if not _is_readable(data.get("schema")):
             raise LeaseFormatError(f"the file does not have schema {LEASE_SCHEMA}")
         awake = data.get("awake")
         if not isinstance(awake, dict):
@@ -411,6 +415,15 @@ def _get(data: Mapping[str, object], key: str, check: Callable[[object], bool]) 
 
 def _optional(check: Callable[[object], bool]) -> Callable[[object], bool]:
     return lambda value: value is None or check(value)
+
+
+def _is_readable(schema: object) -> bool:
+    # A schema that is not a number, such as a list, is damage, not a newer schema.
+    return (
+        isinstance(schema, int)
+        and not isinstance(schema, bool)
+        and schema in READABLE_LEASE_SCHEMAS
+    )
 
 
 def _is_text(value: object) -> bool:

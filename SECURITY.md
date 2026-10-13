@@ -48,7 +48,9 @@ which emulators the reaper ends. The reaper signals only that one process, and o
 pid has the recorded start time on the same boot, so it never signals a process that the
 system gave the pid to later. It never signals a process group: other emulators use the
 `netsimd` daemon that an emulator can start in its group. An emulator that the holder or a
-person started is never ended.
+person started is never ended. With the `free_timeout` of its kind, the reaper also ends a free
+emulator that banksman started; under the lock of the lease store, it first writes a lease of
+its own for the emulator, so that no request gets the emulator while it ends.
 
 **Configuration runs as code.** A kind's hooks are commands that banksman runs as the
 user. So banksman refuses a configuration file that a user other than the user and root

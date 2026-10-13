@@ -34,6 +34,7 @@ from banksman.history import (
 from banksman.lease import (
     BOOTING,
     DRAINING,
+    FREE_TIMEOUT,
     HELD,
     QUARANTINED,
     READY,
@@ -60,6 +61,8 @@ LOCK_WAIT_SECONDS = 10.0
 RELEASED = "released"
 # A take-back that this many reapers started and none finished is quarantined.
 TAKE_BACK_ATTEMPTS = 3
+# The owner of the lease that the reaper writes for a free instance that it ends.
+REAPER_OWNER = "banksman"
 
 _LOCK_FILE = ".lock"
 _TEMP_PREFIX = ".tmp-"
@@ -139,6 +142,17 @@ class Granted:
 
 
 @dataclass(frozen=True)
+class Unused:
+    """A free instance that banksman started, and that the reaper ends because no lease of it
+    has existed for the free timeout of its kind."""
+
+    resource: str
+    kind: str
+    # Its address, for `status` and the adb guard while the reaper ends it.
+    serial: str | None = None
+
+
+@dataclass(frozen=True)
 class Reaped:
     lease: Lease
     outcome: str  # RELEASED, DRAINING, or QUARANTINED
@@ -155,6 +169,10 @@ class Reaped:
 TakeBack = Callable[[Lease], bool]
 # Whether the reaper may signal the scripts of a void lease.
 Stopping = Callable[[Lease], bool]
+# Returns the free instances that the reaper ends now. It gets the resources that have a lease
+# file in any state, and the awake time. It runs under the lock, so that no request gets an
+# instance before the reaper has written its own lease of it, and it must not raise.
+FindUnused = Callable[[frozenset[str], float], Sequence[Unused]]
 # Adds an event to the log. It runs under the lock, and it must not raise: a lease that changed
 # stays changed when its event cannot be written.
 Record = Callable[[Event], None]
@@ -220,6 +238,10 @@ def _record_nothing(event: Event) -> None:
     pass
 
 
+def _unused_nothing(leased: frozenset[str], now: float) -> Sequence[Unused]:
+    return ()
+
+
 class Store:
     def __init__(
         self,
@@ -229,6 +251,7 @@ class Store:
         take_back: TakeBack = _take_back_nothing,
         stopping: Stopping = _stop_nothing,
         record: Record = _record_nothing,
+        unused: FindUnused = _unused_nothing,
         quarantine_dir: Path | None = None,
         lock_wait: float = LOCK_WAIT_SECONDS,
     ) -> None:
@@ -240,6 +263,7 @@ class Store:
         self._take_back = take_back
         self._stopping = stopping
         self._record = record
+        self._unused = unused
         self._lock_wait = lock_wait
         self._locked = False
 
@@ -658,18 +682,29 @@ class Store:
         )
 
     def reap(self) -> list[Reaped]:
-        """Take back the resources of void leases, and delete those leases."""
+        """Take back the resources of void leases, and delete those leases. End the free
+        instances that `unused` returns."""
         reaped = []
         with self._lock():
-            leases = [entry for entry in self._scan() if isinstance(entry, Lease)]
-            if not leases:
+            entries = self._scan()
+            leases = [entry for entry in entries if isinstance(entry, Lease)]
+            leased = frozenset(entry.resource for entry in entries)
+            now = self.system.clock()
+            # One lease for each resource, also when two kinds name it.
+            ending = {
+                each.resource: each
+                for each in self._unused(leased, now)
+                if each.resource not in leased
+            }
+            if not leases and not ending:
                 return []
             boot_id = self.system.boot_id()
-            now = self.system.clock()
             table = self.system.process_table()
             running = {pid: process.started for pid, process in table.items()}
             me = self._me(running)
-            mine = []
+            # The reaper ends a free instance under a lease of its own, as a take-back: a request
+            # waits for the instance meanwhile, and only one reaper ends it.
+            mine = [self._write(self._ending(each, me, now)) for each in ending.values()]
             for found in leases:
                 lease = found
                 if lease.state in HELD:
@@ -720,6 +755,13 @@ class Store:
         for lease in mine:
             reaped.extend(self._end(lease, me))
         return reaped
+
+    def _ending(self, unused: Unused, me: tuple[int, str], now: float) -> Lease:
+        holder = Holder(REAPER_OWNER)
+        check_names(unused.resource, unused.kind, holder)
+        lease = self._new_lease(unused.resource, unused.kind, holder, READY, Timeouts(), None)
+        lease = _drained(replace(lease, serial=unused.serial), FREE_TIMEOUT, now)
+        return replace(lease, attempts=1, reaper_pid=me[0], reaper_started=me[1])
 
     def _end(self, lease: Lease, me: tuple[int, str]) -> list[Reaped]:
         # Taking a resource back can take seconds, for example to end an emulator or to wait

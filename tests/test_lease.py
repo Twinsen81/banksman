@@ -148,8 +148,31 @@ def test_a_lease_file_of_an_earlier_schema_is_refused():
     data = LEASE.to_json()
     del data["label"]
     data["schema"] = 7
-    with pytest.raises(LeaseFormatError, match="does not have schema 8"):
+    with pytest.raises(LeaseFormatError, match="does not have schema 9"):
         Lease.from_json(data)
+
+
+def test_a_lease_file_of_schema_8_is_read():
+    # Schema 9 only added a void reason, so every file of schema 8 is a valid file of schema 9,
+    # and the leases of an earlier banksman stay after the upgrade.
+    lease = replace(LEASE, label="login-tests")
+    data = lease.to_json()
+    data["schema"] = 8
+    assert Lease.from_json(data) == lease
+    assert lease.to_json()["schema"] == LEASE_SCHEMA
+
+
+@pytest.mark.parametrize("schema", [[], {}, True, "9", 9.5])
+def test_a_lease_file_with_a_schema_that_is_not_a_number_is_refused(schema):
+    data = LEASE.to_json()
+    data["schema"] = schema
+    with pytest.raises(LeaseFormatError, match="does not have schema 9"):
+        Lease.from_json(data)
+
+
+def test_a_lease_that_the_reaper_writes_for_a_free_instance_has_a_reason():
+    data = replace(LEASE, state="draining", drain_deadline=10.0, void_reason="free_timeout")
+    assert Lease.from_json(data.to_json()).void_reason == "free_timeout"
 
 
 def _without_awake(data):

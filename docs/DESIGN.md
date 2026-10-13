@@ -135,7 +135,10 @@ leases instead.
   late take-back never acts on a newer lease. A lease whose instance `acquire` starts or resets
   names that process in the same way (section 6): when the lease becomes void during the start
   or the reset, it drains, and it is taken back only after that process has ended. So a
-  take-back never runs next to a start or a reset.
+  take-back never runs next to a start or a reset. The reaper also ends a free emulator that
+  banksman started, after the free timeout of its kind: under the lock, it first writes a
+  `draining` lease of its own for the emulator, and then takes that lease back in the same way
+  (section 8).
 - **The serial.** A lease of an instance that runs records its serial: the address that tools
   such as adb use, for example `emulator-5554`. Only discovery (section 8), or a start that
   banksman performs (section 6), sets it, never the holder, because `banksman run` and the hooks
@@ -302,6 +305,7 @@ not code.
   preset = "android-emulator"
   preselect = ["qa_*"]
   boot_timeout = "8m"
+  free_timeout = "30m"
   on_acquire = ["/usr/local/bin/reset-avd"]
   on_void = ["/usr/local/bin/stop-avd"]
 
@@ -370,6 +374,13 @@ not code.
   not start (section 6): `"skip"`, the default, never grants it, and `"grant"` grants it after
   the instances that banksman knows. It is valid only with the `android-emulator` and
   `android-remote` presets, whose instances banksman starts.
+- **`free_timeout`** is how long a free emulator that banksman started keeps running without a
+  lease, for example `"30m"`, counted in awake time. The reaper then ends it (section 8), and the
+  next request with `--start` starts the AVD again. It is valid only with the
+  `android-emulator` preset, and `[defaults]` cannot set it. It is `"off"` by default: a free
+  emulator then runs until a void lease of its AVD ends it, or the machine restarts. Like the
+  hook, the reaper reads it from the current configuration, so a change applies at once, also
+  to the emulators that run now.
 - **`on_acquire`** is a command that resets an instance before a run gets it. `acquire` runs
   it for each new lease of the kind, after it writes the lease and outside the lock, with the
   hook contract above. Its serial is the one that the discovery of the request found, seconds
@@ -703,7 +714,8 @@ holdings apart (section 9).
 
   **The record.** `<kind>-emulators.json` lists the emulators that banksman knows: the ones that
   it started, and the ones that ran when a lease of their AVD ended (section 6), each with its
-  pid, its start time, the boot of the machine, and whether banksman started it. An entry
+  pid, its start time, the boot of the machine, whether banksman started it, and since when no
+  lease of its AVD has existed. An entry
   whose process has ended, or that belongs to an earlier boot, goes. An allowed AVD that runs
   is managed only while the emulator of its entry is its only emulator. So an AVD that also
   runs as another emulator, for example one with `-read-only` that a person started, is
@@ -723,6 +735,30 @@ holdings apart (section 9).
   quarantined. An emulator that the holder started stays, and banksman records it. An
   `acquire --start` that is killed in the middle, for example by the time limit of an agent,
   leaves the lease `booting`, and the reaper ends the emulator after the boot deadline.
+
+  **The free timeout.** Each emulator uses several GB of memory. With `free_timeout` (section 5),
+  the reaper also ends a free emulator that banksman started when no lease of its AVD has
+  existed for that time. The record keeps since when the AVD has no lease, in awake time: a
+  release sets it, the reaper sets it when it finds no lease file of the AVD and the record has
+  no time, for example after a forced release, and the reaper clears it when it finds a lease
+  file of the AVD in any state. The reaper decides under the lock of the lease store, and in the
+  same lock it writes a lease of its own for the AVD: a `draining` lease with the owner
+  `banksman`, no owner process, the serial of the emulator, the void reason `free_timeout`, and
+  itself in the fields that name a reaper. Only then does it end the emulator, as for a void
+  lease, and run the `on_void` hook of the kind; then it deletes the lease. So a request during
+  the end sees the AVD in use and waits instead of getting an emulator that ends, the adb guard
+  refuses an agent's device command on it, only one reaper ends it, and a reaper that ends in
+  the middle leaves the end to the next one. An emulator that does not end quarantines the AVD.
+  The end can still finish after the discovery of a request saw the emulator run and before the
+  grant. So `acquire` checks the emulators that banksman knew before its discovery: when the
+  emulator of a new lease that it does not start has ended, it gives the new leases back and
+  looks again, and the next look starts the AVD on `--start`. Its lease then keeps the reaper
+  away, so the check holds.
+  The reaper never ends an emulator that banksman did not start. The log records the end as a
+  `reap` event with the reason `free_timeout`, and `status` shows no planned end: the reaper
+  runs only at the start of a command, so a free emulator ends at the first command after its
+  free timeout. To end free emulators also while no agent works, for example at night, run
+  `banksman reap` at a fixed interval, for example every 5 minutes with launchd or cron.
 - **Remote devices.** `preset = "android-remote"` offers the physical devices of Android
   Device Streaming, a service that reserves a real device in a lab and forwards it to the
   local adb server as `localhost:<port>`. The `android` command line tool does that, and
@@ -947,7 +983,9 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   time between two touches, both in awake time. They are the data for tuning the hard cap and
   the idle timeout. A quarantine records its problem, or the scripts that still ran at the
   drain deadline and whether stopping was on for the kind, so that an operator can see what
-  the reaper would have stopped before turning `stop = true` on (section 4).
+  the reaper would have stopped before turning `stop = true` on (section 4). The end of a free
+  emulator after its free timeout is a reap with the reason `free_timeout` and the holder
+  `banksman` (section 8).
 - **The log file** is `~/.local/state/banksman/log.jsonl`, with the home directory from the
   user database. It is outside `/tmp`, as the quarantines are, because the history must
   outlive restarts and cleaners of temporary files. It has one JSON object for each event,
@@ -1237,7 +1275,11 @@ permission rules can refuse all of them with one pattern, including ones added l
 - The lease schema is the version of the lease file format. It changes on every change of
   the format, also on a new field, because a banksman that does not know a field would drop
   it when it writes the file again. So a lease file with a newer lease schema stops every
-  command (section 3).
+  command (section 3). A new value of a field, such as a new void reason, changes it too,
+  because an earlier banksman refuses the file. banksman also reads the files of an earlier
+  lease schema when each of them is a valid file of its own schema: schema 9 only added the
+  void reason `free_timeout`, so banksman reads lease files of schema 8, and an upgrade does
+  not lose the leases that are held.
 - The output schema is the version of the JSON that the commands print and of the lines of
   the log. A new field does not change it, so a reader ignores the fields that it does not
   know. It changes when a field is removed or renamed, or changes its type or its meaning. A
@@ -1246,7 +1288,8 @@ permission rules can refuse all of them with one pattern, including ones added l
   decision about the number.
 - The document of a `discover` hook has a schema of its own (section 8), and so have the
   catalogue and the record of reservations of the `android-remote` preset, and the record of
-  the emulators of the `android-emulator` preset.
+  the emulators of the `android-emulator` preset. That record has schema 2, which added since
+  when no lease of each AVD has existed; banksman also reads schema 1, without that time.
 - The surfaces treated as public API are the CLI (commands, flags, exit codes, `KEY=value`
   output), the JSON output, the lease file format, the log file format, the configuration
   files, and the hook contract.
@@ -1382,15 +1425,14 @@ Done:
   console port that banksman chooses before the boot, a take-back that ends only the
   emulators that banksman started, and unmanaged instances, which a request does not get
   unless the kind says so.
+- The free timeout: the reaper ends a free emulator that banksman started after a set time
+  without a lease, under a lease of its own, so that no request gets it meanwhile.
 
 Next:
 
 - `explain`, and a queue for the callers that wait.
 - Keeping a lease while an agent waits for a person, and getting the same resource back
   after a lease ends.
-- Ending a free emulator that banksman started after a set time without a lease, because each
-  emulator uses several GB of memory. The reaper must then hold a lease of its own while it
-  ends the emulator, so that no request gets it meanwhile.
 
 ## 17. Open questions
 

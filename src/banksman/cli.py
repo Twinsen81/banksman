@@ -85,6 +85,7 @@ from banksman.sanitize import clean
 from banksman.store import (
     Busy,
     Choice,
+    FindUnused,
     Granted,
     Need,
     NotHeld,
@@ -93,11 +94,12 @@ from banksman.store import (
     Stopping,
     Store,
     TakeBack,
+    Unused,
     default_log_path,
     default_state_dir,
     satisfiable,
 )
-from banksman.system import Machine
+from banksman.system import Machine, System
 
 VERSION_LINE = (
     f"banksman {__version__} (output schema {OUTPUT_SCHEMA}, lease schema {LEASE_SCHEMA})"
@@ -648,12 +650,14 @@ def _print_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
 
 
 def _open_store(config: Config) -> Store:
+    machine = Machine()
     return Store(
         default_state_dir(),
-        Machine(),
+        machine,
         take_back=_take_back(config),
         stopping=_stopping(config),
         record=_recorder(),
+        unused=_unused(config, machine),
     )
 
 
@@ -700,6 +704,26 @@ def _take_back(config: Config) -> TakeBack:
         return failure is None
 
     return take_back
+
+
+def _unused(config: Config, system: System) -> FindUnused:
+    # Read from the current configuration, as the on_void hook: when the operator turns the free
+    # timeout off, it is off at once.
+    def unused(leased: frozenset[str], now: float) -> list[Unused]:
+        found = []
+        for kind in config.kinds.values():
+            if kind.preset != ANDROID_EMULATOR or kind.free_timeout is None:
+                continue
+            # A record that cannot be read ends nothing, and status shows why in a note. It must
+            # not fail the command, which can be any command of any caller.
+            with contextlib.suppress(BanksmanError, OSError):
+                found.extend(
+                    Unused(entry.resource, kind.name, entry.serial)
+                    for entry in emulator.unused(kind, leased, now, system)
+                )
+        return found
+
+    return unused
 
 
 def _serial_found(config: Config, kind: Kind, lease: Lease) -> str | None:
@@ -1277,6 +1301,7 @@ def _acquire(
         # operator removes stops at once, also for a caller that waits.
         config = load_config()
         store, _ = _reaped_store(config)
+        seen_before = _emulators_now(config, machine)
         found = search(config, load_inventory(), parts, clock=machine.clock)
         needs = [
             Need(
@@ -1339,6 +1364,15 @@ def _acquire(
             paid=paid,
             label=label,
         )
+        starts = {choice.resource for need in needs for choice in need.choices if choice.start}
+        if granted is not None and _ended_since(seen_before, granted, starts, machine):
+            # The reaper of another command ended an emulator that this discovery saw run, for
+            # example after its free timeout, and its lease ended before the grant. The facts of
+            # this look are out of date, so the request gives its new leases back and looks again.
+            for grant in granted:
+                if not grant.kept:
+                    _give_back(store, grant.lease)
+            continue
         if granted is not None:
             break
         left = give_up - machine.clock()
@@ -1362,7 +1396,6 @@ def _acquire(
     # A kept remote device that is not connected now is connected again first, so that a
     # request that cannot get it spends no start.
     granted = _reconnect_kept(store, config, granted, found.serials)
-    starts = {choice.resource for need in needs for choice in need.choices if choice.start}
     leases = _prepare(store, config, granted, starts)
     reset = [
         lease
@@ -1534,6 +1567,44 @@ def _some(candidates: Sequence[Candidate], shown: int = 10) -> str:
     names = ", ".join(candidate.resource for candidate in candidates[:shown])
     more = len(candidates) - shown
     return f"{names}, and {more} more" if more > 0 else names
+
+
+def _emulators_now(config: Config, system: System) -> dict[str, emulator.Known]:
+    """Return the emulators that banksman knows and that run now, by AVD: the only emulators that
+    banksman ends."""
+    known: dict[str, emulator.Known] = {}
+    for kind in config.kinds.values():
+        if kind.preset == ANDROID_EMULATOR:
+            # Without the record, discovery counts no emulator as one that banksman knows.
+            with contextlib.suppress(BanksmanError):
+                known.update(emulator.load(kind, system))
+    return known
+
+
+def _ended_since(
+    known: Mapping[str, emulator.Known],
+    granted: Sequence[Granted],
+    starts: Collection[str],
+    system: System,
+) -> bool:
+    """Whether a new lease that does not start its instance got an emulator that ran before the
+    discovery and has ended since.
+
+    A held lease keeps the reaper from its emulator, so the check after the grant holds.
+    """
+    ended = [
+        known[grant.lease.resource]
+        for grant in granted
+        if not grant.kept and grant.lease.resource in known and grant.lease.resource not in starts
+    ]
+    if not ended:
+        return False
+    try:
+        running = system.running([entry.pid for entry in ended])
+    except BanksmanError:
+        # A check that cannot run keeps the grant, as before the check existed.
+        return False
+    return any(running.get(entry.pid) != entry.started for entry in ended)
 
 
 def _choice(candidate: Candidate, config: Config, start: bool) -> Choice:

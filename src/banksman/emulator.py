@@ -8,7 +8,8 @@ is booting until the Android system has completed its boot.
 banksman records each emulator that it starts, and each emulator that runs when a lease of its
 AVD ends, by its pid and start time. Every other emulator of an allowed AVD is unmanaged: a
 person or a program outside banksman started it, and a request does not get it unless its kind
-says so. The reaper ends only an emulator that banksman started.
+says so. The reaper ends only an emulator that banksman started: when a lease of it becomes void,
+or, with the free timeout of its kind, when no lease of its AVD has existed for that time.
 """
 
 from __future__ import annotations
@@ -21,9 +22,9 @@ import signal
 import socket
 import subprocess
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -36,11 +37,14 @@ from banksman.store import STATE_DIR_ENV, lasting_dir
 from banksman.system import Machine, Process, System
 
 EMULATOR_DIR_ENV = "BANKSMAN_EMULATOR_DIR"
-FILE_SCHEMA = 1
+FILE_SCHEMA = 2
+# Schema 1 had no free_since, so its entries are read without one.
+_READABLE_SCHEMAS = frozenset({1, FILE_SCHEMA})
 # adb finds an emulator by itself only when its console port is one of the even ports from 5554
 # to 5584; the adb port is the next one.
 FIRST_PORT = 5554
 LAST_PORT = 5584
+_SERIAL_PREFIX = "emulator-"
 _POLL_SECONDS = 1.0
 _STOP_SECONDS = 20.0
 _KILL_SECONDS = 10.0
@@ -74,6 +78,13 @@ class Known:
     # When banksman recorded it, in wall-clock time, for people only.
     at: float
     port: int | None = None
+    # Since when no lease of its AVD has existed, in awake time on its boot, or None while a lease
+    # exists. The free timeout of the kind counts from here.
+    free_since: float | None = None
+
+    @property
+    def serial(self) -> str | None:
+        return None if self.port is None else _serial(self.port)
 
 
 @dataclass(frozen=True)
@@ -209,7 +220,7 @@ def load(kind: Kind, system: System) -> dict[str, Known]:
         return {}
     if (
         not isinstance(data, dict)
-        or data.get("schema") != FILE_SCHEMA
+        or not _is_schema(data.get("schema"))
         or not isinstance(data.get("emulators"), list)
     ):
         raise EmulatorError(f"{_path(kind)} is not valid")
@@ -251,11 +262,51 @@ def adopt(kind: Kind, resource: str, system: System | None = None) -> None:
         return
     (process,) = running
     boot = system.boot_id()
+    now = system.clock()
     with changing(kind, system) as known:
-        if resource not in known:
-            known[resource] = Known(
-                resource, process.pid, process.started, boot, False, time.time()
-            )
+        entry = known.get(resource)
+        if entry is None:
+            entry = Known(resource, process.pid, process.started, boot, False, time.time())
+        known[resource] = replace(entry, free_since=now)
+
+
+def unused(
+    kind: Kind, leased: Collection[str], now: float, system: System | None = None
+) -> list[Known]:
+    """Return the emulators of a kind that banksman started and whose AVD has had no lease for
+    the free timeout of the kind, and record since when each AVD has no lease.
+
+    `leased` has the AVDs that have a lease file in any state, and `now` is the awake time. The
+    caller holds the lock of the lease store, so that no request gets an AVD before the reaper
+    writes its own lease of it.
+    """
+    if kind.free_timeout is None:
+        return []
+    system = Machine() if system is None else system
+    known = load(kind, system)
+    # The record changes only when a lease of an AVD starts or ends, so most commands read it
+    # without its lock and write nothing.
+    if any(_marked(entry, leased, now) != entry for entry in known.values()):
+        with changing(kind, system) as known:
+            for resource, entry in known.items():
+                known[resource] = _marked(entry, leased, now)
+    return [
+        entry
+        for entry in known.values()
+        if entry.created
+        and entry.free_since is not None
+        and now - entry.free_since >= kind.free_timeout
+    ]
+
+
+def _marked(entry: Known, leased: Collection[str], now: float) -> Known:
+    if entry.resource in leased:
+        return replace(entry, free_since=None)
+    if entry.free_since is None:
+        # A lease ended without a release that recorded it, for example a forced release, or
+        # a command that ended between the release and the record.
+        return replace(entry, free_since=now)
+    return entry
 
 
 def take_back(kind: Kind, resource: str, system: System | None = None) -> str | None:
@@ -348,8 +399,8 @@ def start(
             f"no console port from {FIRST_PORT} to {LAST_PORT} is free, so adb could not find"
             " another emulator"
         )
-    serial = claim([f"emulator-{port}" for port in ports])
-    port = int(serial.removeprefix("emulator-"))
+    serial = claim([_serial(port) for port in ports])
+    port = int(serial.removeprefix(_SERIAL_PREFIX))
     command = [str(program(settings)), "-avd", resource, "-port", str(port), *kind.start_args]
     log = _open_log(resource)
     try:
@@ -473,6 +524,10 @@ def _last_line(resource: str) -> str:
     return f": {line}"
 
 
+def _serial(port: int) -> str:
+    return f"{_SERIAL_PREFIX}{port}"
+
+
 def _runs(system: System, pid: int, started: str) -> bool:
     return system.running([pid]).get(pid) == started
 
@@ -497,7 +552,7 @@ def _known(entry: object) -> Known | None:
         return None
     resource, pid, started = entry.get("resource"), entry.get("pid"), entry.get("started")
     boot, created = entry.get("boot"), entry.get("created")
-    at, port = entry.get("at"), entry.get("port")
+    at, port, free_since = entry.get("at"), entry.get("port"), entry.get("free_since")
     if (
         not isinstance(resource, str)
         or RESOURCE_NAME.fullmatch(resource) is None
@@ -509,13 +564,20 @@ def _known(entry: object) -> Known | None:
         or not isinstance(boot, str)
         or not boot
         or not isinstance(created, bool)
-        or not isinstance(at, (int, float))
-        or isinstance(at, bool)
-        or not math.isfinite(at)
+        or not _is_number(at)
         or not (port is None or (isinstance(port, int) and not isinstance(port, bool)))
+        or not (free_since is None or _is_number(free_since))
     ):
         return None
-    return Known(resource, pid, started, boot, created, at, port)
+    return Known(resource, pid, started, boot, created, at, port, free_since)
+
+
+def _is_schema(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value in _READABLE_SCHEMAS
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _known_json(entry: Known) -> dict[str, object]:
@@ -527,4 +589,5 @@ def _known_json(entry: Known) -> dict[str, object]:
         "created": entry.created,
         "at": entry.at,
         "port": entry.port,
+        "free_since": entry.free_since,
     }

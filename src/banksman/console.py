@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 from banksman.discovery import ENDS, FactValue, handle_of, serial_of
 from banksman.history import ACQUIRE, FORCE_RELEASE, QUARANTINE, RELEASE, VOID, Event
-from banksman.lease import DRAINING, VOID_REASONS, Lease, User, free_by
+from banksman.lease import DRAINING, FREE_TIMEOUT, VOID_REASONS, Lease, User, free_by
 from banksman.request import Search
 from banksman.sanitize import clean
 from banksman.store import Snapshot
@@ -411,6 +411,8 @@ def _details(event: Event) -> str:
         if event.running:
             text += f"; its scripts still ran: {processes_text(event.running)}"
         return text
+    if event.reason == FREE_TIMEOUT:
+        return "banksman ended the instance, which had no lease for the free timeout of its kind"
     # A reap frees the resource of a void or released lease.
     return f"the resource is free again ({void_text(event.reason)})"
 

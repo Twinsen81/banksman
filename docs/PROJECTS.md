@@ -170,7 +170,9 @@ banksman acquire --holding ui-tests --where form=phone --start --for "UI tests" 
   during the boot, the lease stays `booting` until the boot deadline, a new request of the
   same holding waits for it, and the reaper then ends the emulator.
 - A release leaves the emulator running, so the next request gets it without a boot. The
-  reaper ends an emulator that banksman started when its lease becomes void.
+  reaper ends an emulator that banksman started when its lease becomes void, and, with the
+  `free_timeout` of the kind, when no lease of its AVD has existed for that time. So a script
+  uses `--start` also for an AVD that ran before.
 - A preparation of the device that is not an app setup, such as a setting of the system, stays
   in an `on_acquire` hook of the kind. App setup stays in the scripts of the project.
 
