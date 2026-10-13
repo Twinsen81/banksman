@@ -1525,7 +1525,8 @@ def test_a_record_of_ends_that_cannot_be_written_does_not_stop_the_release(
     warnings = []
     store = Store(state_dir, system, warn=warnings.append)
     lease = store.acquire("phone-1", "device", Holder(OWNER))
-    ended_path.parent.mkdir(parents=True)
+    store.release("phone-1", lease.lease_id)
+    lease = store.acquire("phone-1", "device", Holder(OTHER))
     ended_path.parent.chmod(0o777)
     assert store.release("phone-1", lease.lease_id) is None
     assert resources(store) == []
@@ -1533,6 +1534,9 @@ def test_a_record_of_ends_that_cannot_be_written_does_not_stop_the_release(
         f"the end of the lease on phone-1 is not recorded: group or others can write to"
         f" {ended_path.parent}"
     ]
+    # The record of the release by OWNER is gone too, so OWNER does not count as the last holder.
+    assert not ended_path.exists()
+    assert grant_one(store, [Choice("phone-1", "device")], Holder(OWNER)).previous is None
 
 
 def test_the_record_of_ends_is_kept_outside_the_state_directory(monkeypatch, tmp_path):
@@ -1630,6 +1634,21 @@ def test_the_reapers_end_of_a_free_instance_keeps_the_holder_before_it(
     use = last_use(store, "qa_phone")
     assert (use.owner, use.how, use.hook) == (OWNER, "release", on_void)
     assert use.left_as_is(OWNER, "boot-1", None) is not on_void
+
+
+def test_after_a_restart_the_reapers_quarantined_lease_keeps_the_holder_before_it(
+    state_dir, system
+):
+    store = Store(state_dir, system)
+    lease = store.acquire("qa_phone", "emulator", Holder(OWNER))
+    store.release("qa_phone", lease.lease_id)
+    failing = Store(state_dir, system, take_back=lambda lease: False, unused=ending("qa_phone"))
+    assert reaped(failing) == [("qa_phone", FREE_TIMEOUT, QUARANTINED)]
+    # The take-back after the restart gives the reaper's lease the reason rebooted.
+    system.boot = "boot-2"
+    assert reaped(store) == [("qa_phone", REBOOTED, RELEASED)]
+    use = last_use(store, "qa_phone")
+    assert (use.owner, use.how, use.boot_id) == (OWNER, "release", "boot-1")
 
 
 def test_a_lease_that_was_never_ready_keeps_the_holder_before_it(store, system):

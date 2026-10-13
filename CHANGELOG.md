@@ -315,7 +315,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.local/state/banksman/ended.json`, so that it outlives a restart, and it now keeps the
   last lease that a holder used for each resource; its schema is now 2, and a record of
   schema 1 counts as empty. A record that cannot be written no longer stops the end of a
-  lease: the command warns. `BANKSMAN_ENDED` changes its path for tests. The lease schema and
+  lease: the command warns, and deletes the record, so that it does not name an earlier holder
+  as the last one. `BANKSMAN_ENDED` changes its path for tests. The lease schema and
   the output schema do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of

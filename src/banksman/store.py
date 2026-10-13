@@ -1392,7 +1392,10 @@ class Store:
             )
         except (StoreError, OSError) as exc:
             # The lease ends all the same. Without the record, the next request can use facts
-            # from before this end, and gets no preference for the instance that it used last.
+            # from before this end, and gets no preference for the instance that it used last. The
+            # record goes, so that it does not name the holder before this lease as the last one.
+            with contextlib.suppress(OSError):
+                os.unlink(self.ended_path)
             reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
             self._warn(f"the end of the lease on {resource} is not recorded: {reason}")
 
@@ -1492,8 +1495,10 @@ def _part(
 def _used(lease: Lease) -> bool:
     """Whether a holder could use the instance under the lease: it was ready, and it is not the
     reaper's lease of a free instance."""
-    # A booting lease has a boot deadline until it is ready, also after it became void.
-    return lease.boot_deadline is None and lease.void_reason != FREE_TIMEOUT
+    # A booting lease has a boot deadline until it is ready, also after it became void. The
+    # reaper's lease gets the void reason rebooted when it is taken back after a restart, so its
+    # owner tells it apart: the owner of a holder is the path of a worktree.
+    return lease.boot_deadline is None and lease.owner != REAPER_OWNER
 
 
 def _forced(how: str, before: str) -> str:

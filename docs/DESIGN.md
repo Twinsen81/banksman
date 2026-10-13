@@ -188,8 +188,9 @@ leases instead.
   in every look never keep a request looking without a pause. The awake time of an earlier
   boot cannot be compared with this boot's, so such an end does not count. A file of another
   schema, or that cannot be read, counts as empty, and the next end replaces it. A file that
-  cannot be written does not stop the end of the lease: the command warns, and a request can
-  then use facts from before that end, as before the record existed. `BANKSMAN_ENDED` changes
+  cannot be written does not stop the end of the lease: the command warns and deletes the file,
+  so that it does not name an earlier holder as the last one, and a request can then use facts
+  from before that end, as before the record existed. `BANKSMAN_ENDED` changes
   the path for tests. When only `BANKSMAN_STATE_DIR` is set, the file is next to that
   directory. An instance that ends while no lease of it ends, for example an emulator that
   crashes, is not covered: for the holder, that is the same as an instance that ends just after
