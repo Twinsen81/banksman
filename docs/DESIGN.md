@@ -749,6 +749,11 @@ holdings apart (section 9).
   the end sees the AVD in use and waits instead of getting an emulator that ends, the adb guard
   refuses an agent's device command on it, only one reaper ends it, and a reaper that ends in
   the middle leaves the end to the next one. An emulator that does not end quarantines the AVD.
+  The end can still finish after the discovery of a request saw the emulator run and before the
+  grant. So `acquire` checks the emulators that banksman knew before its discovery: when the
+  emulator of a new lease that it does not start has ended, it gives the new leases back and
+  looks again, and the next look starts the AVD on `--start`. Its lease then keeps the reaper
+  away, so the check holds.
   The reaper never ends an emulator that banksman did not start. The log records the end as a
   `reap` event with the reason `free_timeout`, and `status` shows no planned end: the reaper
   runs only at the start of a command, so a free emulator ends at the first command after its

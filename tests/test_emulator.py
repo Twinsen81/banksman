@@ -11,7 +11,7 @@ import time
 import pytest
 from helpers import SRC, FakeSdk, FakeSystem, edit_lease, table_rows, write_config
 
-from banksman import emulator
+from banksman import cli, emulator
 from banksman.cli import main
 from banksman.config import Kind
 from banksman.errors import BanksmanError
@@ -164,6 +164,16 @@ def test_a_record_of_schema_1_is_read_without_free_times(system):
     path.chmod(0o600)
     record = emulator.load(kind(), system)["qa_phone"]
     assert (record.free_since, record.serial) == (None, "emulator-5554")
+
+
+@pytest.mark.parametrize("schema", [[], {}, True, 3])
+def test_a_record_with_a_schema_that_banksman_does_not_read_is_not_valid(system, schema):
+    path = emulator.default_emulator_dir() / "emulator-emulators.json"
+    path.parent.mkdir(mode=0o700, parents=True)
+    path.write_text(json.dumps({"schema": schema, "emulators": []}))
+    path.chmod(0o600)
+    with pytest.raises(emulator.EmulatorError, match="is not valid"):
+        emulator.load(kind(), system)
 
 
 def started_by_banksman(system, *names):
@@ -770,6 +780,34 @@ def test_a_request_waits_while_the_reaper_ends_a_free_emulator(
     assert lease == ("draining", "banksman", values["SERIAL"], "free_timeout")
     assert code == 4 and "in use" in err, err
     assert leases() == {}
+
+
+def test_an_emulator_that_ends_after_the_discovery_of_a_request_is_started_again(
+    capsys, config_path, sdk, monkeypatch
+):
+    configure(config_path, sdk, 'free_timeout = "30m"\n')
+    status, first, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", first["LEASE"]]) == 0
+    search = cli.search
+    looks = []
+
+    def ended_meanwhile(*arguments, **options):
+        found = search(*arguments, **options)
+        if not looks:
+            # The reaper of another command ends the emulator after this discovery saw it run,
+            # and deletes its own lease before the grant.
+            record = known()["qa_phone"]
+            assert emulator.stop(Machine(), record.pid, record.started)
+        looks.append(found)
+        return found
+
+    monkeypatch.setattr(cli, "search", ended_meanwhile)
+    status, again, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert (status, again["STATE"], len(looks)) == (0, "ready", 2), err
+    # The second look found the AVD stopped, so the request started it again.
+    assert len(sdk.emulator_calls()) == 2
+    assert runs(known()["qa_phone"].pid)
 
 
 def test_a_free_timeout_that_is_off_keeps_free_emulators(capsys, config_path, sdk, state_dir):

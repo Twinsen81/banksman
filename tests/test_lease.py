@@ -162,6 +162,14 @@ def test_a_lease_file_of_schema_8_is_read():
     assert lease.to_json()["schema"] == LEASE_SCHEMA
 
 
+@pytest.mark.parametrize("schema", [[], {}, True, "9", 9.5])
+def test_a_lease_file_with_a_schema_that_is_not_a_number_is_refused(schema):
+    data = LEASE.to_json()
+    data["schema"] = schema
+    with pytest.raises(LeaseFormatError, match="does not have schema 9"):
+        Lease.from_json(data)
+
+
 def test_a_lease_that_the_reaper_writes_for_a_free_instance_has_a_reason():
     data = replace(LEASE, state="draining", drain_deadline=10.0, void_reason="free_timeout")
     assert Lease.from_json(data.to_json()).void_reason == "free_timeout"

@@ -259,7 +259,7 @@ class Lease:
     def from_json(cls, data: object) -> Lease:
         if not isinstance(data, dict):
             raise LeaseFormatError("the file does not hold a JSON object")
-        if data.get("schema") not in READABLE_LEASE_SCHEMAS:
+        if not _is_readable(data.get("schema")):
             raise LeaseFormatError(f"the file does not have schema {LEASE_SCHEMA}")
         awake = data.get("awake")
         if not isinstance(awake, dict):
@@ -415,6 +415,15 @@ def _get(data: Mapping[str, object], key: str, check: Callable[[object], bool]) 
 
 def _optional(check: Callable[[object], bool]) -> Callable[[object], bool]:
     return lambda value: value is None or check(value)
+
+
+def _is_readable(schema: object) -> bool:
+    # A schema that is not a number, such as a list, is damage, not a newer schema.
+    return (
+        isinstance(schema, int)
+        and not isinstance(schema, bool)
+        and schema in READABLE_LEASE_SCHEMAS
+    )
 
 
 def _is_text(value: object) -> bool:

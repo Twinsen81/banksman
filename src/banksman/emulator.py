@@ -220,7 +220,7 @@ def load(kind: Kind, system: System) -> dict[str, Known]:
         return {}
     if (
         not isinstance(data, dict)
-        or data.get("schema") not in _READABLE_SCHEMAS
+        or not _is_schema(data.get("schema"))
         or not isinstance(data.get("emulators"), list)
     ):
         raise EmulatorError(f"{_path(kind)} is not valid")
@@ -570,6 +570,10 @@ def _known(entry: object) -> Known | None:
     ):
         return None
     return Known(resource, pid, started, boot, created, at, port, free_since)
+
+
+def _is_schema(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value in _READABLE_SCHEMAS
 
 
 def _is_number(value: object) -> bool:
