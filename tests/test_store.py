@@ -17,10 +17,12 @@ from helpers import SRC, age_lease, drain, edit_lease, reap_in_child
 from banksman import LEASE_SCHEMA
 from banksman.errors import BanksmanError
 from banksman.fencing import Refused
+from banksman.history import REAP
 from banksman.lease import (
     BOOT_TIMEOUT,
     BOOTING,
     DRAINING,
+    FREE_TIMEOUT,
     HARD_CAP,
     IDLE,
     OWNER_GONE,
@@ -43,6 +45,7 @@ from banksman.store import (
     Snapshot,
     StoreError,
     Unreadable,
+    Unused,
     default_quarantine_dir,
     default_state_dir,
     peek,
@@ -1317,6 +1320,97 @@ def test_force_release_waits_for_a_take_back_that_runs(state_dir, system):
     store.acquire("phone-1", "device", Holder(OWNER))
     system.advance(20 * 60)
     assert reaped(store) == [("phone-1", IDLE, RELEASED)]
+
+
+# Free instances that the reaper ends.
+
+
+def ending(*resources):
+    """Return a search for free instances that finds these resources, and record what it got."""
+    calls = []
+
+    def unused(leased, now):
+        calls.append((leased, now))
+        return [Unused(resource, "emulator", f"serial-of-{resource}") for resource in resources]
+
+    unused.calls = calls
+    return unused
+
+
+def test_the_reaper_ends_a_free_instance_under_a_lease_of_its_own(state_dir, system):
+    seen = []
+
+    def take_back(lease):
+        seen.append(lease)
+        # A request during the end waits, as for an instance in use.
+        other = Store(state_dir, system)
+        assert grant_one(other, [Choice("qa_phone", "emulator")], Holder(OTHER)) is None
+        with pytest.raises(BanksmanError, match=f"process {os.getpid()} takes qa_phone back"):
+            other.force_release("qa_phone")
+        return True
+
+    events = []
+    store = Store(
+        state_dir, system, take_back=take_back, unused=ending("qa_phone"), record=events.append
+    )
+    assert reaped(store) == [("qa_phone", FREE_TIMEOUT, RELEASED)]
+    (lease,) = seen
+    assert (lease.state, lease.owner, lease.owner_pid, lease.serial) == (
+        DRAINING,
+        "banksman",
+        None,
+        "serial-of-qa_phone",
+    )
+    assert (lease.reaper_pid, lease.attempts) == (os.getpid(), 1)
+    assert resources(store) == []
+    assert [(event.event, event.resource, event.reason) for event in events] == [
+        (REAP, "qa_phone", FREE_TIMEOUT)
+    ]
+
+
+def test_the_search_for_free_instances_gets_every_resource_with_a_lease_file(state_dir, system):
+    unused = ending()
+    store = Store(state_dir, system, unused=unused)
+    store.acquire("phone-1", "device", Holder(OWNER))
+    (state_dir / "phone-2.json").write_text("not json")
+    assert reaped(store) == []
+    assert unused.calls == [(frozenset({"phone-1", "phone-2"}), system.clock())]
+
+
+def test_the_reaper_never_ends_an_instance_that_has_a_lease(state_dir, system):
+    def take_back(lease):
+        pytest.fail("the reaper took the lease back")
+
+    store = Store(state_dir, system, take_back=take_back, unused=ending("phone-1"))
+    lease = store.acquire("phone-1", "device", Holder(OWNER))
+    assert reaped(store) == []
+    assert store.snapshot().leases == [lease]
+
+
+def test_a_free_instance_that_does_not_end_is_quarantined(state_dir, system):
+    store = Store(state_dir, system, take_back=lambda lease: False, unused=ending("qa_phone"))
+    assert reaped(store) == [("qa_phone", FREE_TIMEOUT, QUARANTINED)]
+    assert lease_file(state_dir, "qa_phone")["state"] == QUARANTINED
+    with pytest.raises(Busy, match="quarantined"):
+        store.acquire("qa_phone", "emulator", Holder(OTHER))
+
+
+def test_the_end_of_a_free_instance_that_a_reaper_left_is_finished(state_dir, system):
+    attempts = []
+
+    def take_back(lease):
+        attempts.append(lease.attempts)
+        if len(attempts) == 1:
+            raise KeyboardInterrupt
+        return True
+
+    store = Store(state_dir, system, take_back=take_back, unused=ending("qa_phone"))
+    with pytest.raises(KeyboardInterrupt):
+        store.reap()
+    # The reaper has ended. The next one takes its lease over, and writes no lease of its own.
+    edit_lease(state_dir, "qa_phone", lambda data: data.update(reaper_pid=4242))
+    assert reaped(store) == [("qa_phone", FREE_TIMEOUT, RELEASED)]
+    assert attempts == [1, 2]
 
 
 def test_a_restart_forgets_the_scripts_of_the_earlier_boot(state_dir, system):

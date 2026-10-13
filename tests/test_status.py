@@ -371,6 +371,15 @@ def test_the_log_text_says_why_a_release_drains():
     ]
 
 
+def test_the_log_text_says_that_banksman_ended_a_free_instance():
+    reaped = Event(1_790_000_000.0, "reap", "qa_phone", owner="banksman", reason="free_timeout")
+    (row,) = console.log_rows([reaped])
+    assert row[4:] == [
+        "banksman ended the instance, which had no lease for the free timeout of its kind",
+        "banksman",
+    ]
+
+
 def test_a_span_is_short():
     assert [console.span(seconds) for seconds in (0, 45, 26 * 60, 80 * 60)] == [
         "0s",

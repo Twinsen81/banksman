@@ -26,7 +26,9 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
   `banksman status` shows the devices that exist, and who holds them.
 - Add `--start` to get a device that runs: banksman then starts a granted emulator that does
   not run, and prints the grant when its boot has completed. Without `--start`, a granted
-  emulator may not run yet: start it yourself when it does not run.
+  emulator may not run yet: start it yourself when it does not run. banksman can end an
+  emulator that nobody has leased for some time, so use `--start` also for a device that ran
+  before.
 - `banksman held` lists the holdings of your agent process, with their labels, lease ids,
   devices, and serials. It also lists the holdings of the other subagents of your session: use
   only your own label.

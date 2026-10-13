@@ -53,7 +53,8 @@ resource, so an operator can also declare other resources, such as host ports or
   started outside banksman is not given to an agent.
 - **Starts emulators, when asked.** With `--start`, banksman starts a granted emulator that
   does not run, on a port that it chooses before the boot, so two parallel starts never mix
-  up their serials. It ends only the emulators that it started.
+  up their serials. It ends only the emulators that it started, also, with a free timeout,
+  the free ones that no lease has used for that time.
 - **A guard for raw adb calls, when the operator wants it.** An optional `adb` wrapper on the
   `PATH` refuses an agent's device command on a device that another holder leases, also when
   a script or an agent calls adb without banksman.

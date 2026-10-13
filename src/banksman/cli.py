@@ -85,6 +85,7 @@ from banksman.sanitize import clean
 from banksman.store import (
     Busy,
     Choice,
+    FindUnused,
     Granted,
     Need,
     NotHeld,
@@ -93,11 +94,12 @@ from banksman.store import (
     Stopping,
     Store,
     TakeBack,
+    Unused,
     default_log_path,
     default_state_dir,
     satisfiable,
 )
-from banksman.system import Machine
+from banksman.system import Machine, System
 
 VERSION_LINE = (
     f"banksman {__version__} (output schema {OUTPUT_SCHEMA}, lease schema {LEASE_SCHEMA})"
@@ -648,12 +650,14 @@ def _print_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
 
 
 def _open_store(config: Config) -> Store:
+    machine = Machine()
     return Store(
         default_state_dir(),
-        Machine(),
+        machine,
         take_back=_take_back(config),
         stopping=_stopping(config),
         record=_recorder(),
+        unused=_unused(config, machine),
     )
 
 
@@ -700,6 +704,26 @@ def _take_back(config: Config) -> TakeBack:
         return failure is None
 
     return take_back
+
+
+def _unused(config: Config, system: System) -> FindUnused:
+    # Read from the current configuration, as the on_void hook: when the operator turns the free
+    # timeout off, it is off at once.
+    def unused(leased: frozenset[str], now: float) -> list[Unused]:
+        found = []
+        for kind in config.kinds.values():
+            if kind.preset != ANDROID_EMULATOR or kind.free_timeout is None:
+                continue
+            # A record that cannot be read ends nothing, and status shows why in a note. It must
+            # not fail the command, which can be any command of any caller.
+            with contextlib.suppress(BanksmanError, OSError):
+                found.extend(
+                    Unused(entry.resource, kind.name, entry.serial)
+                    for entry in emulator.unused(kind, leased, now, system)
+                )
+        return found
+
+    return unused
 
 
 def _serial_found(config: Config, kind: Kind, lease: Lease) -> str | None:

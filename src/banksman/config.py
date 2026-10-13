@@ -46,6 +46,7 @@ _KIND_KEYS = (
     "project",
     "start_args",
     "unmanaged",
+    "free_timeout",
     "paid",
     "rank",
     "on_acquire",
@@ -110,6 +111,9 @@ class Kind:
     # SKIP or GRANT, for an instance of a preset in STARTED that runs, but that banksman did not
     # start and did not see run when a lease of it ended.
     unmanaged: str = SKIP
+    # After how many seconds of awake time without a lease the reaper ends an emulator that
+    # banksman started, for the android-emulator preset. None keeps it running.
+    free_timeout: int | None = None
 
     @property
     def discovered(self) -> bool:
@@ -385,6 +389,8 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
         raise _Invalid(
             f"{where}.unmanaged", f"applies only to the {' and '.join(STARTED)} presets"
         )
+    if "free_timeout" in table and preset != ANDROID_EMULATOR:
+        raise _Invalid(f"{where}.free_timeout", f"applies only to the {ANDROID_EMULATOR} preset")
     if unmanaged not in UNMANAGED:
         raise _Invalid(
             f"{where}.unmanaged",
@@ -411,6 +417,9 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
         project=project,  # type: ignore[arg-type]
         start_args=_start_args(table.get("start_args"), f"{where}.start_args"),
         unmanaged=unmanaged,  # type: ignore[arg-type]
+        free_timeout=_duration(
+            table.get("free_timeout", _OFF), "free_timeout", f"{where}.free_timeout"
+        ),
     )
 
 
@@ -456,9 +465,9 @@ def _timeouts(table: dict[str, object], where: str, base: Timeouts) -> Timeouts:
 
 
 def _duration(value: object, key: str, where: str) -> int | None:
-    # Only the idle timeout can be off: every lease must end at its hard cap, and a booting
-    # lease at its boot deadline.
-    can_be_off = key == "idle_timeout"
+    # Only the idle timeout and the free timeout can be off: every lease must end at its hard
+    # cap, and a booting lease at its boot deadline.
+    can_be_off = key in ("idle_timeout", "free_timeout")
     if can_be_off and value == _OFF:
         return None
     expected = 'a duration such as "20m"' + (', or "off"' if can_be_off else "")
