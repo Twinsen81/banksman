@@ -399,8 +399,8 @@ def test_agents_may_run_the_guide(capsys):
 
 
 
-# A holding whose lease is still booting: an acquire starts or resets its instance, or ended
-# before it was done, for example because the time limit of the agent's tool stopped it.
+# A holding whose lease is still booting: an acquire starts or resets its instance, for example
+# one that runs in the background of the agent's tool.
 
 
 def test_a_holding_with_a_booting_lease_is_not_kept(store, agents):
@@ -416,34 +416,49 @@ def test_a_holding_with_a_booting_lease_is_not_kept(store, agents):
     assert (kept.kept, kept.lease.state) == (True, "ready")
 
 
-def interrupted(state_dir, resource):
-    """Change a lease into a booting lease whose acquire ended before its reset was done."""
-    ended = subprocess.Popen([sys.executable, "-c", "pass"])
-    ended.wait()
+def booting(state_dir, resource, pid, started):
+    """Change a lease into a booting lease whose instance the acquire `pid` resets."""
 
     def change(data):
-        data.update(state="booting", reaper_pid=ended.pid, reaper_started="gone")
+        data.update(state="booting", reaper_pid=pid, reaper_started=started)
         data["awake"]["boot_deadline"] = data["awake"]["touched"] + 5 * 60
 
     edit_lease(state_dir, resource, change)
 
 
-def test_an_interrupted_reset_is_neither_kept_nor_run_and_release_gives_it_back(
+def test_a_holding_whose_reset_still_runs_is_neither_kept_nor_run(capsys, config_path, state_dir):
+    configure(config_path)
+    acquire(capsys, "--holding", "tests", "--where", "form=phone", *ME)
+    reset = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        booting(state_dir, "qa_phone", reset.pid, Machine().running([reset.pid])[reset.pid])
+        status, values, err = acquire(capsys, "--holding", "tests", "--where", "form=phone", *ME)
+        assert status == cli.EXIT_BUSY
+        assert values == {}
+        assert (
+            "qa_phone of the kept holding is still booting: another acquire still starts or"
+            " resets its instance, for example one that runs in the background. The request"
+            " waits until that acquire is done"
+        ) in err
+        done = run_in_child("--holding", "tests", *ME, "--", "true")
+        assert done.returncode == cli.EXIT_BUSY
+        assert "qa_phone of the holding tests is still booting" in done.stderr
+        assert leases()["qa_phone"].state == "booting"
+    finally:
+        reset.kill()
+        reset.wait()
+
+
+def test_a_reset_whose_acquire_ended_is_taken_back_and_the_label_starts_again(
     capsys, config_path, state_dir
 ):
     configure(config_path)
     _, first, _ = acquire(capsys, "--holding", "tests", "--where", "form=phone", *ME)
-    interrupted(state_dir, "qa_phone")
-    status, values, err = acquire(capsys, "--holding", "tests", "--where", "form=phone", *ME)
-    assert status == cli.EXIT_BUSY
-    assert values == {}
-    assert "qa_phone of the kept holding is still booting" in err
-    done = run_in_child("--holding", "tests", *ME, "--", "true")
-    assert done.returncode == cli.EXIT_BUSY
-    assert "qa_phone of the holding tests is still booting" in done.stderr
-    # The acquire that reset it has ended, so a release frees the resource at once.
-    assert main(["release", "--holding", "tests", *ME]) == 0
-    assert capsys.readouterr().out == "Released qa_phone: it is free.\n"
+    ended = subprocess.Popen([sys.executable, "-c", "pass"])
+    ended.wait()
+    booting(state_dir, "qa_phone", ended.pid, "gone")
+    # Nothing marks the lease ready any more, so the request does not wait for its boot
+    # deadline: the reaper takes it back first, and the label starts a new holding.
     status, again, _ = acquire(capsys, "--holding", "tests", "--where", "form=phone", *ME)
     assert (status, again["RESOURCE"], again["KEPT"]) == (0, "qa_phone", "false")
     assert again["LEASE"] != first["LEASE"]

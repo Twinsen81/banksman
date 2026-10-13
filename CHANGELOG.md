@@ -260,6 +260,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now 9 for the new void reason, and banksman also reads lease files of schema 8, so the upgrade
   keeps the leases. The output schema stays 6: `void_reason` and the `reason` of the log have a
   new value.
+- A start or a reset whose `acquire` is stopped ends at once. A `booting` lease is void as
+  soon as the `acquire` that it names has ended, by pid and start time, with the new void
+  reason `acquire_gone`, and the next command takes it back: it ends the emulator or the
+  reservation that banksman started, and runs the `on_void` hook. Before, the lease waited for
+  its boot deadline, and a request with the same label waited for it too. This covers SIGTERM
+  and SIGKILL, and a shell tool that signals every process below the command, the emulator
+  too. The lease schema is now 10 for the new void reason, and banksman also reads lease files
+  of schemas 8 and 9. The output schema stays 6.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

@@ -5,6 +5,7 @@ import pytest
 from banksman import LEASE_SCHEMA
 from banksman.errors import BanksmanError
 from banksman.lease import (
+    ACQUIRE_GONE,
     BOOT_TIMEOUT,
     BOOTING,
     DRAINING,
@@ -19,6 +20,7 @@ from banksman.lease import (
     LeaseFormatError,
     User,
     check_names,
+    checked_pids,
     free_by,
     void_reason,
 )
@@ -63,6 +65,37 @@ def test_a_booting_lease_is_void_at_its_boot_deadline():
     booting = replace(LEASE, state=BOOTING, boot_deadline=START + 300)
     assert reason(booting, after=299) is None
     assert reason(booting, after=300) == BOOT_TIMEOUT
+
+
+# A booting lease whose acquire still runs, as the acquire that starts or resets its instance.
+STARTING = replace(
+    OWNED, state=BOOTING, boot_deadline=START + 300, reaper_pid=7, reaper_started="start-7"
+)
+
+
+def test_a_booting_lease_is_valid_while_its_acquire_runs():
+    assert reason(STARTING, after=10, running={42: "start-42", 7: "start-7"}) is None
+
+
+def test_a_booting_lease_is_void_as_soon_as_its_acquire_has_ended():
+    # Only that acquire marks the lease ready, so the lease does not wait for its boot deadline.
+    assert reason(STARTING, after=1, running={42: "start-42"}) == ACQUIRE_GONE
+    # The start time guards against a pid that the system has given to a new process.
+    assert reason(STARTING, after=1, running={42: "start-42", 7: "start-other"}) == ACQUIRE_GONE
+    assert reason(STARTING, after=300, running={42: "start-42"}) == ACQUIRE_GONE
+
+
+def test_a_booting_lease_whose_acquire_runs_is_still_void_at_its_boot_deadline():
+    assert reason(STARTING, after=300, running={42: "start-42", 7: "start-7"}) == BOOT_TIMEOUT
+
+
+def test_only_a_booting_lease_depends_on_the_process_that_it_names():
+    # A draining lease names its reaper, and another reaper takes it over when that one ends.
+    draining = replace(STARTING, state=DRAINING, void_reason=IDLE, drain_deadline=START + 300)
+    assert reason(replace(STARTING, state=READY), after=1, running={42: "start-42"}) is None
+    assert checked_pids(STARTING) == (42, 7)
+    assert checked_pids(draining) == (42,)
+    assert checked_pids(LEASE) == ()
 
 
 def test_the_hard_cap_voids_a_lease_that_is_still_touched():
@@ -148,16 +181,17 @@ def test_a_lease_file_of_an_earlier_schema_is_refused():
     data = LEASE.to_json()
     del data["label"]
     data["schema"] = 7
-    with pytest.raises(LeaseFormatError, match="does not have schema 9"):
+    with pytest.raises(LeaseFormatError, match="does not have schema 10"):
         Lease.from_json(data)
 
 
-def test_a_lease_file_of_schema_8_is_read():
-    # Schema 9 only added a void reason, so every file of schema 8 is a valid file of schema 9,
-    # and the leases of an earlier banksman stay after the upgrade.
+@pytest.mark.parametrize("schema", [8, 9])
+def test_a_lease_file_of_an_earlier_schema_that_only_lacks_a_void_reason_is_read(schema):
+    # Schemas 9 and 10 only added void reasons, so every file of schema 8 or 9 is a valid file of
+    # schema 10, and the leases of an earlier banksman stay after the upgrade.
     lease = replace(LEASE, label="login-tests")
     data = lease.to_json()
-    data["schema"] = 8
+    data["schema"] = schema
     assert Lease.from_json(data) == lease
     assert lease.to_json()["schema"] == LEASE_SCHEMA
 
@@ -166,13 +200,14 @@ def test_a_lease_file_of_schema_8_is_read():
 def test_a_lease_file_with_a_schema_that_is_not_a_number_is_refused(schema):
     data = LEASE.to_json()
     data["schema"] = schema
-    with pytest.raises(LeaseFormatError, match="does not have schema 9"):
+    with pytest.raises(LeaseFormatError, match="does not have schema 10"):
         Lease.from_json(data)
 
 
-def test_a_lease_that_the_reaper_writes_for_a_free_instance_has_a_reason():
-    data = replace(LEASE, state="draining", drain_deadline=10.0, void_reason="free_timeout")
-    assert Lease.from_json(data.to_json()).void_reason == "free_timeout"
+@pytest.mark.parametrize("void", ["free_timeout", "acquire_gone"])
+def test_a_draining_lease_keeps_its_void_reason(void):
+    data = replace(LEASE, state="draining", drain_deadline=10.0, void_reason=void)
+    assert Lease.from_json(data.to_json()).void_reason == void
 
 
 def _without_awake(data):

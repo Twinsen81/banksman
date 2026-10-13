@@ -19,6 +19,7 @@ from banksman.errors import BanksmanError
 from banksman.fencing import Refused
 from banksman.history import REAP
 from banksman.lease import (
+    ACQUIRE_GONE,
     BOOT_TIMEOUT,
     BOOTING,
     DRAINING,
@@ -303,6 +304,48 @@ def test_a_void_lease_is_taken_back_only_after_its_reset_has_ended(state_dir, sy
     system.end(4242)
     assert reaped(store) == [("emu-1", BOOT_TIMEOUT, RELEASED)]
     assert len(taken) == 1
+
+
+def test_a_booting_lease_stays_valid_while_the_process_that_resets_it_runs(
+    store, system, state_dir
+):
+    system.spawn(100)
+    system.spawn(4242)
+    holder = Holder(OWNER, owner_pid=100)
+    lease = grant_one(store, [Choice("emu-1", "emulator", reset=True)], holder, label="tests").lease
+    edit_lease(
+        state_dir, "emu-1", lambda data: data.update(reaper_pid=4242, reaper_started="start-4242")
+    )
+    # Every lookup reads the start time of that process, not only of the owner process.
+    assert store.check("emu-1", lease.lease_id).state == BOOTING
+    assert list(store.holding(lease.lease_id)) == ["emu-1"]
+    assert list(store.labelled(100, "tests")) == ["emu-1"]
+    assert [each.resource for each in store.held_by(100)] == ["emu-1"]
+    assert reaped(store) == []
+
+
+def test_a_booting_lease_is_taken_back_as_soon_as_the_process_that_resets_it_has_ended(
+    state_dir, system
+):
+    taken = []
+    store = Store(state_dir, system, take_back=lambda lease: taken.append(lease) or True)
+    lease = reset_by_another_process(store, system, state_dir)
+    system.end(4242)
+    # Nothing marks the lease ready any more, so the next command does not wait for the boot
+    # deadline.
+    with pytest.raises(NotHeld, match="started or reset the instance ended before it was ready"):
+        store.check("emu-1", lease.lease_id)
+    assert store.holding(lease.lease_id) == {}
+    assert reaped(store) == [("emu-1", ACQUIRE_GONE, RELEASED)]
+    assert [each.void_reason for each in taken] == [ACQUIRE_GONE]
+    assert resources(store) == []
+
+
+def test_a_pid_that_names_a_new_process_does_not_keep_a_booting_lease(store, system, state_dir):
+    reset_by_another_process(store, system, state_dir)
+    system.end(4242)
+    system.processes[4242] = "start-of-another-process"
+    assert reaped(store) == [("emu-1", ACQUIRE_GONE, RELEASED)]
 
 
 def test_a_release_during_a_reset_by_another_process_waits_for_the_reset(state_dir, system):

@@ -86,8 +86,8 @@ leases instead.
   that is still starting always has a lease, and cannot be mistaken for an orphan. banksman
   starts an instance only on `--start`, and only for a kind that it can start (section 6). A
   lease is `booting` only while banksman starts the instance, or the kind's `on_acquire` hook
-  resets it (section 5), with its own deadline, so that a caller that ends in the middle frees
-  the resource soon.
+  resets it (section 5). The lease names the `acquire` that does it, and only that process
+  marks it ready, so a caller that ends in the middle frees the resource at the next command.
 - **Void triggers.** A lease is void when any of these is true. The defaults are starting
   values, to be tuned by measurement. The operator can change each of them in the
   configuration, for all kinds or for one kind (section 5). A lease keeps the values that
@@ -96,7 +96,8 @@ leases instead.
   | Trigger | Default | Catches |
   |---|---|---|
   | the machine restarted after the lease was written | n/a | leases that describe an earlier boot |
-  | `booting` past its boot deadline | 5 min | resets that never complete |
+  | `booting`, and the `acquire` that it names has ended | n/a | starts and resets that a stopped command left |
+  | `booting` past its boot deadline | 5 min | starts and resets that never complete |
   | held longer than the hard cap | 3 h | runs that are alive but loop |
   | owner process ended, and no touch for a grace period | 5 min | crashed or killed runs |
   | no touch for the idle timeout | 20 min | hung runs, runs that forgot to release |
@@ -107,7 +108,16 @@ leases instead.
   wall clock does not move a deadline. The cost: a deadline shown as a time of day moves
   later when the machine sleeps.
 - **Owner liveness** is a pid together with that process's start time, so a pid that the
-  system gives to a new process does not keep a lease. A zombie process counts as ended.
+  system gives to a new process does not keep a lease. A zombie process counts as ended. The
+  `acquire` that a booting lease names is checked in the same way.
+- **A stopped start ends at once.** The shell tool of an agent can stop a command at any time,
+  with SIGTERM or SIGKILL, and it can signal every process below the command, also one in a
+  session of its own, such as an emulator that `acquire` started. Nothing marks the lease
+  ready after that, so the lease does not wait for its boot deadline: it is void as soon as
+  its `acquire` has ended, and the next command takes it back as any void lease. The retry
+  then starts the instance again. banksman does not continue the start in a detached process:
+  such a process would have to leave the process tree of the caller, so it would also
+  continue after a stop that the user asked for.
 - **Owner death alone is not proof that a resource is idle.** Some agents keep a session's
   background commands running across a restart of the session process. Those commands keep
   touching the lease, and a touch can record the new owner process. So a restarted run
@@ -469,9 +479,11 @@ holdings apart (section 9).
   as soon as the tool prints it. So the adb guard protects the instance from the first
   moment. When the start fails, or does not end by the
   boot deadline, every new lease of the request is given back, and `acquire` fails with the
-  reason. A lease that the caller keeps with `--lease` is not started again. The starts and
-  the resets of one request run one after another, so the boot deadline of each new lease
-  also counts the boot timeout of every other start of the request.
+  reason. When `acquire` itself is stopped during the start, its leases are void at once
+  (section 3), and the next command ends what banksman started. A lease that the caller keeps
+  with `--lease` is not started again. The starts and the resets of one request run one after
+  another, so the boot deadline of each new lease also counts the boot timeout of every other
+  start of the request.
 - **Instances that banksman did not start.** An instance of the `android-emulator` or the
   `android-remote` preset that runs, but that banksman did not start and did not see run when
   a lease of it ended, is `unmanaged`: a person or a program outside banksman started it, for
@@ -733,8 +745,10 @@ holdings apart (section 9).
   signals a process group, because an emulator can start the `netsimd` daemon in its group,
   and the other emulators use that daemon. When the emulator does not end, the lease is
   quarantined. An emulator that the holder started stays, and banksman records it. An
-  `acquire --start` that is killed in the middle, for example by the time limit of an agent,
-  leaves the lease `booting`, and the reaper ends the emulator after the boot deadline.
+  `acquire --start` that is killed in the middle, for example by the shell tool of an agent,
+  leaves the lease `booting`. The tool can have ended the emulator too, because it can signal
+  every process below the command. The lease is void as soon as that `acquire` has ended
+  (section 3), and the next command ends the emulator if it still runs, and frees the AVD.
 
   **The free timeout.** Each emulator uses several GB of memory. With `free_timeout` (section 5),
   the reaper also ends a free emulator that banksman started when no lease of its AVD has
@@ -910,10 +924,11 @@ agent, through its own agent process.
   it.
 - A holding that has a booting lease is not kept, by a label or by a lease id, and the
   request waits as for a resource in use. Only the `acquire` that starts or resets the instance
-  gives the lease to its holder, and it can have ended before it was done, for example when the
-  time limit of a tool stopped it. Then the instance can be reset only in part, so the lease
-  waits for its boot deadline, and `run --holding` refuses it with exit status 4.
-  `release --holding` gives it back at once.
+  gives the lease to its holder, for example an `acquire` that still runs in the background of
+  the tool, and `run --holding` refuses the lease with exit status 4 meanwhile. When that
+  `acquire` has ended before it was done, the instance can be started or reset only in part,
+  so the lease is void, and the next command takes it back (section 3). The request with the
+  label then starts a new holding.
 - After a restart of the agent, a label finds its holding only after a touch with a lease id
   has recorded the new agent process, as for `release --all`. When that touch gives the new
   process two holdings with one label, banksman refuses the label and names a lease of each
@@ -1278,8 +1293,9 @@ permission rules can refuse all of them with one pattern, including ones added l
   command (section 3). A new value of a field, such as a new void reason, changes it too,
   because an earlier banksman refuses the file. banksman also reads the files of an earlier
   lease schema when each of them is a valid file of its own schema: schema 9 only added the
-  void reason `free_timeout`, so banksman reads lease files of schema 8, and an upgrade does
-  not lose the leases that are held.
+  void reason `free_timeout`, and schema 10 only added the void reason `acquire_gone`, so
+  banksman reads lease files of schemas 8 and 9, and an upgrade does not lose the leases that
+  are held.
 - The output schema is the version of the JSON that the commands print and of the lines of
   the log. A new field does not change it, so a reader ignores the fields that it does not
   know. It changes when a field is removed or renamed, or changes its type or its meaning. A
@@ -1328,8 +1344,8 @@ this section names.
   `run` waits for every process that its command leaves in its group. With `--start`,
   `acquire` lasts until the boot completes, so `--wait` and the `boot_timeout` of the kind
   together must be shorter than the time limit of the shell tool, or `acquire` runs in the
-  background of the tool. An `acquire` that the tool stops leaves the lease booting until the
-  boot deadline, and the emulator is then ended and started again for the next request.
+  background of the tool. When the tool stops `acquire` during the boot, the next command
+  ends what banksman started, and the request with the same label starts the boot again.
 - Release leases before waiting for a person, so that a run that waits overnight does not
   hold a device. If a run forgets, the owner and idle checks free the device later.
 - Before `--paid`, tell the user that the device costs money, and get a yes. Let the

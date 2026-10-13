@@ -1524,15 +1524,15 @@ def _paid_note(payable: Mapping[str, int]) -> str:
 
 # Why a lease of a holding boots, for the messages about a holding that is not ready.
 _BOOTING = (
-    "another acquire starts or resets its instance, or ended before it was done, for example"
-    " because the time limit of a tool stopped it"
+    "another acquire still starts or resets its instance, for example one that runs in the"
+    " background"
 )
 
 
 def _booting_note(resources: Sequence[str]) -> str:
     return (
         f"{', '.join(resources)} of the kept holding is still booting: {_BOOTING}. The request"
-        " waits until the lease is ready or void, and banksman release gives it back now"
+        " waits until that acquire is done"
     )
 
 
@@ -1612,7 +1612,7 @@ def _choice(candidate: Candidate, config: Config, start: bool) -> Choice:
     # The holder starts an instance that does not run, unless the caller asks banksman with
     # --start and banksman can start the kind. A lease is booting only while banksman starts its
     # instance or the on_acquire hook resets it, so that a caller that dies in the middle loses
-    # the lease at the boot deadline. An instance that banksman did not start can be the
+    # the lease as soon as it has ended. An instance that banksman did not start can be the
     # emulator of a person, so a request gets it only when its kind says so.
     return Choice(
         candidate.resource,

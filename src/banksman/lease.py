@@ -21,6 +21,7 @@ HELD = (BOOTING, READY)
 
 REBOOTED = "rebooted"
 BOOT_TIMEOUT = "boot_timeout"
+ACQUIRE_GONE = "acquire_gone"
 HARD_CAP = "hard_cap"
 OWNER_GONE = "owner_gone"
 IDLE = "idle"
@@ -31,6 +32,8 @@ FREE_TIMEOUT = "free_timeout"
 VOID_REASONS = {
     REBOOTED: "the machine restarted after the lease was written",
     BOOT_TIMEOUT: "the resource was not ready by its boot deadline",
+    ACQUIRE_GONE: "the banksman command that started or reset the instance ended before it was"
+    " ready",
     HARD_CAP: "the lease reached its hard cap",
     OWNER_GONE: "the owner process ended, and nothing touched the lease for the grace period",
     IDLE: "nothing touched the lease for the idle timeout",
@@ -181,9 +184,9 @@ class Lease:
     ended: bool = False
     # How many reapers have started to take the lease back.
     attempts: int = 0
-    # The banksman process that acts on the instance outside the lock: the acquire that resets
-    # it with the on_acquire hook, or the reaper that takes a draining lease back. No other
-    # banksman process acts on the instance while it runs.
+    # The banksman process that acts on the instance outside the lock: the acquire that starts
+    # it or resets it with the on_acquire hook, or the reaper that takes a draining lease back.
+    # No other banksman process acts on the instance while it runs.
     reaper_pid: int | None = None
     reaper_started: str | None = None
     issue: str | None = None
@@ -358,6 +361,10 @@ def void_reason(
     """
     if lease.boot_id != boot_id:
         return REBOOTED
+    # Only the acquire that a booting lease names marks it ready, so the lease is of no use once
+    # that process has ended, for example because the tool of an agent stopped it.
+    if lease.state == BOOTING and lease.reaper_pid is not None and not _reaper_runs(lease, running):
+        return ACQUIRE_GONE
     if lease.state == BOOTING and lease.boot_deadline is not None and now >= lease.boot_deadline:
         return BOOT_TIMEOUT
     if now >= lease.hard_deadline:
@@ -375,6 +382,18 @@ def void_reason(
 def owner_runs(lease: Lease, running: Mapping[int, str]) -> bool:
     # The start time guards against a pid that the system has given to a new process.
     return lease.owner_pid is not None and running.get(lease.owner_pid) == lease.owner_started
+
+
+def _reaper_runs(lease: Lease, running: Mapping[int, str]) -> bool:
+    return lease.reaper_pid is not None and running.get(lease.reaper_pid) == lease.reaper_started
+
+
+def checked_pids(lease: Lease) -> tuple[int, ...]:
+    """Return the processes whose start times `void_reason` reads for this lease."""
+    pids = [lease.owner_pid]
+    if lease.state == BOOTING:
+        pids.append(lease.reaper_pid)
+    return tuple(pid for pid in pids if pid is not None)
 
 
 @dataclass(frozen=True)
