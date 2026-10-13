@@ -251,8 +251,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the owner `banksman` and the new void reason `free_timeout`, then ends the emulator and
   runs the `on_void` hook as for a take-back, and deletes the lease. So a request during the end
   waits, and never gets an emulator that ends. When the end finishes after the discovery of a
-  request and before its grant, the request gives the new leases back and looks again, so it
-  never gets the serial of an emulator that has ended. An emulator that banksman did not start
+  request and before its grant, the request looks again, so it never gets the serial of an
+  emulator that has ended. An emulator that banksman did not start
   is never ended. The log records the end as a `reap` event with the reason `free_timeout`. The
   reaper runs only at the start of a command, so run `banksman reap` at a fixed interval to end
   free emulators also while no agent works. The record of the emulators keeps since when each
@@ -268,6 +268,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and SIGKILL, and a shell tool that signals every process below the command, the emulator
   too. The lease schema is now 10 for the new void reason, and banksman also reads lease files
   of schemas 8 and 9. The output schema stays 6.
+- A request does not get an instance whose lease ended after its discovery started. A look of
+  `acquire` decides with the facts of its discovery: whether the instance runs, and its serial,
+  its handle, and its accounts. A lease that ended meanwhile can have changed the instance: the
+  reaper removed the reservation of a remote device, the failed start of another request ended
+  its emulator, or the holder stopped its emulator before the release. Every end of a lease now
+  records its awake time in `.ended.json` in the state directory, and a resource whose lease
+  ended after the discovery of the request started counts as in use for that look. When only
+  such resources keep the request from being met, `acquire` looks again at once, also without
+  `--wait`; a second such look in a row counts as busy. This replaces the check of the
+  emulators that banksman knows, which covered only emulators. The record has a schema of its
+  own; the lease schema and the output schema do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

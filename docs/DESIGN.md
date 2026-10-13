@@ -171,6 +171,23 @@ leases instead.
   reservation, its handle. Discovery or a start that banksman performs sets it, never the
   holder. Discovery never clears it: the reservation can outlive the connection of its device,
   and banksman uses the handle to connect the device again, or to end the reservation.
+- **A grant does not use facts from before the end of a lease.** `acquire` decides with the
+  facts of its discovery: whether the instance runs, and its serial, its handle, and its
+  accounts. A lease can end between that discovery and the grant, and its holder or its
+  take-back can have changed the instance meanwhile: the reaper ended an emulator or removed a
+  reservation, the failed start of another request ended its emulator, or the holder stopped
+  its emulator and then released it. So every end of a lease, by a release, a take-back, or
+  `admin release --force`, records its awake time under the lock, in `.ended.json` in the
+  state directory. The file has one time for each resource, and the scan of the lease files
+  skips it, as every name that starts with a dot. For the grant, a resource whose lease ended
+  at or after the start of the discovery counts as in use. When only such resources keep the
+  request from being met, `acquire` looks again at once, also without `--wait`, and the new
+  discovery sees the instance as it is now. A second such look in a row counts as a look that
+  found the resources in use, so that leases that end in every look never keep a request
+  looking without a pause. A file of an earlier boot, of another schema, or that cannot be read
+  counts as empty, and the next end replaces it. An instance that ends while no lease of it
+  ends, for example an emulator that crashes, is not covered: for the holder, that is the
+  same as an instance that ends just after the grant.
 - **Damaged lease files.** A lease file with a newer lease schema stops every command,
   because two versions of banksman must not share one state directory. A lease file that
   cannot be read keeps its resource out of use, and `status` shows it. Other resources are
@@ -520,7 +537,8 @@ holdings apart (section 9).
 - **Waiting.** While every matching resource is held, `acquire` fails with exit status 4. For
   a request with several parts, this is while the parts cannot all be granted (section 7).
   With `--wait`, it looks again every 5 seconds until the wait ends, and each look reads the
-  configuration, the inventory, and the machine again. So the reaper of a caller that waits
+  configuration, the inventory, and the machine again. A look whose discovery started before
+  a lease of a matching resource ended is followed by a look at once (section 3). So the reaper of a caller that waits
   also uses the hooks of the current configuration (section 5). When it starts to wait, it
   says so once on standard error, with the resources that are in use, so that a person sees
   why a command, such as a build, does not go on. It stops waiting, and fails, when its owner
@@ -764,10 +782,8 @@ holdings apart (section 9).
   refuses an agent's device command on it, only one reaper ends it, and a reaper that ends in
   the middle leaves the end to the next one. An emulator that does not end quarantines the AVD.
   The end can still finish after the discovery of a request saw the emulator run and before the
-  grant. So `acquire` checks the emulators that banksman knew before its discovery: when the
-  emulator of a new lease that it does not start has ended, it gives the new leases back and
-  looks again, and the next look starts the AVD on `--start`. Its lease then keeps the reaper
-  away, so the check holds.
+  grant. The end of the reaper's lease then makes the request look again (section 3), and the
+  next look starts the AVD on `--start`.
   The reaper never ends an emulator that banksman did not start. The log records the end as a
   `reap` event with the reason `free_timeout`, and `status` shows no planned end: the reaper
   runs only at the start of a command, so a free emulator ends at the first command after its
@@ -1305,7 +1321,9 @@ permission rules can refuse all of them with one pattern, including ones added l
 - The document of a `discover` hook has a schema of its own (section 8), and so have the
   catalogue and the record of reservations of the `android-remote` preset, and the record of
   the emulators of the `android-emulator` preset. That record has schema 2, which added since
-  when no lease of each AVD has existed; banksman also reads schema 1, without that time.
+  when no lease of each AVD has existed; banksman also reads schema 1, without that time. The
+  record of the ends of leases in the state directory (section 3) has schema 1. It is not
+  part of the lease schema, because no lease file changes with it.
 - The surfaces treated as public API are the CLI (commands, flags, exit codes, `KEY=value`
   output), the JSON output, the lease file format, the log file format, the configuration
   files, and the hook contract.

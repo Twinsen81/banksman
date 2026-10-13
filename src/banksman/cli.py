@@ -89,6 +89,7 @@ from banksman.store import (
     Granted,
     Need,
     NotHeld,
+    Outdated,
     Reaped,
     Record,
     Stopping,
@@ -1295,13 +1296,15 @@ def _acquire(
     give_up = machine.clock() + wait
     waiting = False
     owner_started = None
+    # Whether this look runs at once because the facts of the last one were out of date.
+    again = False
     while True:
         # The configuration, the inventory, and the machine are read again on every look. The
         # reaper must use the hooks of the current configuration, so that a hook that the
         # operator removes stops at once, also for a caller that waits.
         config = load_config()
         store, _ = _reaped_store(config)
-        seen_before = _emulators_now(config, machine)
+        looked = machine.clock()
         found = search(config, load_inventory(), parts, clock=machine.clock)
         needs = [
             Need(
@@ -1354,25 +1357,29 @@ def _acquire(
         ]
         if not satisfiable(unpaid):
             raise BanksmanError(_paid_only(payable))
-        granted = store.grant(
-            needs,
-            holder,
-            keep=keep,
-            expect=expect,
-            reset_time=hooks.HOOK_TIMEOUT_SECONDS,
-            seen=found.serials,
-            paid=paid,
-            label=label,
-        )
+        try:
+            granted = store.grant(
+                needs,
+                holder,
+                keep=keep,
+                expect=expect,
+                reset_time=hooks.HOOK_TIMEOUT_SECONDS,
+                seen=found.serials,
+                paid=paid,
+                label=label,
+                since=looked,
+            )
+        except Outdated:
+            # A lease ended after this discovery saw its instance, for example after a take-back
+            # that ended an emulator or removed a reservation, so the facts of this look are out
+            # of date. The next look runs at once. A second such look in a row waits as for a
+            # resource in use, so that leases that end in every look never keep it busy.
+            if not again:
+                again = True
+                continue
+            granted = None
+        again = False
         starts = {choice.resource for need in needs for choice in need.choices if choice.start}
-        if granted is not None and _ended_since(seen_before, granted, starts, machine):
-            # The reaper of another command ended an emulator that this discovery saw run, for
-            # example after its free timeout, and its lease ended before the grant. The facts of
-            # this look are out of date, so the request gives its new leases back and looks again.
-            for grant in granted:
-                if not grant.kept:
-                    _give_back(store, grant.lease)
-            continue
         if granted is not None:
             break
         left = give_up - machine.clock()
@@ -1567,44 +1574,6 @@ def _some(candidates: Sequence[Candidate], shown: int = 10) -> str:
     names = ", ".join(candidate.resource for candidate in candidates[:shown])
     more = len(candidates) - shown
     return f"{names}, and {more} more" if more > 0 else names
-
-
-def _emulators_now(config: Config, system: System) -> dict[str, emulator.Known]:
-    """Return the emulators that banksman knows and that run now, by AVD: the only emulators that
-    banksman ends."""
-    known: dict[str, emulator.Known] = {}
-    for kind in config.kinds.values():
-        if kind.preset == ANDROID_EMULATOR:
-            # Without the record, discovery counts no emulator as one that banksman knows.
-            with contextlib.suppress(BanksmanError):
-                known.update(emulator.load(kind, system))
-    return known
-
-
-def _ended_since(
-    known: Mapping[str, emulator.Known],
-    granted: Sequence[Granted],
-    starts: Collection[str],
-    system: System,
-) -> bool:
-    """Whether a new lease that does not start its instance got an emulator that ran before the
-    discovery and has ended since.
-
-    A held lease keeps the reaper from its emulator, so the check after the grant holds.
-    """
-    ended = [
-        known[grant.lease.resource]
-        for grant in granted
-        if not grant.kept and grant.lease.resource in known and grant.lease.resource not in starts
-    ]
-    if not ended:
-        return False
-    try:
-        running = system.running([entry.pid for entry in ended])
-    except BanksmanError:
-        # A check that cannot run keeps the grant, as before the check existed.
-        return False
-    return any(running.get(entry.pid) != entry.started for entry in ended)
 
 
 def _choice(candidate: Candidate, config: Config, start: bool) -> Choice:

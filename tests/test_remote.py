@@ -11,8 +11,18 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pytest
-from helpers import SRC, FakeAndroidCli, FakeSdk, edit_lease, hook, table_rows, write_config
+from helpers import (
+    SRC,
+    FakeAndroidCli,
+    FakeSdk,
+    edit_lease,
+    hook,
+    reap_in_child,
+    table_rows,
+    write_config,
+)
 
+from banksman import cli as banksman_cli
 from banksman import remote
 from banksman.cli import main
 from banksman.config import Android, Kind
@@ -807,6 +817,39 @@ def test_a_void_lease_ends_the_reservation_that_banksman_created(
     assert cli.calls()[-1] == f"device remote remove {FIRST}"
     assert leases() == {}
     assert sessions() == {}
+
+
+def test_a_take_back_that_ends_after_the_discovery_of_a_request_makes_it_look_again(
+    capsys, config_path, sdk, cli, state_dir, monkeypatch
+):
+    start_one(capsys, config_path, sdk, cli)
+    search = banksman_cli.search
+    looks = []
+
+    def taken_back_meanwhile(*arguments, **options):
+        found = search(*arguments, **options)
+        if not looks:
+            # The lease becomes void after this discovery saw the device connected, and the
+            # reaper of another command removes its reservation and deletes the lease before
+            # the grant.
+            edit_lease(state_dir, "tokay:34", lambda data: data["awake"].update(hard_deadline=0))
+            assert [each["outcome"] for each in reap_in_child(state_dir)] == ["released"]
+            cli.connected({})
+            adb_lists(sdk, [])
+        looks.append(found)
+        return found
+
+    monkeypatch.setattr(banksman_cli, "search", taken_back_meanwhile)
+    status, values, err = acquire(
+        capsys, "--where", "codename=tokay", "--where", "api=34", "--paid"
+    )
+    assert (status, len(looks)) == (0, 2), err
+    assert f"device remote remove {FIRST}" in cli.calls()
+    # The second look found the model without a connection: the lease has neither the serial of
+    # the closed connection nor the id of the removed reservation.
+    lease = leases()["tokay:34"]
+    assert (lease.state, lease.serial, lease.handle) == ("ready", None, None)
+    assert "SERIAL" not in values
 
 
 def test_a_reservation_that_has_ended_already_counts_as_taken_back(

@@ -42,6 +42,7 @@ from banksman.store import (
     LockTimeout,
     Need,
     NotHeld,
+    Outdated,
     Store,
     Snapshot,
     StoreError,
@@ -1363,6 +1364,149 @@ def test_force_release_waits_for_a_take_back_that_runs(state_dir, system):
     store.acquire("phone-1", "device", Holder(OWNER))
     system.advance(20 * 60)
     assert reaped(store) == [("phone-1", IDLE, RELEASED)]
+
+
+# Leases that end after the discovery of a request started.
+
+
+def ended_while_discovering(store, system, resource="phone-1"):
+    """Hold a resource, start a discovery, and end the lease before the grant. Return the awake
+    time at which that discovery started."""
+    lease = store.acquire(resource, "device", Holder(OTHER))
+    since = system.clock()
+    system.advance(1)
+    store.release(resource, lease.lease_id)
+    return since
+
+
+def test_a_resource_whose_lease_ended_after_the_discovery_started_is_not_granted(store, system):
+    since = ended_while_discovering(store, system)
+    with pytest.raises(Outdated, match="a lease on phone-1 ended after the discovery"):
+        grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
+    assert resources(store) == []
+    # A discovery that started after the end saw the instance as it is now.
+    system.advance(1)
+    granted = grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=system.clock())
+    assert granted.lease.resource == "phone-1"
+
+
+def test_another_free_choice_is_granted_instead_of_one_whose_lease_ended(store, system):
+    since = ended_while_discovering(store, system)
+    choices = [Choice("phone-1", "device"), Choice("phone-2", "device")]
+    assert grant_one(store, choices, Holder(OWNER), since=since).lease.resource == "phone-2"
+
+
+def test_a_request_that_the_ended_resource_would_not_meet_is_busy(store, system):
+    since = ended_while_discovering(store, system)
+    store.acquire("tab-1", "device", Holder(OTHER))
+    assert store.grant(phone_and_tablet(), Holder(OWNER), since=since) is None
+
+
+def test_a_request_without_a_discovery_time_gets_the_resource(store, system):
+    ended_while_discovering(store, system)
+    assert grant_one(store, [Choice("phone-1", "device")], Holder(OWNER)).lease.resource == "phone-1"
+
+
+def released(store, system, lease):
+    store.release(lease.resource, lease.lease_id)
+
+
+def taken_back(store, system, lease):
+    system.advance(20 * 60)
+    assert reaped(store) == [("phone-1", IDLE, RELEASED)]
+
+
+def forced(store, system, lease):
+    store.force_release(lease.resource)
+
+
+@pytest.mark.parametrize("end", [released, taken_back, forced])
+def test_every_end_of_a_lease_is_recorded(state_dir, system, end):
+    store = Store(state_dir, system)
+    lease = store.acquire("phone-1", "device", Holder(OTHER))
+    since = system.clock()
+    end(store, system, lease)
+    with pytest.raises(Outdated):
+        grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
+    # The scan does not read the record as a lease file.
+    assert store.snapshot() == Snapshot([], [])
+
+
+def test_the_end_of_a_take_back_is_recorded_when_its_lease_is_deleted(state_dir, system):
+    discovered = []
+
+    def take_back(lease):
+        # A discovery that starts while the instance is taken back can still see it.
+        discovered.append(system.clock())
+        system.advance(5)
+        return True
+
+    store = Store(state_dir, system, take_back=take_back)
+    store.acquire("phone-1", "device", Holder(OTHER))
+    system.advance(20 * 60)
+    assert reaped(store) == [("phone-1", IDLE, RELEASED)]
+    with pytest.raises(Outdated):
+        grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=discovered[0])
+
+
+def test_a_restart_forgets_the_ends_of_the_earlier_boot(state_dir, system):
+    store = Store(state_dir, system)
+    since = ended_while_discovering(store, system)
+    system.boot = "boot-2"
+    granted = grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
+    assert granted.lease.resource == "phone-1"
+    store.release("phone-1", granted.lease.lease_id)
+    record = json.loads((state_dir / ".ended.json").read_text())
+    assert (record["schema"], record["boot_id"], list(record["ended"])) == (
+        1,
+        "boot-2",
+        ["phone-1"],
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{",
+        json.dumps({"schema": 2, "boot_id": "boot-1", "ended": {"phone-1": 10_000}}),
+        json.dumps({"schema": 1, "boot_id": "boot-1", "ended": ["phone-1"]}),
+    ],
+)
+def test_a_record_of_ends_that_cannot_be_read_counts_as_empty_and_is_replaced(
+    store, system, state_dir, text
+):
+    since = ended_while_discovering(store, system)
+    (state_dir / ".ended.json").write_text(text)
+    granted = grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
+    assert granted.lease.resource == "phone-1"
+    store.release("phone-1", granted.lease.lease_id)
+    with pytest.raises(Outdated):
+        grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
+
+
+def test_a_record_of_ends_that_others_can_write_to_is_not_used_and_is_replaced(
+    store, system, state_dir
+):
+    since = ended_while_discovering(store, system)
+    (state_dir / ".ended.json").chmod(0o666)
+    granted = grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
+    store.release("phone-1", granted.lease.lease_id)
+    assert stat.S_IMODE((state_dir / ".ended.json").stat().st_mode) == 0o600
+    with pytest.raises(Outdated):
+        grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
+
+
+def test_an_entry_that_is_not_valid_is_dropped(store, system, state_dir):
+    since = ended_while_discovering(store, system)
+    ended = {"phone-1": float(system.clock()), "../x": 1e9, "phone-2": True, "phone-3": "now"}
+    (state_dir / ".ended.json").write_text(
+        json.dumps({"schema": 1, "boot_id": "boot-1", "ended": ended})
+    )
+    with pytest.raises(Outdated):
+        grant_one(store, [Choice("phone-1", "device")], Holder(OWNER), since=since)
+    store.release("phone-9", store.acquire("phone-9", "device", Holder(OTHER)).lease_id)
+    record = json.loads((state_dir / ".ended.json").read_text())
+    assert sorted(record["ended"]) == ["phone-1", "phone-9"]
 
 
 # Free instances that the reaper ends.
