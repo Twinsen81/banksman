@@ -619,8 +619,9 @@ def test_a_start_that_passes_the_boot_deadline_is_stopped_and_removed(
     assert leases() == {}
 
 
-def test_a_start_that_is_killed_leaves_the_reservation_to_the_reaper(
-    capsys, config_path, sdk, cli, state_dir
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGKILL])
+def test_a_start_that_is_stopped_leaves_the_reservation_to_the_next_command(
+    capsys, config_path, sdk, cli, state_dir, signum
 ):
     configure(config_path, sdk, cli)
     save_catalogue()
@@ -643,9 +644,9 @@ def test_a_start_that_is_killed_leaves_the_reservation_to_the_reaper(
     else:
         process.kill()
         pytest.fail("the start did not record the handle")
-    os.killpg(process.pid, signal.SIGKILL)
+    os.killpg(process.pid, signum)
     process.wait()
-    edit_lease(state_dir, "tokay:34", lambda data: data["awake"].update(boot_deadline=0))
+    # Nothing can mark the lease ready any more, so it does not wait for its boot deadline.
     assert main(["reap"]) == 0
     assert f"device remote remove {FIRST}" in cli.calls()
     assert leases() == {}

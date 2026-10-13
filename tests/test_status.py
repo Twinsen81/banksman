@@ -380,6 +380,14 @@ def test_the_log_text_says_that_banksman_ended_a_free_instance():
     ]
 
 
+def test_the_log_text_says_that_the_acquire_of_a_start_ended():
+    void = Event(1_790_000_000.0, "void", "qa_phone", owner="/work/a", reason="acquire_gone")
+    (row,) = console.log_rows([void])
+    assert row[4].startswith(
+        "the banksman command that started or reset the instance ended before it was ready"
+    )
+
+
 def test_a_span_is_short():
     assert [console.span(seconds) for seconds in (0, 45, 26 * 60, 80 * 60)] == [
         "0s",

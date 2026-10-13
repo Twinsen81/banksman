@@ -167,8 +167,9 @@ banksman acquire --holding ui-tests --where form=phone --start --for "UI tests" 
   wait. Keep `--wait` and `boot_timeout` together shorter than the time limit of the shell
   tool of the agent, for example `--wait 3m` with a `boot_timeout` of 4 minutes for a limit of
   10 minutes, or run `acquire` in the background of the tool. When the tool stops `acquire`
-  during the boot, the lease stays `booting` until the boot deadline, a new request of the
-  same holding waits for it, and the reaper then ends the emulator.
+  during the boot, the lease is void at once: the next command ends the emulator if it still
+  runs, and a new request of the same holding starts the boot again. While `acquire` runs in
+  the background, a new request of the same holding waits for it.
 - A release leaves the emulator running, so the next request gets it without a boot. The
   reaper ends an emulator that banksman started when its lease becomes void, and, with the
   `free_timeout` of the kind, when no lease of its AVD has existed for that time. So a script

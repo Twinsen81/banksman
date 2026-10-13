@@ -78,8 +78,8 @@ banksman release --holding login-tests
   the wait, for example `--wait 5m` with a timeout of 6 minutes.
 - With `--start`, the boot of an emulator comes after the wait, and can take some minutes.
   Keep the wait short, for example `--wait 3m` with a timeout of 10 minutes. When the tool
-  stops the command during the boot, the request with the same label waits until the boot
-  deadline has passed.
+  stops the command during the boot, banksman ends what it started, and the request with the
+  same label starts the boot again.
 - Run a command that takes longer, such as a long test run under `banksman run`, in the
   background of your tool. When the tool stops `banksman run`, banksman stops the command too.
 

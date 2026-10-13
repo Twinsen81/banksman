@@ -13,7 +13,7 @@ import pwd
 import stat
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -49,6 +49,7 @@ from banksman.lease import (
     User,
     check_names,
     check_resource,
+    checked_pids,
     is_label,
     void_reason,
 )
@@ -1002,17 +1003,14 @@ class Store:
     def _owned(self, entries: Sequence[Lease | Unreadable], owner_pid: int) -> list[Lease]:
         """Return the valid held leases whose owner process is `owner_pid`."""
         started = self._start_time(owner_pid)
-        boot_id = self.system.boot_id()
-        now = self.system.clock()
-        return [
+        owned = [
             entry
             for entry in entries
             if isinstance(entry, Lease)
             and entry.state in HELD
             and (entry.owner_pid, entry.owner_started) == (owner_pid, started)
-            and void_reason(entry, boot_id=boot_id, now=now, running={owner_pid: started})
-            is None
         ]
+        return self._valid_ones(owned, {owner_pid: started})
 
     def _held_leases(
         self, entries: Sequence[Lease | Unreadable], holding: str
@@ -1023,17 +1021,25 @@ class Store:
             for entry in entries
             if isinstance(entry, Lease) and entry.holding == holding and entry.state in HELD
         ]
+        return {lease.resource: lease for lease in self._valid_ones(leases)}
+
+    def _valid_ones(
+        self, leases: Sequence[Lease], known: Mapping[int, str] | None = None
+    ) -> list[Lease]:
+        """Return the leases that are not void. `known` gives the start times of processes
+        that the caller has just read."""
         if not leases:
-            return {}
-        pids = sorted({lease.owner_pid for lease in leases if lease.owner_pid is not None})
-        running = self.system.running(pids) if pids else {}
+            return []
+        known = {} if known is None else known
+        pids = sorted({pid for lease in leases for pid in checked_pids(lease)} - set(known))
+        running = {**known, **(self.system.running(pids) if pids else {})}
         boot_id = self.system.boot_id()
         now = self.system.clock()
-        return {
-            lease.resource: lease
+        return [
+            lease
             for lease in leases
             if void_reason(lease, boot_id=boot_id, now=now, running=running) is None
-        }
+        ]
 
     def _touch_holding(
         self, lease: Lease, owner_pid: int | None, expect: float | None = None
@@ -1089,7 +1095,7 @@ class Store:
         return started
 
     def _void_reason(self, lease: Lease) -> str | None:
-        pids = [lease.owner_pid] if lease.owner_pid is not None else []
+        pids = checked_pids(lease)
         return void_reason(
             lease,
             boot_id=self.system.boot_id(),

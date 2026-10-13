@@ -408,16 +408,25 @@ def test_without_a_free_console_port_nothing_starts(capsys, config_path, sdk, po
     assert sdk.emulator_calls() == []
 
 
-def test_a_start_that_is_killed_leaves_the_emulator_to_the_reaper(config_path, sdk, state_dir):
-    configure(config_path, sdk)
-    sdk.emulator_behaves(boot=None)
-    process = subprocess.Popen(
-        [sys.executable, "-m", "banksman", "acquire", "--where", "avd=qa_phone", "--start"],
+# The tests name their agent process with --owner-pid.
+ME = ["--owner-pid", str(os.getpid())]
+
+
+def acquire_in_child(*arguments):
+    return subprocess.Popen(
+        [sys.executable, "-m", "banksman", "acquire", *arguments],
         env={**os.environ, "PYTHONPATH": SRC},
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGKILL])
+def test_a_start_that_is_stopped_is_taken_back_at_the_next_command(config_path, sdk, signum):
+    configure(config_path, sdk)
+    sdk.emulator_behaves(boot=None)
+    process = acquire_in_child("--where", "avd=qa_phone", "--start")
     try:
         wait_for(lambda: "qa_phone" in known())
         # The lease is booting, and it records the serial before the boot completes, so the adb
@@ -426,15 +435,39 @@ def test_a_start_that_is_killed_leaves_the_emulator_to_the_reaper(config_path, s
         assert lease.state == "booting"
         assert lease.serial == f"emulator-{known()['qa_phone'].port}"
     finally:
-        os.killpg(process.pid, signal.SIGKILL)
+        # Only the acquire: the emulator runs in a session of its own.
+        os.killpg(process.pid, signum)
         process.wait()
     pid = known()["qa_phone"].pid
     assert runs(pid)
-    edit_lease(state_dir, "qa_phone", lambda data: data["awake"].update(boot_deadline=0))
+    # Nothing can mark the lease ready any more, so it does not wait for its boot deadline.
     assert main(["reap"]) == 0
     assert not runs(pid)
     assert leases() == {}
     assert known() == {}
+
+
+def test_after_a_stop_of_a_start_the_same_label_starts_again_at_once(capsys, config_path, sdk):
+    configure(config_path, sdk)
+    sdk.emulator_behaves(boot=None)
+    label = ["--holding", "ui-tests", "--where", "avd=qa_phone", "--start", *ME]
+    process = acquire_in_child(*label)
+    try:
+        wait_for(lambda: "qa_phone" in known())
+        stopped = known()["qa_phone"].pid
+    finally:
+        # The tool of an agent stops a command by signalling every process below it, also the
+        # emulator in its own session.
+        os.killpg(process.pid, signal.SIGTERM)
+        os.kill(stopped, signal.SIGTERM)
+        process.wait()
+    wait_for(lambda: not runs(stopped))
+    sdk.emulator_behaves(boot=0)
+    status, values, err = acquire(capsys, *label)
+    assert status == 0, err
+    assert (values["RESOURCE"], values["KEPT"]) == ("qa_phone", "false")
+    assert leases()["qa_phone"].state == "ready"
+    assert known()["qa_phone"].pid != stopped
 
 
 # Instances that banksman did not start.
