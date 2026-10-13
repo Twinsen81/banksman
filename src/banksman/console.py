@@ -424,8 +424,8 @@ def count_rows(grouped: Sequence[Sequence[Event]]) -> list[list[str]]:
         rows.append(
             [
                 str(len(group)),
-                _local_time(group[0].at),
-                _local_time(last.at),
+                _local_time(min(event.at for event in group)),
+                _local_time(max(event.at for event in group)),
                 last.event,
                 last.resource,
                 details,
@@ -440,8 +440,10 @@ def count_json(group: Sequence[Event]) -> dict[str, object]:
     last = group[-1]
     return {
         "count": len(group),
-        "first": utc(group[0].at),
-        "last": utc(last.at),
+        # Two guard processes can add their events in another order than the order of their
+        # times, so the first and the last are the earliest and the latest time.
+        "first": utc(min(event.at for event in group)),
+        "last": utc(max(event.at for event in group)),
         "event": last.event,
         "action": last.action,
         "reason": last.reason,

@@ -1231,9 +1231,10 @@ is a setup of the operator, and a project needs nothing for it.
   caller: its worktree, its agent and the pid of the agent, its issue, and its session, as
   `acquire` would record them. Its resource, kind, and state are those of the lease of the
   device; without a lease, the resource is the serial. Its `command` has only the words that
-  name the adb command, such as `shell` or `forward --remove-all`, and only when they are
-  lowercase words; it never has the rest of the command line, because the arguments are
-  untrusted text, and an `adb shell` line can carry tokens. The text of the refusal is not in
+  name the adb command, such as `shell` or `forward --remove-all`, and only when adb knows the
+  command; it never has the rest of the command line, because the arguments are untrusted
+  text, and an `adb shell` line can carry tokens. A word in the place of the command can carry
+  a token too, also a quoted one with spaces in it, so the command of such a call is empty. The text of the refusal is not in
   the event either, because it can name the purpose of another holder. A refused command for
   every device has one event for each running device of another holder, so that the history of
   each device shows who tried. A serial that is not a valid name is not recorded: only the

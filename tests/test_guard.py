@@ -24,6 +24,7 @@ from banksman.android import Transport
 from banksman.config import load_config
 from banksman.guard import ALL, DEVICE, HOST, Call, parse
 from banksman.history import (
+    COMMAND,
     EVERY_DEVICE,
     GUARD,
     LOST,
@@ -844,11 +845,26 @@ def test_the_log_never_has_the_arguments_of_adb(machine, store, system, worktree
     lease(store, system, "e2e_phone", other(), serial="emulator-5554")
     arguments = ["shell", "am", "start", "--es", "token", "s3cr3t-value"]
     assert guarded("-s", "emulator-5554", *arguments) == guard.EXIT_REFUSED
-    # A first word that is not the name of an adb command can be a token too.
-    assert guarded("-s", "emulator-5554", "Bearer_s3cr3t") == guard.EXIT_REFUSED
+    # A word in the place of the command that adb does not know can be a token too, also a
+    # quoted one with a command and a space in it.
+    for word in ("Bearer_s3cr3t", "s3cr3t-value", "shell s3cr3t-value"):
+        assert guarded("-s", "emulator-5554", word) == guard.EXIT_REFUSED
     assert "s3cr3t" not in log_path.read_text()
     assert "token" not in log_path.read_text()
-    assert [event.command for event in logged(log_path)] == ["shell", None]
+    assert [event.command for event in logged(log_path)] == ["shell", None, None, None]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["wait-for-usb-device", "install", "app.apk"],
+        ["forward", "--remove-all"],
+        ["reconnect", "offline"],
+        ["install-multiple", "a.apk", "b.apk"],
+    ],
+)
+def test_the_log_names_the_commands_that_adb_knows(arguments):
+    assert COMMAND.fullmatch(parse(arguments).command)
 
 
 def test_a_serial_that_is_not_a_valid_name_is_not_in_the_log(system, strict):

@@ -61,9 +61,63 @@ LOST = "lost"
 UNREADABLE = "unreadable"
 EVERY_DEVICE = "every_device"
 GUARD_REASONS = (NOT_LEASED, OTHER_HOLDER, LOST, UNREADABLE, EVERY_DEVICE)
-# The words that name an adb command, such as "shell" or "forward --remove-all". The rest of the
-# command line can carry tokens, so the log never has it.
-COMMAND = re.compile(r"[a-z0-9-]{1,40}(?: [a-z0-9-]{1,40}){0,2}")
+# The commands of adb that the log names. The rest of the command line can carry tokens, and so
+# can a word in the place of the command, also one that has spaces in it, so the log has a
+# command only when adb knows it.
+ADB_COMMANDS = frozenset(
+    {
+        "abb",
+        "abb_exec",
+        "attach",
+        "backup",
+        "bugreport",
+        "detach",
+        "disable-verity",
+        "disconnect",
+        "emu",
+        "enable-verity",
+        "exec-in",
+        "exec-out",
+        "features",
+        "forward",
+        "get-devpath",
+        "get-serialno",
+        "get-state",
+        "install",
+        "install-multi-package",
+        "install-multiple",
+        "jdwp",
+        "kill-server",
+        "logcat",
+        "ppp",
+        "pull",
+        "push",
+        "raw",
+        "reboot",
+        "reboot-bootloader",
+        "reconnect",
+        "remount",
+        "restore",
+        "reverse",
+        "root",
+        "shell",
+        "sideload",
+        "sync",
+        "tcpip",
+        "track-app",
+        "track-jdwp",
+        "uninstall",
+        "unroot",
+        "usb",
+    }
+)
+_WAIT = r"wait-for(?:-(?:usb|local|any))?-(?:device|recovery|rescue|sideload|bootloader|disconnect)"
+# A command, such as "shell", "forward --remove-all", or "wait-for-device shell".
+COMMAND = re.compile(
+    rf"(?:{_WAIT} )?(?:reconnect offline|forward --remove-all|"
+    + "|".join(re.escape(name) for name in sorted(ADB_COMMANDS))
+    + ")"
+)
 # The file starts again at this size, and the earlier file is kept next to it, so that the log
 # never fills the disk.
 MAX_LOG_BYTES = 10 * 1024 * 1024

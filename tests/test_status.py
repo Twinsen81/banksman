@@ -459,6 +459,25 @@ def test_log_counts_the_flows_that_bypass_banksman(capsys, guard_events):
     )
 
 
+def test_the_count_of_events_that_were_added_out_of_order_keeps_their_times_in_order(
+    capsys, log_path
+):
+    # Two guard processes take their times before they wait for the lock, so the one with the
+    # later time can add its event first.
+    history = History(log_path)
+    history.append(warned(1_790_000_060.0, "shell"))
+    history.append(warned(1_790_000_000.0, "shell"))
+    assert main(["log", "--count", "--json"]) == 0
+    (count,) = json.loads(capsys.readouterr().out)["counts"]
+    assert (count["first"], count["last"]) == (
+        console.utc(1_790_000_000.0),
+        console.utc(1_790_000_060.0),
+    )
+    assert main(["log", "--count"]) == 0
+    (row,) = table_rows(capsys.readouterr().out)
+    assert row["FIRST"] < row["LAST"]
+
+
 def test_log_filters_by_event(capsys, guard_events):
     assert main(["log", "--event", "acquire", "--json"]) == 0
     assert [event["event"] for event in json.loads(capsys.readouterr().out)["events"]] == [

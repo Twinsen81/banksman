@@ -232,6 +232,8 @@ def test_the_log_starts_again_and_keeps_the_earlier_file(tmp_path):
         {"action": "allowed"},
         {"command": "shell; rm -rf /"},
         {"command": "SHELL"},
+        {"command": "shell s3cr3t-value"},
+        {"command": "s3cr3t-value"},
         {"serial": "\x1b[2Jemulator-5554"},
     ],
 )
