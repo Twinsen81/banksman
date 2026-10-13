@@ -1009,8 +1009,14 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   draining lease has no "free by" values: it is free when its scripts end, and the JSON gives
   its drain deadline instead.
 - `banksman log` shows the history of acquire, release, void, reap, quarantine, and forced
-  release events, with the holder. With `--since` and `--resource`, it answers "who held this
-  device at 3 a.m.?". A release and a void record how long the lease was held and the longest
+  release events, with the holder, and the `guard` events of the adb calls that the adb guard
+  refused or let run with a warning (section 12). With `--since` and `--resource`, it answers
+  "who held this device at 3 a.m.?". `--event` shows only the events of one kind, and
+  `--count` groups the events by event, action, reason, resource, serial, worktree, and agent,
+  and shows how many each group has, when the first and the last happened, and the adb commands
+  of a group of guard events. So `banksman log --event guard --count` lists the flows that still
+  use devices without banksman, one line for each worktree, agent, and device, however many
+  adb calls they make. A release and a void record how long the lease was held and the longest
   time between two touches, both in awake time. They are the data for tuning the hard cap and
   the idle timeout. A quarantine records its problem, or the scripts that still ran at the
   drain deadline and whether stopping was on for the kind, so that an operator can see what
@@ -1021,13 +1027,14 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   user database. It is outside `/tmp`, as the quarantines are, because the history must
   outlive restarts and cleaners of temporary files. It has one JSON object for each event,
   each with the output schema number (section 14), and banksman adds to it only under the
-  lock of the lease store. At 10 MB, banksman starts a new file and keeps the earlier one as
-  `log.jsonl.1`. When the log cannot be written, the command still does its work and prints
-  a warning: the change to the lease is already written. `log` leaves out a line that is not
-  a valid event, and says how many it left out. It also reads the lines of an earlier output
-  schema whose events it knows, so an upgrade does not hide the history. `BANKSMAN_LOG`
-  changes the path for tests; when only `BANKSMAN_STATE_DIR` is set, the log is next to that
-  directory.
+  lock of the lease store. The adb guard takes that lock only to add an event, and waits for it
+  for half a second at most (section 12). At 10 MB, banksman starts a new file and keeps the
+  earlier one as `log.jsonl.1`. When the log cannot be written, the command still does its work
+  and prints a warning: the change to the lease is already written. `log` leaves out a line
+  that is not a valid event, and says how many it left out. It also reads the lines of an
+  earlier output schema whose events it knows, so an upgrade does not hide the history.
+  `BANKSMAN_LOG` changes the path for tests; when only `BANKSMAN_STATE_DIR` is set, the log is
+  next to that directory.
 - Not implemented yet: `banksman explain --where ...` answers the question "can I get one
   now?". For each matching resource it says free, held by whom and until when, not
   permitted, not present, or quarantined, and it gives the caller's place in the queue. An
@@ -1187,9 +1194,10 @@ is a setup of the operator, and a project needs nothing for it.
 
   Otherwise the guard exits with status 3, the status of `check` for a lost lease, and runs no
   adb. On standard error, it names the device, the state of its lease, and the holder as
-  `status` shows it. The purpose in it is untrusted text, as in `status`. When the lease belongs
-  to the caller's holding but is no longer held, for example because it drains, the guard says
-  that the lease is lost.
+  `status` shows it, and it ends with "Run banksman agent-guide and follow it", so that an agent
+  without the guide of section 15 learns how to get a device. The purpose in it is untrusted
+  text, as in `status`. When the lease belongs to the caller's holding but is no longer held,
+  for example because it drains, the guard says that the lease is lost.
 - **Starts.** The start of an emulator records its serial before the boot. The serial of a
   remote device, `localhost:<port>`, is a serial like any other, and the start records it in
   the lease before the lease is ready. So the guard protects an instance that banksman starts
@@ -1199,13 +1207,39 @@ is a setup of the operator, and a project needs nothing for it.
   device again (section 8).
 - **Strict mode.** With `strict = true` in the `[guard]` table of the configuration, the guard
   also refuses an agent's device command on a device that no lease of its holding has: a free
-  device, or a device that the inventory does not allow, such as a personal phone.
+  device, or a device that the inventory does not allow, such as a personal phone. The refusal
+  also ends with "Run banksman agent-guide and follow it".
 
   ```toml
   [guard]
   strict = true
   ```
 
+- **Warn mode.** A project that adopts banksman has a time in which some scripts, skills, and
+  commands of agents still use devices without a lease. Strict mode would break each of them.
+  With `strict = "warn"`, the guard lets such a call run, and it says on standard error, in one
+  line, that strict mode would refuse the call, and that `banksman agent-guide` tells how to
+  get a device. It also records the call in the log. Every other refusal stays a refusal. The
+  operator reads `banksman log --event guard --count` (section 10), changes the flows that it
+  lists, and turns strict mode on when the list stays empty. The line on standard error is also
+  in the output of a script that merges standard error into what it reads, for example
+  `$(adb shell getprop sys.boot_completed 2>&1)`, so such a script can fail in warn mode. Any
+  other value of `strict` is an error in the configuration.
+- **The log.** Each refused call, in every mode, and each call that warn mode lets run adds a
+  `guard` event to the log (section 10). Its `action` is `refused` or `warned`, and its `reason`
+  is `not_leased`, `other_holder`, `lost`, `unreadable`, or `every_device`. Its holder is the
+  caller: its worktree, its agent and the pid of the agent, its issue, and its session, as
+  `acquire` would record them. Its resource, kind, and state are those of the lease of the
+  device; without a lease, the resource is the serial. Its `command` has only the words that
+  name the adb command, such as `shell` or `forward --remove-all`, and only when they are
+  lowercase words; it never has the rest of the command line, because the arguments are
+  untrusted text, and an `adb shell` line can carry tokens. The text of the refusal is not in
+  the event either, because it can name the purpose of another holder. A refused command for
+  every device has one event for each running device of another holder, so that the history of
+  each device shows who tried. A serial that is not a valid name is not recorded: only the
+  caller can type it, and adb finds no device by it. The log keeps every event, and its size
+  limit of 10 MB holds: an event is about 500 bytes, so a test run with 500 calls in warn mode
+  adds about 250 KB, and many such runs make the history of the leases shorter.
 - **Commands for every device.** `adb kill-server` stops the adb server, which disconnects
   every device; `adb reconnect offline` resets the connection of every offline device, such as
   an emulator that boots; `adb disconnect` without an address ends every connection over
@@ -1220,8 +1254,12 @@ is a setup of the operator, and a project needs nothing for it.
   also after a restart emptied the state directory. It does not reap, and it runs no discovery.
   It reads the process list only when the lease id in `BANKSMAN_LEASE` does not decide, and it
   asks `adb devices` only when the command line does not name the device by a serial that a
-  lease has. On the Mac where it was measured, the wrapper and the guard together add about
-  35 ms to a call that needs no process list, and about 70 ms to one that needs it.
+  lease has. It takes the lock of the lease store only to add an event to the log, that is, for
+  a call that it refuses or warns about, and waits for it for half a second at most; it does
+  not then clean up or restore the quarantines, as a change of a lease does. In strict mode and
+  warn mode, a device command on a device without a lease also reads the process list. On the
+  Mac where it was measured, the wrapper and the guard together add about 35 ms to a call that
+  needs no process list, and about 70 ms to one that needs it.
 - **When the guard fails.** When banksman cannot decide, for example because of an error in the
   configuration, a lease file of a newer banksman, or a process list that the sandbox of an
   agent hides, the call runs, and banksman says on standard error that the call is not checked.
@@ -1230,7 +1268,9 @@ is a setup of the operator, and a project needs nothing for it.
   wrapper runs adb itself: a wrapper that replaced itself with banksman could not fall back. A
   broken guard that blocks every device is worse than a short time without protection. Without
   `banksman` on the `PATH`, the wrapper runs the saved adb, and says the same. Ctrl-C during the
-  check ends the call.
+  check ends the call. When the event of a refused or warned call cannot go to the log, for
+  example because the lock is held for too long, the decision stands, and banksman says that
+  the call is not in the log.
 - **Limits.** The guard is a guardrail, not a security boundary. These do not pass through it: a
   call through the full path of adb, such as the adb of Android Studio; a tool that talks to the
   adb server itself, such as the connected tests of the Android Gradle plugin, for which the

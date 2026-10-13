@@ -45,7 +45,25 @@ VOID = "void"
 REAP = "reap"
 QUARANTINE = "quarantine"
 FORCE_RELEASE = "force_release"
-EVENTS = (ACQUIRE, RELEASE, VOID, REAP, QUARANTINE, FORCE_RELEASE)
+# A device command that the adb guard refused, or let run with a warning.
+GUARD = "guard"
+EVENTS = (ACQUIRE, RELEASE, VOID, REAP, QUARANTINE, FORCE_RELEASE, GUARD)
+# What the adb guard did with the call.
+REFUSED = "refused"
+WARNED = "warned"
+ACTIONS = (REFUSED, WARNED)
+# Why the adb guard refused or warned. The log keeps a code, not the text of the refusal: that
+# text can name the purpose of another holder, which is untrusted text, and the serial as the
+# caller typed it.
+NOT_LEASED = "not_leased"
+OTHER_HOLDER = "other_holder"
+LOST = "lost"
+UNREADABLE = "unreadable"
+EVERY_DEVICE = "every_device"
+GUARD_REASONS = (NOT_LEASED, OTHER_HOLDER, LOST, UNREADABLE, EVERY_DEVICE)
+# The words that name an adb command, such as "shell" or "forward --remove-all". The rest of the
+# command line can carry tokens, so the log never has it.
+COMMAND = re.compile(r"[a-z0-9-]{1,40}(?: [a-z0-9-]{1,40}){0,2}")
 # The file starts again at this size, and the earlier file is kept next to it, so that the log
 # never fills the disk.
 MAX_LOG_BYTES = 10 * 1024 * 1024
@@ -87,7 +105,8 @@ class Event:
     # Text that one agent writes and other agents read. It is untrusted.
     purpose: str | None = None
     accounts: tuple[str, ...] = ()
-    # Why the lease became void, or, for a reap, why it was taken back.
+    # Why the lease became void, for a reap, why it was taken back, and for a guard event, why the
+    # guard refused or warned.
     reason: str | None = None
     # Seconds of awake time from the grant to the release or the void.
     held: float | None = None
@@ -98,6 +117,11 @@ class Event:
     # For a quarantine because of scripts that still ran: whether stopping was on for the kind.
     stopping: bool | None = None
     problem: str | None = None
+    # For a guard event: what the guard did, the words of the adb command, and the serial of the
+    # device. The holder fields name the caller, and kind and state the lease of the device.
+    action: str | None = None
+    command: str | None = None
+    serial: str | None = None
 
     @classmethod
     def of(cls, event: str, lease: Lease, at: float, **details: Any) -> Event:
@@ -142,6 +166,9 @@ class Event:
             "running": [{"pid": each.pid, "pgid": each.pgid} for each in self.running],
             "stopping": self.stopping,
             "problem": self.problem,
+            "action": self.action,
+            "command": self.command,
+            "serial": self.serial,
         }
 
     @classmethod
@@ -160,9 +187,10 @@ class Event:
         accounts = data.get("accounts")
         if not isinstance(accounts, list) or not all(_is_name(each) for each in accounts):
             raise ValueError("accounts is not valid")
+        event = _get(data, "event", _one_of(EVENTS))
         return cls(
             at=_get(data, "at", is_wall_time),
-            event=_get(data, "event", _one_of(EVENTS)),
+            event=event,
             resource=_get(data, "resource", _is_name),
             kind=_get(data, "kind", _optional(_matches(KIND_NAME))),
             lease_id=_get(data, "lease_id", _optional(_is_name)),
@@ -175,13 +203,20 @@ class Event:
             session=_get(data, "session", _optional(_matches(SESSION))),
             purpose=_get(data, "purpose", _optional(is_purpose)),
             accounts=tuple(accounts),
-            reason=_get(data, "reason", _optional(_one_of(VOID_REASONS))),
+            reason=_get(
+                data,
+                "reason",
+                _optional(_one_of(GUARD_REASONS if event == GUARD else VOID_REASONS)),
+            ),
             held=_get(data, "held", _optional(_is_seconds)),
             longest_quiet=_get(data, "longest_quiet", _optional(_is_seconds)),
             drained=_get(data, "drained", _optional(lambda value: isinstance(value, bool))),
             running=tuple(Process(each["pid"], each.get("pgid")) for each in running),
             stopping=_get(data, "stopping", _optional(lambda value: isinstance(value, bool))),
             problem=_get(data, "problem", _optional(_is_problem)),
+            action=_get(data, "action", _optional(_one_of(ACTIONS))),
+            command=_get(data, "command", _optional(_matches(COMMAND))),
+            serial=_get(data, "serial", _optional(_is_name)),
         )
 
 
@@ -201,8 +236,8 @@ class History:
     def append(self, event: Event) -> None:
         """Add an event at the end of the log.
 
-        The lease store calls this under its lock, so two lines never mix, and only one process
-        at a time starts the file again.
+        Every caller holds the lock of the lease store, so two lines never mix, and only one
+        process at a time starts the file again.
         """
         line = (json.dumps(event.to_json(), separators=(",", ":")) + "\n").encode()
         self._ensure_directory()

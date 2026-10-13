@@ -287,6 +287,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--wait`; a second such look in a row counts as busy. This replaces the check of the
   emulators that banksman knows, which covered only emulators. The record has a schema of its
   own; the lease schema and the output schema do not change.
+- A warn mode for the adb guard, and a record of what the guard refuses. With
+  `strict = "warn"` in `[guard]`, the guard lets an agent's device command on a device that no
+  lease of its holding has run, says in one line on standard error that strict mode would
+  refuse it, and records it in the log. Each refusal, in every mode, is in the log too, as a
+  new `guard` event with the new fields `action` (`refused` or `warned`), `command` (only the
+  words of the adb command, never its arguments), and `serial`; its `reason` says why, and its
+  holder is the caller. A refused command for every device has one event for each running
+  device of another holder. `banksman log` has the new options `--event`, which shows only the
+  events of one kind, and `--count`, which groups the events by event, device, worktree, and
+  agent: `banksman log --event guard --count` lists the flows that still use devices without
+  banksman. The guard takes the lock of the lease store only to add an event, and waits for it
+  for half a second at most. The strict refusal and the refusal for the device of another
+  holder now end with "Run banksman agent-guide and follow it". The output schema stays 6, and
+  an earlier banksman leaves the guard events out of its `log`.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

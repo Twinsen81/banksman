@@ -11,7 +11,7 @@ import pytest
 import shapes
 
 from banksman.cli import main
-from banksman.history import ACQUIRE, RELEASE, Event, Process
+from banksman.history import ACQUIRE, GUARD, OTHER_HOLDER, REFUSED, RELEASE, Event, Process
 
 VERSION = {"schema": 6, "version": "0.1.0", "lease_schema": 6}
 FREE = {
@@ -86,6 +86,20 @@ def test_every_json_document_that_a_command_prints_is_checked(monkeypatch):
             running=(Process(201, 300),),
             stopping=False,
             problem="the hook failed",
+        ),
+        Event(
+            1_790_000_001.0,
+            GUARD,
+            "phone-1",
+            kind="device",
+            state="ready",
+            owner="/work/tree-a",
+            owner_pid=101,
+            agent="claude",
+            reason=OTHER_HOLDER,
+            action=REFUSED,
+            command="shell",
+            serial="emulator-5554",
         ),
     ],
 )

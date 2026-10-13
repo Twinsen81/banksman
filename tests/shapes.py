@@ -70,6 +70,9 @@ EVENT = {
     "running": [USER],
     "stopping": (bool, None),
     "problem": TEXT,
+    "action": TEXT,
+    "command": TEXT,
+    "serial": TEXT,
 }
 # `log --json` shows the time as text, and the purpose only with --verbose.
 SHOWN_EVENT = {**EVENT, "at": str, "purpose?": TEXT}
@@ -98,9 +101,25 @@ SHAPES: dict[str, Any] = {
         ],
         "notes": [str],
     },
+    # With --count, `log` prints counts in place of the events.
     "log": {
         "schema": int,
-        "events": [SHOWN_EVENT],
+        "events?": [SHOWN_EVENT],
+        "counts?": [
+            {
+                "count": int,
+                "first": str,
+                "last": str,
+                "event": str,
+                "action": TEXT,
+                "reason": TEXT,
+                "resource": str,
+                "serial": TEXT,
+                "owner": TEXT,
+                "agent": TEXT,
+                "commands": [str],
+            }
+        ],
         "skipped": int,
     },
     "whoami": {

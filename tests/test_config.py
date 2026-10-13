@@ -9,6 +9,8 @@ from banksman import config
 from banksman.config import (
     DEFAULT_AGENTS,
     MAX_COUNT,
+    STRICT,
+    WARN,
     Android,
     Config,
     ConfigError,
@@ -214,10 +216,15 @@ def test_the_holder_rules_have_defaults_and_can_be_changed(config_path):
     assert holder.issue_pattern.pattern == "#([0-9]+)"
 
 
-def test_the_adb_guard_is_strict_only_when_the_operator_says_so(config_path):
-    assert load_config().guard.strict is False
-    write_config(config_path, "[guard]\nstrict = true\n")
-    assert load_config().guard.strict is True
+@pytest.mark.parametrize(
+    ("value", "mode"), [(None, None), ("false", None), ("true", STRICT), ('"warn"', WARN)]
+)
+def test_the_adb_guard_is_strict_or_warns_only_when_the_operator_says_so(
+    config_path, value, mode
+):
+    if value is not None:
+        write_config(config_path, f"[guard]\nstrict = {value}\n")
+    assert load_config().guard.strict == mode
 
 
 def test_a_kind_can_get_its_instances_from_discovery(config_path):
@@ -368,6 +375,9 @@ def test_text_that_is_not_a_duration_is_refused(text):
         ("[defaults]\nfree_timeout = '30m'", "defaults.free_timeout"),
         ("[android]\nadb = '/opt/adb'", "android.adb"),
         ("[guard]\nstrict = 'yes'", "guard.strict"),
+        ("[guard]\nstrict = 'strict'", "guard.strict"),
+        ("[guard]\nstrict = 'Warn'", "guard.strict"),
+        ("[guard]\nstrict = 1", "guard.strict"),
         ("[guard]\nstrictly = true", "guard.strictly"),
     ],
 )

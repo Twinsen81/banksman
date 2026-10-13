@@ -1225,8 +1225,8 @@ class Store:
         # the first one.
         if self._locked:
             raise RuntimeError("the store lock is not re-entrant")
-        self._ensure_directory()
-        fd = self._take_lock()
+        _ensure_directory(self.directory)
+        fd = _take_lock(self.directory / _LOCK_FILE, self._lock_wait)
         self._locked = True
         try:
             _remove_temp_files(self.directory)
@@ -1235,47 +1235,6 @@ class Store:
         finally:
             self._locked = False
             os.close(fd)
-
-    def _take_lock(self) -> int:
-        path = self.directory / _LOCK_FILE
-        give_up = time.monotonic() + self._lock_wait
-        pause = 0.002
-        while True:
-            fd = _open_lock_file(path)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                # A lock on a file that was deleted meanwhile, for example by a cleaner of
-                # temporary files, excludes nobody.
-                if _same_file(fd, path):
-                    os.ftruncate(fd, 0)
-                    os.write(fd, f"{os.getpid()}\n".encode())
-                    return fd
-            except BlockingIOError:
-                pass
-            except BaseException:
-                os.close(fd)
-                raise
-            os.close(fd)
-            # The kernel frees the lock when its holder ends, but not while the holder is
-            # stopped (for example with Ctrl-Z) or hung.
-            if time.monotonic() >= give_up:
-                raise LockTimeout(
-                    f"another banksman process (pid {_lock_holder(path)}) has held {path} "
-                    f"for more than {self._lock_wait:g} s; it can be stopped or hung"
-                )
-            time.sleep(pause)
-            pause = min(pause * 2, 0.05)
-
-    def _ensure_directory(self) -> None:
-        try:
-            os.mkdir(self.directory, 0o700)
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise StoreError(
-                f"cannot create the state directory {self.directory}: {exc.strerror}"
-            ) from exc
-        _check_directory(self.directory)
 
     def _ensure_quarantine_dir(self) -> None:
         try:
@@ -1558,6 +1517,61 @@ def _remove_temp_files(directory: Path) -> None:
         if name.startswith(_TEMP_PREFIX):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(directory / name)
+
+
+@contextmanager
+def log_lock(directory: Path, wait: float) -> Iterator[None]:
+    """Hold the lock of the lease store to add to the log, for a process that changes no lease.
+
+    Unlike the lock of a change, it neither cleans up nor restores the quarantines, so that it
+    stays short for the adb guard.
+    """
+    _ensure_directory(directory)
+    fd = _take_lock(directory / _LOCK_FILE, wait)
+    try:
+        yield
+    finally:
+        os.close(fd)
+
+
+def _take_lock(path: Path, wait: float) -> int:
+    give_up = time.monotonic() + wait
+    pause = 0.002
+    while True:
+        fd = _open_lock_file(path)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # A lock on a file that was deleted meanwhile, for example by a cleaner of
+            # temporary files, excludes nobody.
+            if _same_file(fd, path):
+                os.ftruncate(fd, 0)
+                os.write(fd, f"{os.getpid()}\n".encode())
+                return fd
+        except BlockingIOError:
+            pass
+        except BaseException:
+            os.close(fd)
+            raise
+        os.close(fd)
+        # The kernel frees the lock when its holder ends, but not while the holder is
+        # stopped (for example with Ctrl-Z) or hung.
+        if time.monotonic() >= give_up:
+            raise LockTimeout(
+                f"another banksman process (pid {_lock_holder(path)}) has held {path} "
+                f"for more than {wait:g} s; it can be stopped or hung"
+            )
+        time.sleep(pause)
+        pause = min(pause * 2, 0.05)
+
+
+def _ensure_directory(directory: Path) -> None:
+    try:
+        os.mkdir(directory, 0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise StoreError(f"cannot create the state directory {directory}: {exc.strerror}") from exc
+    _check_directory(directory)
 
 
 def _open_lock_file(path: Path) -> int:

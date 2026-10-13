@@ -5,7 +5,8 @@ for every adb call. The guard only decides: it prints the adb to run, or refuses
 the wrapper runs adb itself, so that a banksman that cannot start never blocks adb. The guard
 decides from the lease files, without the lock, without reaping, and without discovery. It reads
 the process list and runs `adb devices` only when a decision needs them, because it runs before
-every adb call, and a UI test makes many.
+every adb call, and a UI test makes many. It writes to the log only when it refuses a call, or
+lets a call run with a warning, and only then takes the lock of the lease store.
 
 It is a guardrail, not a security boundary: a call through the full path of adb, a tool that
 talks to the adb server itself, and the emulator console do not pass through it. It never
@@ -24,13 +25,34 @@ from functools import cached_property
 
 from banksman import android
 from banksman.android import Transport
-from banksman.config import Android, Config, load_config
+from banksman.config import STRICT, Android, Config, HolderRules, load_config
 from banksman.errors import BanksmanError
 from banksman.fencing import ancestors
-from banksman.identity import find_agent
-from banksman.lease import HELD, Lease
+from banksman.history import (
+    COMMAND,
+    EVERY_DEVICE,
+    GUARD,
+    LOST,
+    NOT_LEASED,
+    OTHER_HOLDER,
+    REFUSED,
+    UNREADABLE,
+    WARNED,
+    Event,
+    History,
+)
+from banksman.identity import find_agent, find_holder
+from banksman.lease import HELD, RESOURCE_NAME, Holder, Lease
 from banksman.sanitize import clean
-from banksman.store import Snapshot, Unreadable, default_quarantine_dir, default_state_dir, peek
+from banksman.store import (
+    Snapshot,
+    Unreadable,
+    default_log_path,
+    default_quarantine_dir,
+    default_state_dir,
+    log_lock,
+    peek,
+)
 from banksman.system import Machine, Process, System
 
 # The status of `check` for a lost lease: the caller must not use the device.
@@ -74,8 +96,13 @@ _FOR_EVERY_DEVICE = (["reconnect", "offline"], ["forward", "--remove-all"])
 _EMULATOR = re.compile(r"emulator-\s*\+?([0-9]+)")
 # The most leases that a refused command for every device names.
 _SHOWN = 5
+# The longest wait for the lock of the lease store before an event goes to the log. A holder keeps
+# the lock for milliseconds, so a longer wait means a holder that is stopped or hung, and the adb
+# call must not wait for it.
+LOG_LOCK_WAIT = 0.5
 
 Listing = Callable[[], Sequence[Transport]]
+_GUIDE = "Get a device through banksman: run banksman agent-guide and follow it"
 
 
 @dataclass(frozen=True)
@@ -94,6 +121,21 @@ class Call:
     server: tuple[str, ...] = ()
     # `adb emu` talks to the console of an emulator, which it chooses by rules of its own.
     console: bool = False
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A call that the guard refuses, or lets run with a warning."""
+
+    action: str
+    reason: str
+    text: str
+    command: str
+    caller: Caller
+    serial: str | None = None
+    # The lease of the device, or for a command for every device, the leases of the running
+    # devices of other holders.
+    leases: tuple[Lease, ...] = ()
 
 
 def main(argv: Sequence[str]) -> int:
@@ -119,16 +161,21 @@ def main(argv: Sequence[str]) -> int:
         config = load_config()
         if config.android.sdk is not None or fallback is None:
             adb = android.adb_path(config.android)
-        refusal = check(arguments, config, os.environ, Machine())
+        verdict = check(arguments, config, os.environ, Machine())
     except Exception as exc:
         # A broken guard that blocks every device is worse than a short time without
         # protection, so the call runs, and the person who reads the output sees why.
-        reason = exc if isinstance(exc, (BanksmanError, OSError)) else repr(exc)
-        _say(f"adb guard: this adb call is not checked: {reason}")
-        refusal = None
-    if refusal is not None:
-        _say(refusal)
-        return EXIT_REFUSED
+        _say(f"adb guard: this adb call is not checked: {_reason(exc)}")
+        verdict = None
+    if verdict is not None:
+        _say(verdict.text)
+        try:
+            record(verdict)
+        except Exception as exc:
+            # The decision stands: a log that cannot be written never refuses a call.
+            _say(f"adb guard: warning: this adb call is not in the log: {_reason(exc)}")
+        if verdict.action == REFUSED:
+            return EXIT_REFUSED
     print(adb)
     return 0
 
@@ -139,8 +186,8 @@ def check(
     env: Mapping[str, str],
     system: System,
     listing: Listing | None = None,
-) -> str | None:
-    """Return why an adb call is refused, or None when adb may run it.
+) -> Verdict | None:
+    """Return why an adb call is refused or warned, or None when adb may run it.
 
     `listing` lists the devices as `adb devices -l` does; by default it runs adb.
     """
@@ -152,7 +199,7 @@ def check(
     def adb_devices() -> Sequence[Transport]:
         return android.transports(config.android, call.server)
 
-    caller = Caller(env, snapshot.leases, system, config.holder.agents)
+    caller = Caller(env, snapshot.leases, system, config.holder)
     return decide(
         call, caller, _devices(snapshot, config), config.guard.strict, listing or adb_devices
     )
@@ -228,12 +275,12 @@ class Caller:
     """
 
     def __init__(
-        self, env: Mapping[str, str], leases: Sequence[Lease], system: System, agents: Sequence[str]
+        self, env: Mapping[str, str], leases: Sequence[Lease], system: System, rules: HolderRules
     ) -> None:
         self.env = env
         self.leases = leases
         self.system = system
-        self.agents = agents
+        self.rules = rules
         self.pid = os.getpid()
 
     def token_holding(self) -> str | None:
@@ -245,7 +292,11 @@ class Caller:
 
     def is_agent(self) -> bool:
         """Whether a known agent process is among the processes above the caller."""
-        return find_agent(self._table, self.agents, self.pid)[0] is not None
+        return find_agent(self._table, self.rules.agents, self.pid)[0] is not None
+
+    def holder(self) -> Holder:
+        """Return the caller as acquire would record it: the worktree, the agent, and the issue."""
+        return find_holder(self._table, self.rules, env=self.env, pid=self.pid)
 
     def descends_from(self, pid: int | None, started: str | None) -> bool:
         process = None if pid is None else self._table.get(pid)
@@ -273,11 +324,11 @@ class Caller:
 
 
 def decide(
-    call: Call, caller: Caller, devices: Snapshot, strict: bool, listing: Listing
-) -> str | None:
-    """Return why a call is refused, or None when adb may run it.
+    call: Call, caller: Caller, devices: Snapshot, strict: str | None, listing: Listing
+) -> Verdict | None:
+    """Return why a call is refused or warned, or None when adb may run it.
 
-    `devices` holds the leases that can name a device.
+    `devices` holds the leases that can name a device, and `strict` is the mode of the guard.
     """
     if call.scope == HOST:
         return None
@@ -286,7 +337,7 @@ def decide(
         if not running or not caller.is_agent():
             return None
         others = [lease for lease in running if lease.holding not in caller.holdings]
-        return _every_device_refused(call, others) if others else None
+        return _every_device_refused(call, caller, others) if others else None
     if not strict and not devices.leases and not devices.unreadable:
         return None
     serial = target(call, caller.env, devices, listing)
@@ -295,10 +346,7 @@ def decide(
     leases, unreadable = _leases_of(serial, devices)
     if not leases and not unreadable:
         if strict and caller.is_agent():
-            return (
-                f"adb {call.command}: refused: {serial} is not a device of your leases, and the"
-                " adb guard is strict. Get a device with banksman acquire"
-            )
+            return _not_leased(call, caller, serial, refuse=strict == STRICT)
         return None
     # The lease id that `banksman run` gives its command decides without the process list.
     token = caller.token_holding()
@@ -313,12 +361,13 @@ def decide(
         # the reaper that takes it back, which can run inside a command of another agent.
         if caller.descends_from(lease.reaper_pid, lease.reaper_started):
             continue
-        return _refused(call, serial, lease, mine=lease.holding in caller.holdings)
+        return _refused(call, caller, serial, lease, mine=lease.holding in caller.holdings)
     if unreadable:
-        return (
+        text = (
             f"adb {call.command}: refused: the lease file of {serial} cannot be read, so the"
             f" device is out of use: {unreadable[0].error}"
         )
+        return Verdict(REFUSED, UNREADABLE, text, call.command, caller, serial)
     return None
 
 
@@ -460,28 +509,93 @@ def _leases_of(serial: str, devices: Snapshot) -> tuple[list[Lease], list[Unread
     return leases, [entry for entry in devices.unreadable if entry.resource == serial]
 
 
-def _refused(call: Call, serial: str, lease: Lease, *, mine: bool) -> str:
+def _not_leased(call: Call, caller: Caller, serial: str, *, refuse: bool) -> Verdict:
+    if refuse:
+        text = (
+            f"adb {call.command}: refused: {serial} is not a device of your leases, and the adb"
+            f" guard is strict. {_GUIDE}"
+        )
+        return Verdict(REFUSED, NOT_LEASED, text, call.command, caller, serial)
+    text = (
+        f"warning: adb {call.command}: {serial} is not a device of your leases, and a strict adb"
+        f" guard would refuse this call. {_GUIDE}"
+    )
+    return Verdict(WARNED, NOT_LEASED, text, call.command, caller, serial)
+
+
+def _refused(call: Call, caller: Caller, serial: str, lease: Lease, *, mine: bool) -> Verdict:
     device = serial if lease.resource == serial else f"{serial} ({lease.resource})"
     if mine:
-        return (
+        text = (
             f"adb {call.command}: refused: your lease of {device} is lost: it is {lease.state}."
             " Stop using the device, and acquire one again"
         )
-    return (
+        return Verdict(REFUSED, LOST, text, call.command, caller, serial, (lease,))
+    text = (
         f"adb {call.command}: refused: another holder leases {device}, and the lease is"
         f" {lease.state}: {_holder(lease)}. Use a device of your own lease; banksman status"
-        " shows who holds what"
+        " shows who holds what. Run banksman agent-guide and follow it"
     )
+    return Verdict(REFUSED, OTHER_HOLDER, text, call.command, caller, serial, (lease,))
 
 
-def _every_device_refused(call: Call, others: Sequence[Lease]) -> str:
+def _every_device_refused(call: Call, caller: Caller, others: Sequence[Lease]) -> Verdict:
     shown = [f"{lease.serial} ({_holder(lease)})" for lease in others[:_SHOWN]]
     if len(others) > _SHOWN:
         shown.append(f"{len(others) - _SHOWN} more")
-    return (
+    text = (
         f"adb {call.command}: refused: it acts on every device, also on devices that other"
         f" holders lease and that run now: {', '.join(shown)}"
     )
+    return Verdict(REFUSED, EVERY_DEVICE, text, call.command, caller, leases=tuple(others))
+
+
+def record(verdict: Verdict) -> None:
+    """Add the events of a refused or warned call to the log, under the lock of the lease store."""
+    found = events(verdict, verdict.caller.holder(), verdict.caller.system.wall_clock())
+    if not found:
+        return
+    history = History(default_log_path())
+    with log_lock(default_state_dir(), LOG_LOCK_WAIT):
+        for event in found:
+            history.append(event)
+
+
+def events(verdict: Verdict, caller: Holder, at: float) -> list[Event]:
+    """Return the events of a refused or warned call, with the caller as the holder.
+
+    A command for every device has one event for each device of another holder that it would
+    break, so that the history of that device shows who tried. The events have the words of the
+    command only, never the rest of the command line.
+    """
+    command = verdict.command if COMMAND.fullmatch(verdict.command) else None
+
+    def event(resource: str, lease: Lease | None, serial: str | None) -> Event:
+        return Event(
+            at,
+            GUARD,
+            resource,
+            kind=None if lease is None else lease.kind,
+            state=None if lease is None else lease.state,
+            owner=caller.owner,
+            owner_pid=caller.owner_pid,
+            agent=caller.agent,
+            issue=caller.issue,
+            session=caller.session,
+            reason=verdict.reason,
+            action=verdict.action,
+            command=command,
+            serial=serial,
+        )
+
+    if verdict.reason == EVERY_DEVICE:
+        return [event(lease.resource, lease, lease.serial) for lease in verdict.leases]
+    # A serial that is not a valid name can come only from the command line of the caller, and
+    # adb finds no device by it.
+    serial = verdict.serial if verdict.serial and RESOURCE_NAME.fullmatch(verdict.serial) else None
+    if verdict.leases:
+        return [event(verdict.leases[0].resource, verdict.leases[0], serial)]
+    return [] if serial is None else [event(serial, None, serial)]
 
 
 def _holder(lease: Lease) -> str:
@@ -489,6 +603,10 @@ def _holder(lease: Lease) -> str:
     from banksman.console import holder_label
 
     return holder_label(lease)
+
+
+def _reason(exc: Exception) -> object:
+    return exc if isinstance(exc, (BanksmanError, OSError)) else repr(exc)
 
 
 def _say(text: str) -> None:

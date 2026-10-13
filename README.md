@@ -57,7 +57,8 @@ resource, so an operator can also declare other resources, such as host ports or
   the free ones that no lease has used for that time.
 - **A guard for raw adb calls, when the operator wants it.** An optional `adb` wrapper on the
   `PATH` refuses an agent's device command on a device that another holder leases, also when
-  a script or an agent calls adb without banksman.
+  a script or an agent calls adb without banksman. A warn mode lists the scripts and agents
+  that still use devices without a lease, before a strict mode refuses them.
 - **Knows no app.** banksman leases devices. What a run installs or clears on a device is
   the run's own business.
 - **Other resources, when the operator wants them.** A counted kind is a number of
