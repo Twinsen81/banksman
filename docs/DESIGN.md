@@ -1119,30 +1119,33 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   earlier output schema whose events it knows, so an upgrade does not hide the history.
   `BANKSMAN_LOG` changes the path for tests; when only `BANKSMAN_STATE_DIR` is set, the log is
   next to that directory.
-- `banksman admin doctor` checks an install for the operator, and changes nothing. Each check
-  is `ok`, `warn`, `fail`, or `skip`, and the command exits with status 1 when a check fails. It
+- `banksman admin doctor` checks an install for the operator, and changes nothing. Each check is
+  `ok`, `warn`, `fail`, or `skip`, and the command exits with status 1 when a check fails. It
   checks the Python version; which banksman runs, and whether it is the first `banksman` in an
   absolute directory of the `PATH`, as the adb wrapper and the Gradle scripts find it; that the
   configuration loads; that the inventory exists when a kind is discovered, and which allowed
-  instances discovery finds now, without the accounts; that the adb of the configuration
-  exists, with what `adb version` says, and the emulator for a kind of the `android-emulator`
-  preset; that the first `adb` on the `PATH` is the adb wrapper, when one is saved (section
-  12); that the saved adb wrapper, the two Gradle files (section 11), and the guide for agents
-  saved as a skill in `~/.claude/skills/banksman/SKILL.md` and
-  `~/.codex/skills/banksman/SKILL.md` are what the installed banksman prints; that the state
-  directory, the quarantine directory, the log, and the record of lease ends belong to the user
-  and can be written; the quarantined leases, as a warning; and the holder that `whoami` shows
-  in this shell. It compares the content of each file, so a printed file needs no version
-  stamp, also while every development install has the same version. A file that is missing is
-  `skip`, because each of these parts is optional, but a part that another part needs is a
-  failure: an init script without the build-slot part, or without `[kinds.build]` in the
-  configuration, fails every build. A missing inventory is a failure when a kind is discovered,
-  because agents then get no instance of it. For a failure or a warning, the doctor gives the
+  instances discovery finds now, without the accounts, with the notes of the discovery; that the
+  adb of the configuration exists, with what `adb version` says, that it can list the devices
+  when a kind uses an Android preset, and the emulator for a kind of the `android-emulator`
+  preset; that the first `adb` on the `PATH` is the adb wrapper, when one is saved (section 12);
+  that the saved adb wrapper, the two Gradle files (section 11), and the guide for agents saved
+  as a skill in `~/.claude/skills/banksman/SKILL.md` and `~/.codex/skills/banksman/SKILL.md` are
+  what the installed banksman prints; that the state directory, the quarantine directory, the
+  log, and the record of lease ends belong to the user and can be written; the quarantined
+  leases, as a warning; and the holder that `whoami` shows in this shell. It compares the
+  content of each file, so a printed file needs no version stamp, also while every development
+  install has the same version. A file that is missing is `skip`, because each of these parts is
+  optional, but a part that another part needs is a failure: an init script without the
+  build-slot part, or without `[kinds.build]` in the configuration, fails every build. A missing
+  inventory is a failure when a kind is discovered, because agents then get no instance of it. A
+  file at the place where the setup saves the adb wrapper is the saved wrapper, also when it is
+  empty: the redirection of a save empties the file before banksman runs, so a save that failed
+  leaves an empty `adb`, which does nothing. For a failure or a warning, the doctor gives the
   command or the step that repairs it. It does not reap, creates no directory, writes no log,
-  and calls no network. It runs discovery, as `status` does, and `adb version`, and neither
-  changes a device. The doctor sees the `PATH` and the home directory of its own shell, which
-  can differ from those of the agents. `--json` prints each check with `check`, `status`,
-  `detail`, and `fix`.
+  and calls no network. It runs discovery, as `status` does, `adb version`, and `adb devices
+  -l`, and none of them changes a device. The doctor sees the `PATH` and the home directory of
+  its own shell, which can differ from those of the agents. `--json` prints each check with
+  `check`, `status`, `detail`, and `fix`.
 - Not implemented yet: `banksman explain --where ...` answers the question "can I get one
   now?". For each matching resource it says free, held by whom and until when, not
   permitted, not present, or quarantined, and it gives the caller's place in the queue. An

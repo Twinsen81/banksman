@@ -338,8 +338,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schemas 8, 9, and 10. The output schema stays 6.
 - `banksman admin doctor` checks an install and changes nothing: the Python version, the
   banksman on the `PATH`, the configuration, the inventory and which allowed instances
-  discovery finds now, the adb and the emulator of the Android SDK with `adb version`, the adb
-  that comes first on the `PATH`, the directories of banksman, and the quarantined leases. It
+  discovery finds now, the adb and the emulator of the Android SDK with `adb version` and
+  whether adb can list the devices, the adb that comes first on the `PATH`, the directories of
+  banksman, and the quarantined leases. It
   compares the saved adb wrapper, the two Gradle files, and the guide for agents saved as a
   skill with what this banksman prints, and gives the command that saves a file again. Each
   check is `ok`, `warn`, `fail`, or `skip`, the exit status is 1 when a check fails, and

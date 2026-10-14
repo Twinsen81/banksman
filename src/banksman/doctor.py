@@ -5,8 +5,8 @@ compares each saved copy with what this banksman prints, and checks the configur
 inventory, the Android SDK, the PATH, and the directories of banksman.
 
 It changes nothing: it does not reap, it creates no directory, and it writes no log. It reads the
-lease files as the adb guard does, and it runs discovery without the accounts and `adb version`.
-It never calls the network.
+lease files as the adb guard does, and it runs discovery without the accounts, `adb version`,
+and `adb devices -l`. It never calls the network.
 """
 
 from __future__ import annotations
@@ -65,6 +65,7 @@ SKILLS = {
 BUILD_KIND = "build"
 _MAX_FILE = 1024 * 1024
 _SHOWN = 5
+_NOTES = 3
 _NO_CONFIG = "the configuration does not load"
 
 
@@ -239,16 +240,23 @@ def _kind(kind: Kind, config: Config, inventory: Inventory) -> Check:
         return Check(name, WARN, f"discovery failed: {found.failure}")
     names = {instance.name for instance in found.instances}
     allowed = inventory.kinds.get(kind.name, Decisions()).allowed
+    # The notes are text, not a warning: many of them name a normal state, such as a personal
+    # phone that is not authorized. The doctor is for the operator, who may see them all.
+    notes = "".join(f"; note: {note}" for note in found.notes[:_NOTES])
+    if len(found.notes) > _NOTES:
+        notes += f"; and {len(found.notes) - _NOTES} more notes"
     if not allowed:
         return Check(
             name,
             WARN,
-            f"no instance is allowed; discovery finds {len(names)} now",
+            f"no instance is allowed; discovery finds {len(names)} now{notes}",
             f"banksman admin discover --kind {kind.name}",
         )
     present = [each for each in allowed if each in names]
     listed = f": {_some(present)}" if present else ""
-    return Check(name, OK, f"discovery finds {len(present)} of {len(allowed)} allowed{listed}")
+    return Check(
+        name, OK, f"discovery finds {len(present)} of {len(allowed)} allowed{listed}{notes}"
+    )
 
 
 def _android(config: Config | None, config_path: Path | None, wrapper: Path | None) -> Check:
@@ -275,6 +283,19 @@ def _android(config: Config | None, config_path: Path | None, wrapper: Path | No
             f"{program} does not exist, so acquire --start cannot start an emulator",
             fix,
         )
+    if presets:
+        # Discovery only notes a listing that fails, and then finds no device, which looks like
+        # a machine without devices.
+        try:
+            listed = android.transports(config.android)
+        except android.AndroidError as exc:
+            return Check(
+                "android-sdk",
+                FAIL,
+                f"{adb} works, but it cannot list the devices, so discovery finds none: {exc}",
+                "run adb devices to see why, for example an adb server that does not start",
+            )
+        said += f"; it lists {len(listed)} devices and emulators"
     return Check("android-sdk", OK, f"{adb}: {said}")
 
 
@@ -287,7 +308,13 @@ def _adb_on_path(shell: Shell, config: Config | None) -> tuple[Check, Path | Non
     if wrapper is not None:
         return _wrapper_on_path(name, wrapper, runs), wrapper
     saved = shell.home / ADB_WRAPPER
-    if _is_wrapper(saved):
+    # A file there is meant as the wrapper, also when it is not one: the redirection of a save
+    # empties the file before banksman runs, so a save that failed leaves an empty file, and a
+    # shell runs an empty file as a script that does nothing.
+    if os.path.lexists(saved):
+        listed = next((each for each in found if _same_file(each, saved)), None)
+        if listed is not None:
+            return _wrapper_on_path(name, listed, runs), listed
         return (
             Check(
                 name,
@@ -341,7 +368,11 @@ def _adb_wrapper(wrapper: Path | None, config: Config | None) -> Check:
         text = _read(wrapper)
     except _Unreadable as exc:
         return Check(name, FAIL, f"cannot read {wrapper}: {exc}", fix)
-    adb = None if text is None else printed.saved_adb(text)
+    if not text:
+        return Check(
+            name, FAIL, f"{wrapper} is empty, so each adb call through it does nothing", fix
+        )
+    adb = printed.saved_adb(text)
     if adb is None:
         return Check(name, FAIL, _differs(wrapper), fix)
     if config is not None and adb != (expected := android.adb_path(config.android)):
@@ -494,6 +525,13 @@ def _on_path(
         if candidate.is_file() and (not executable or os.access(candidate, os.X_OK)):
             found.append(candidate)
     return found
+
+
+def _same_file(first: Path, second: Path) -> bool:
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False
 
 
 def _is_wrapper(path: Path) -> bool:

@@ -14,12 +14,19 @@ from banksman.store import Store
 from banksman.system import Machine
 
 FAKE_ADB = """#!/bin/sh
-if [ "$1" = version ]; then
+case $1 in
+version)
     echo "Android Debug Bridge version 1.0.41"
     echo "Version 99.0.0-test"
     echo "Installed as $0"
-    exit 0
-fi
+    ;;
+devices) echo "List of devices attached" ;;
+*) exit 1 ;;
+esac
+"""
+# An adb whose server does not start: only adb version works.
+ADB_WITHOUT_SERVER = """#!/bin/sh
+[ "$1" = version ] && echo "Android Debug Bridge version 1.0.41" && exit 0
 exit 1
 """
 PRINT_ARGUMENT = "import sys; print(sys.argv[1])"
@@ -235,6 +242,27 @@ def test_a_saved_wrapper_that_is_not_on_the_path_is_a_warning(capsys, config_pat
     assert found["adb-wrapper"]["status"] == "ok"
 
 
+@pytest.mark.parametrize("on_path", [True, False])
+def test_an_empty_file_in_place_of_the_wrapper_fails(
+    capsys, config_path, sdk, home, monkeypatch, banksman_bin, on_path
+):
+    # The redirection of a save empties the file before banksman runs, so a save whose banksman
+    # did not run leaves an empty file, and adb then does nothing.
+    configure(config_path, sdk=sdk)
+    wrapper = save(home / doctor.ADB_WRAPPER, "")
+    wrapper.chmod(0o755)
+    if on_path:
+        set_path(monkeypatch, wrapper.parent, sdk / "platform-tools", banksman_bin)
+    found = checks(capsys, status=1)
+    assert found["adb-path"]["status"] == ("ok" if on_path else "warn")
+    assert found["adb-wrapper"] == {
+        "check": "adb-wrapper",
+        "status": "fail",
+        "detail": f"{wrapper} is empty, so each adb call through it does nothing",
+        "fix": f"banksman admin adb-shim > {wrapper}",
+    }
+
+
 def test_strict_mode_without_a_wrapper_is_a_warning(capsys, config_path):
     configure(config_path, "[guard]\nstrict = true\n")
     assert checks(capsys)["adb-path"]["status"] == "warn"
@@ -247,6 +275,26 @@ def test_a_missing_adb_fails(capsys, config_path, tmp_path):
     assert found["android-sdk"]["detail"] == (
         f"{tmp_path / 'missing' / 'platform-tools' / 'adb'} does not exist"
     )
+
+
+def test_an_adb_that_cannot_list_the_devices_fails(capsys, config_path, sdk):
+    (sdk / "platform-tools" / "adb").write_text(ADB_WITHOUT_SERVER)
+    configure(config_path, '[kinds.phone]\npreset = "android-device"\n', sdk=sdk)
+    save_inventory(Inventory(kinds={"phone": Decisions(allowed=("R5CR1234ABC",))}))
+    found = checks(capsys, status=1)
+    assert found["android-sdk"]["status"] == "fail"
+    assert found["android-sdk"]["detail"] == (
+        f"{sdk / 'platform-tools' / 'adb'} works, but it cannot list the devices, so discovery"
+        " finds none: adb devices -l failed with exit status 1"
+    )
+    # Discovery only notes the cause, and the kind shows the note.
+    assert found["kind:phone"] == {
+        "check": "kind:phone",
+        "status": "ok",
+        "detail": "discovery finds 0 of 1 allowed; note: cannot list the devices: adb devices"
+        " failed with exit status 1",
+        "fix": None,
+    }
 
 
 def test_a_kind_that_starts_emulators_needs_the_emulator(capsys, config_path, sdk, tmp_path):
