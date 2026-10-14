@@ -244,23 +244,28 @@ def change(present, booted=False):
         os.replace(path + ".tmp", path)
 
 
-def end(signum=None, frame=None):
-    change(False)
-    sys.exit(0)
+stopping = False
 
 
-signal.signal(signal.SIGTERM, signal.SIG_IGN if behavior.get("ignore_term") else end)
+def stop(signum, frame):
+    # Only note the stop: a SIGTERM can come while `change` holds the lock, and a second flock
+    # of it from this process would wait for ever.
+    global stopping
+    stopping = True
+
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN if behavior.get("ignore_term") else stop)
 if behavior.get("listed", True):
     change(True)
 boot = behavior.get("boot", 0)
 begun = time.monotonic()
 booted = False
-while time.monotonic() < begun + behavior.get("life", 60):
+while not stopping and time.monotonic() < begun + behavior.get("life", 60):
     if boot is not None and not booted and time.monotonic() >= begun + boot:
         change(True, booted=True)
         booted = True
     time.sleep(0.05)
-end()
+change(False)
 """
 
 
