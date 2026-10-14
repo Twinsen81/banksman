@@ -65,6 +65,7 @@ from banksman.lease import (
     LABEL,
     QUARANTINED,
     READY,
+    RELEASED_END,
     VOID_REASONS,
     Lease,
     SerialSeen,
@@ -730,6 +731,8 @@ def _hooked(config: Config) -> Hooked:
 def _take_back(config: Config) -> TakeBack:
     def take_back(lease: Lease) -> bool:
         kind = config.kinds.get(lease.kind)
+        if lease.void_reason == RELEASED_END and _released_as_it_is(config, lease):
+            return True
         # banksman ends only an instance that it started, and a hook of the kind runs after that.
         failure = None
         if kind is not None and kind.preset == ANDROID_REMOTE and lease.handle is not None:
@@ -749,6 +752,24 @@ def _take_back(config: Config) -> TakeBack:
         return failure is None
 
     return take_back
+
+
+def _released_as_it_is(config: Config, lease: Lease) -> bool:
+    """Whether the holder asked for the end of an instance that banksman did not start after
+    all, so that the take-back gives it back as a release does, without the hook of its kind.
+
+    That happens when the release came while another acquire still started or reset the
+    instance. The end of the lease still counts as one that ran the hook, which only makes
+    PREVIOUS other.
+    """
+    try:
+        kept = _not_started(config, lease)
+    except BanksmanError:
+        # The take-back reads the records again, says why it cannot, and quarantines the lease.
+        return False
+    if kept is not None:
+        _adopt(config, [lease])
+    return kept is not None
 
 
 def _unused(config: Config, system: System) -> FindUnused:
@@ -1994,27 +2015,39 @@ def _to_release(
 
 
 def _kept_instance(config: Config, lease: Lease) -> str | None:
-    """Return None when banksman started the instance of a lease, so that release --end ends it,
-    or why the release leaves the instance as it is."""
+    """Return None when release --end ends the instance of a lease, or why the release leaves
+    the instance as it is."""
     kind = config.kinds.get(lease.kind)
-    machine = Machine()
+    if lease.state == BOOTING and kind is not None and kind.preset in STARTED:
+        # A start can still run, and its records do not show yet what it starts, such as a
+        # reservation before the tool prints its id. The lease drains until that acquire has
+        # ended, and the take-back then decides from the records.
+        return None
     try:
-        if kind is not None and kind.preset == ANDROID_EMULATOR:
-            entry = emulator.load(kind, machine).get(lease.resource)
-            if entry is not None and entry.created:
-                return None
-            if entry is None and lease.resource not in emulator.by_avd(machine.commands()):
-                return "Its emulator does not run, so there is nothing to end"
-            return "banksman did not start its emulator, so it leaves it running"
-        if kind is not None and kind.preset == ANDROID_REMOTE:
-            if lease.handle is None:
-                return "It has no reservation, so there is nothing to end"
-            session = remote.load_sessions(kind).get(lease.handle)
-            if session is not None and session.created:
-                return None
-            return f"banksman did not create its reservation {lease.handle}, so it keeps it"
+        return _not_started(config, lease)
     except BanksmanError as exc:
         return f"banksman cannot tell whether it started the instance, so it leaves it: {exc}"
+
+
+def _not_started(config: Config, lease: Lease) -> str | None:
+    """Return None when the records say that banksman started the instance of a lease, or why
+    banksman leaves the instance as it is. Raise when a record cannot be read."""
+    kind = config.kinds.get(lease.kind)
+    if kind is not None and kind.preset == ANDROID_EMULATOR:
+        machine = Machine()
+        entry = emulator.load(kind, machine).get(lease.resource)
+        if entry is not None and entry.created:
+            return None
+        if entry is None and lease.resource not in emulator.by_avd(machine.commands()):
+            return "Its emulator does not run, so there is nothing to end"
+        return "banksman did not start its emulator, so it leaves it running"
+    if kind is not None and kind.preset == ANDROID_REMOTE:
+        if lease.handle is None:
+            return "It has no reservation, so there is nothing to end"
+        session = remote.load_sessions(kind).get(lease.handle)
+        if session is not None and session.created:
+            return None
+        return f"banksman did not create its reservation {lease.handle}, so it keeps it"
     return "banksman did not start its instance, so it leaves it as it is"
 
 
@@ -2098,7 +2131,10 @@ def _released(
         if drained.reaper_pid is not None:
             waits.append(f"banksman process {drained.reaper_pid} has ended its reset")
         if end:
-            waits.append("banksman has ended its instance")
+            # A start or a reset of another process still runs, and banksman ends the instance
+            # only when that start was its own.
+            maybe = ", if it started it" if drained.reaper_pid is not None else ""
+            waits.append(f"banksman has ended its instance{maybe}")
         done = f"it is free when {', and '.join(waits)}"
     text = f"Released {resource}: {done}."
     return text if kept is None else f"{text} {kept}."

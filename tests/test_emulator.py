@@ -707,6 +707,33 @@ def test_release_with_end_ends_the_emulator_after_the_scripts(capsys, config_pat
     assert (leases(), known()) == ({}, {})
 
 
+def test_release_with_end_during_a_reset_leaves_an_emulator_that_banksman_did_not_start(
+    capsys, config_path, sdk, state_dir, tmp_path
+):
+    hooked = tmp_path / "on_void"
+    reset = json.dumps([sys.executable, "-c", "import time; time.sleep(3)"])
+    void = json.dumps([sys.executable, "-c", f"open({str(hooked)!r}, 'w').close()"])
+    configure(config_path, sdk, f'unmanaged = "grant"\non_acquire = {reset}\non_void = {void}\n')
+    person = sdk.start_emulator("qa_phone", 5556)
+    wait_for(lambda: listed(sdk, "emulator-5556"))
+    process = acquire_in_child("--where", "avd=qa_phone")
+    wait_for(lambda: (state_dir / "qa_phone.json").exists())
+    lease = leases()["qa_phone"]
+    assert lease.state == "booting"
+    assert main(["release", "--lease", lease.lease_id, "--end"]) == 0
+    assert capsys.readouterr().out == (
+        f"Released qa_phone: it is free when banksman process {process.pid} has ended its reset,"
+        " and banksman has ended its instance, if it started it.\n"
+    )
+    assert process.wait(timeout=60) == 1
+    assert main(["reap"]) == 0
+    # The records say that a person started the emulator, so it runs on, and no hook ran.
+    assert runs(person.pid)
+    assert not hooked.exists()
+    assert leases() == {}
+    assert known()["qa_phone"].created is False
+
+
 def test_release_with_end_quarantines_an_emulator_that_does_not_end(
     capsys, config_path, sdk, monkeypatch
 ):

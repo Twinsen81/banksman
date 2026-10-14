@@ -264,9 +264,13 @@ minutes, and its lease can become void in the middle.
   reservation. The holder knows whether it comes back soon, and banksman does not. So
   `release --end` also ends the instance when banksman started it: the emulator that banksman
   started, or the reservation that it created. banksman decides that from its records while the
-  lease is still held. For an instance that banksman did not start, or a reservation that it
-  adopted, the release says that it leaves the instance as it is, and releases anyway: banksman
-  never ends what it did not start. The end is a take-back. Under the lock, the lease drains
+  lease is still held. While another `acquire` still starts or resets the instance, the records
+  do not show yet what that start creates, for example a reservation before the tool prints its
+  id. Then the lease drains until that `acquire` has ended, and the take-back decides from the
+  records: it ends what the start created, and gives an instance that banksman did not start
+  back as it is, without the hook. For an instance that banksman did not start, or a
+  reservation that it adopted, the release says that it leaves the instance as it is, and
+  releases anyway: banksman never ends what it did not start. The end is a take-back. Under the lock, the lease drains
   with the void reason `released_end`, and names the releasing command in the fields that name
   a reaper, so that no request gets the instance, the adb guard refuses it, and no other reaper
   acts on it. Outside the lock, the command ends the instance, runs the `on_void` hook of the

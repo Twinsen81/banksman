@@ -323,8 +323,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reservation of a remote device that banksman created. A release otherwise leaves the
   emulator running until the free timeout of its kind, and keeps the reservation, which costs
   money, until its own end. For an instance that banksman did not start, or a reservation that
-  it adopted, the release says that it leaves the instance as it is, and releases anyway. The
-  end is a take-back: the lease drains with the new void reason `released_end` and the
+  it adopted, the release says that it leaves the instance as it is, and releases anyway. While
+  another `acquire` still starts or resets the instance, the release decides only when that
+  `acquire` has ended, so that it also ends a reservation whose id the start did not know yet.
+  The end is a take-back: the lease drains with the new void reason `released_end` and the
   releasing command as its reaper, so that no request gets the instance and the adb guard
   refuses it meanwhile; the command then ends the instance, runs the `on_void` hook of the
   kind, and deletes the lease. While scripts of the lease still run, the lease drains first,

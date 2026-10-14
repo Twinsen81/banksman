@@ -929,6 +929,44 @@ def test_release_with_end_removes_the_reservation_that_banksman_created(
     assert (status, again["HANDLE"], again["PREVIOUS"]) == (0, SECOND, "other"), err
 
 
+def test_release_with_end_during_the_start_removes_the_reservation_that_the_start_creates(
+    capsys, config_path, sdk, cli, state_dir
+):
+    configure(config_path, sdk, cli)
+    save_catalogue()
+    adb_lists(sdk, [49522])
+    created = create_answer(cli)
+    # The tool prints the id of the reservation only after a pause.
+    created["chunks"] = ["", *created["chunks"]]
+    created["pause"] = 2
+    lifecycle(cli, create=created)
+    process = subprocess.Popen(
+        [sys.executable, "-m", "banksman", "acquire", "--where", "codename=tokay", "--paid"]
+        + ["--start"],
+        env={**os.environ, "PYTHONPATH": SRC},
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    path = state_dir / "tokay:34.json"
+    give_up = time.monotonic() + 30
+    while time.monotonic() < give_up and not path.exists():
+        time.sleep(0.05)
+    lease = json.loads(path.read_text())
+    assert (lease["state"], lease["handle"]) == ("booting", None)
+    # The holder gives the lease back before the start knows the reservation.
+    assert main(["release", "--lease", lease["lease_id"], "--end"]) == 0
+    assert capsys.readouterr().out == (
+        f"Released tokay:34: it is free when banksman process {process.pid} has ended its reset,"
+        " and banksman has ended its instance, if it started it.\n"
+    )
+    # The start goes on, and its acquire fails, because the lease is not held any more.
+    assert process.wait(timeout=60) == 1
+    assert main(["reap"]) == 0
+    assert cli.calls()[-1] == f"device remote remove {FIRST}"
+    assert (leases(), sessions()) == ({}, {})
+
+
 def test_release_with_end_keeps_a_reservation_that_banksman_did_not_create(
     capsys, config_path, sdk, cli
 ):
