@@ -145,6 +145,22 @@ def booted(settings: Android, serial: str, run: Run | None = None) -> bool:
     return output.strip() == "1"
 
 
+def version(settings: Android, run: Run | None = None) -> str:
+    """Return what `adb version` says about the adb of the configuration, in one line.
+
+    It does not start the adb server.
+    """
+    run = run_program if run is None else run
+    shown = []
+    for line in run([adb_path(settings), "version"], ADB_TIMEOUT_SECONDS).splitlines():
+        # The path of adb and the system come next, and the caller knows them already.
+        if line.startswith("Installed as"):
+            break
+        if line.strip():
+            shown.append(line.strip())
+    return ", ".join(shown) or "adb version printed nothing"
+
+
 def devices(settings: Android, run: Run | None = None, *, accounts: bool = True) -> Document:
     """Find the attached physical devices, with their facts and their accounts."""
     run = run_program if run is None else run

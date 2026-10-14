@@ -380,7 +380,8 @@ run the command, so the text always matches the installed banksman, and a projec
 copy it. Use it in one of two ways:
 
 - Save it as a skill for every project of the user, and save it again after an upgrade of
-  banksman:
+  banksman (`banksman admin doctor` shows a saved guide that is not the guide of the
+  installed banksman):
 
   ```sh
   mkdir -p ~/.claude/skills/banksman ~/.codex/skills/banksman
