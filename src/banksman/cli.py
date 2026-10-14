@@ -65,6 +65,7 @@ from banksman.lease import (
     LABEL,
     QUARANTINED,
     READY,
+    RELEASED_END,
     VOID_REASONS,
     Lease,
     SerialSeen,
@@ -332,6 +333,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--owner-pid",
         type=_pid,
         help="with --all or --holding: the owner process; by default the agent process",
+    )
+    give_back.add_argument(
+        "--end",
+        action="store_true",
+        help="also end each instance that banksman started, such as an emulator or the"
+        " reservation of a remote device, after the scripts of its lease; banksman never ends an"
+        " instance that it did not start",
     )
 
     enter = commands.add_parser(
@@ -723,6 +731,8 @@ def _hooked(config: Config) -> Hooked:
 def _take_back(config: Config) -> TakeBack:
     def take_back(lease: Lease) -> bool:
         kind = config.kinds.get(lease.kind)
+        if lease.void_reason == RELEASED_END and _released_as_it_is(config, lease):
+            return True
         # banksman ends only an instance that it started, and a hook of the kind runs after that.
         failure = None
         if kind is not None and kind.preset == ANDROID_REMOTE and lease.handle is not None:
@@ -742,6 +752,24 @@ def _take_back(config: Config) -> TakeBack:
         return failure is None
 
     return take_back
+
+
+def _released_as_it_is(config: Config, lease: Lease) -> bool:
+    """Whether the holder asked for the end of an instance that banksman did not start after
+    all, so that the take-back gives it back as a release does, without the hook of its kind.
+
+    That happens when the release came while another acquire still started or reset the
+    instance. The end of the lease still counts as one that ran the hook, which only makes
+    PREVIOUS other.
+    """
+    try:
+        kept = _not_started(config, lease)
+    except BanksmanError:
+        # The take-back reads the records again, says why it cannot, and quarantines the lease.
+        return False
+    if kept is not None:
+        _adopt(config, [lease])
+    return kept is not None
 
 
 def _unused(config: Config, system: System) -> FindUnused:
@@ -1928,33 +1956,99 @@ def _cmd_release(args: argparse.Namespace) -> int:
     config = load_config()
     store, _ = _reaped_store(config)
     lease_id = args.lease
+    owner = None
     if args.holding is not None:
         owner = _owner_process(config, args.owner_pid)
         lease_id = _labelled(store, owner, args.holding, args.resource).lease_id
+    elif args.all:
+        owner = _owner_process(config, args.owner_pid)
+        if owner is None:
+            raise BanksmanError(
+                "release --all needs the agent process, and none was found: pass --owner-pid, or"
+                " release each lease with --resource and --lease"
+            )
+    # banksman ends only an instance that it started. It decides while the leases are still
+    # held: no other banksman process changes the record of an instance that has a held lease.
+    end: set[str] = set()
+    kept: dict[str, str] = {}
+    if args.end:
+        for lease in _to_release(store, args, lease_id, owner):
+            why = _kept_instance(config, lease)
+            if why is None:
+                end.add(lease.resource)
+            else:
+                kept[lease.resource] = why
     if args.resource is not None:
         given = store.holding(lease_id).get(args.resource)
-        print(clean(_released(args.resource, store.release(args.resource, lease_id))))
-        _adopt(config, [given] if given is not None else [])
-        return 0
-    if not args.all:
-        released = store.release_holding(lease_id)
-        for lease, drained in released:
-            print(clean(_released(lease.resource, drained)))
-        _adopt(config, [lease for lease, _ in released])
-        return 0
-    owner = _owner_process(config, args.owner_pid)
-    if owner is None:
-        raise BanksmanError(
-            "release --all needs the agent process, and none was found: pass --owner-pid, or"
-            " release each lease with --resource and --lease"
-        )
-    released = store.release_all(owner)
-    for lease, drained in released:
-        print(clean(_released(lease.resource, drained)))
-    _adopt(config, [lease for lease, _ in released])
-    if not released:
+        after = store.release(args.resource, lease_id, end=args.resource in end)
+        released = [(args.resource, after)]
+        given_back = [] if given is None else [given]
+    else:
+        if args.all:
+            assert owner is not None
+            leases = store.release_all(owner, end=end)
+        else:
+            leases = store.release_holding(lease_id, end=end)
+        released = [(lease.resource, after) for lease, after in leases]
+        given_back = [lease for lease, _ in leases]
+    for resource, after in released:
+        print(clean(_released(resource, after, end=resource in end, kept=kept.get(resource))))
+    # An instance that the release ends is not recorded as one that runs.
+    _adopt(config, [lease for lease in given_back if lease.resource not in end])
+    if args.all and not released:
         print(f"Process {owner} holds no lease.")
     return 0
+
+
+def _to_release(
+    store: Store, args: argparse.Namespace, lease_id: str | None, owner: int | None
+) -> list[Lease]:
+    """Return the held leases that a release gives back."""
+    if args.all:
+        assert owner is not None
+        return store.held_by(owner)
+    assert lease_id is not None
+    leases = store.holding(lease_id)
+    if args.resource is None:
+        return list(leases.values())
+    return [leases[args.resource]] if args.resource in leases else []
+
+
+def _kept_instance(config: Config, lease: Lease) -> str | None:
+    """Return None when release --end ends the instance of a lease, or why the release leaves
+    the instance as it is."""
+    kind = config.kinds.get(lease.kind)
+    if lease.state == BOOTING and kind is not None and kind.preset in STARTED:
+        # A start can still run, and its records do not show yet what it starts, such as a
+        # reservation before the tool prints its id. The lease drains until that acquire has
+        # ended, and the take-back then decides from the records.
+        return None
+    try:
+        return _not_started(config, lease)
+    except BanksmanError as exc:
+        return f"banksman cannot tell whether it started the instance, so it leaves it: {exc}"
+
+
+def _not_started(config: Config, lease: Lease) -> str | None:
+    """Return None when the records say that banksman started the instance of a lease, or why
+    banksman leaves the instance as it is. Raise when a record cannot be read."""
+    kind = config.kinds.get(lease.kind)
+    if kind is not None and kind.preset == ANDROID_EMULATOR:
+        machine = Machine()
+        entry = emulator.load(kind, machine).get(lease.resource)
+        if entry is not None and entry.created:
+            return None
+        if entry is None and lease.resource not in emulator.by_avd(machine.commands()):
+            return "Its emulator does not run, so there is nothing to end"
+        return "banksman did not start its emulator, so it leaves it running"
+    if kind is not None and kind.preset == ANDROID_REMOTE:
+        if lease.handle is None:
+            return "It has no reservation, so there is nothing to end"
+        session = remote.load_sessions(kind).get(lease.handle)
+        if session is not None and session.created:
+            return None
+        return f"banksman did not create its reservation {lease.handle}, so it keeps it"
+    return "banksman did not start its instance, so it leaves it as it is"
 
 
 def _adopt(config: Config, leases: Sequence[Lease]) -> None:
@@ -2016,15 +2110,34 @@ def _owner_process(config: Config, owner_pid: int | None) -> int | None:
     return find_agent(Machine().process_table(), config.holder.agents, os.getpid())[0]
 
 
-def _released(resource: str, drained: Lease | None) -> str:
+def _released(
+    resource: str, drained: Lease | None, *, end: bool = False, kept: str | None = None
+) -> str:
+    """Return what a release did. `end` says that the release ends the instance, and `kept` why
+    it leaves the instance as it is, when the holder asked for the end."""
     if drained is None:
-        return f"Released {resource}: it is free."
-    waits = []
-    if drained.users:
-        waits.append(f"its scripts have ended: {_processes(drained.users)}")
-    if drained.reaper_pid is not None:
-        waits.append(f"banksman process {drained.reaper_pid} has ended its reset")
-    return f"Released {resource}: it is free when {', and '.join(waits)}."
+        done = "banksman ended its instance, and it is free" if end else "it is free"
+    elif drained.state == QUARANTINED:
+        why = (
+            "its scripts still ran at the drain deadline"
+            if drained.users
+            else "its instance did not end"
+        )
+        done = f"{why}, so it is quarantined until the operator releases it"
+    else:
+        waits = []
+        if drained.users:
+            waits.append(f"its scripts have ended: {_processes(drained.users)}")
+        if drained.reaper_pid is not None:
+            waits.append(f"banksman process {drained.reaper_pid} has ended its reset")
+        if end:
+            # A start or a reset of another process still runs, and banksman ends the instance
+            # only when that start was its own.
+            maybe = ", if it started it" if drained.reaper_pid is not None else ""
+            waits.append(f"banksman has ended its instance{maybe}")
+        done = f"it is free when {', and '.join(waits)}"
+    text = f"Released {resource}: {done}."
+    return text if kept is None else f"{text} {kept}."
 
 
 def _cmd_admin_release(args: argparse.Namespace) -> int:

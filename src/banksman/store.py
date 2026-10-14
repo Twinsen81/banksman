@@ -15,7 +15,7 @@ import re
 import stat
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -43,6 +43,7 @@ from banksman.lease import (
     READY,
     REBOOTED,
     RELEASE,
+    RELEASED_END,
     RESOURCE_NAME,
     VOID_REASONS,
     Holder,
@@ -791,29 +792,45 @@ class Store:
             others = tuple(user for user in lease.users if user.pid != pid)
             self._write(replace(lease, users=others))
 
-    def release(self, resource: str, lease_id: str) -> Lease | None:
-        """Give the resource back. Return the lease while it drains, or None when it is free."""
+    def release(self, resource: str, lease_id: str, *, end: bool = False) -> Lease | None:
+        """Give the resource back. Return the lease while it drains or after it was quarantined,
+        or None when it is free.
+
+        With `end`, the release also takes the instance back, as for a void lease, after the
+        scripts of the lease have ended. The caller passes it only for an instance that banksman
+        started.
+        """
         with self._lock():
             lease = self._current(resource, lease_id)
             if lease.state not in HELD:
                 raise NotHeld(f"the lease on {resource} is {lease.state}")
-            return self._give_back(lease)
+            given = self._give_back(lease, end)
+        return self._end_released(given)
 
-    def release_holding(self, lease_id: str) -> list[tuple[Lease, Lease | None]]:
-        """Give back every held lease of the holding of this lease.
+    def release_holding(
+        self, lease_id: str, *, end: Collection[str] = ()
+    ) -> list[tuple[Lease, Lease | None]]:
+        """Give back every held lease of the holding of this lease, and take back the instances
+        of the resources in `end`, as `release` does.
 
-        Return each lease, and the lease while it drains or None when its resource is free.
+        Return each lease, and the lease while it drains or after it was quarantined, or None
+        when its resource is free.
         """
         with self._lock():
             leases = list(self._holding(self._scan(), lease_id).values())
             if not leases:
                 raise NotHeld(f"the holding of the lease {lease_id} has no held lease")
-            return [(lease, self._give_back(lease)) for lease in leases]
+            given = [(lease, self._give_back(lease, lease.resource in end)) for lease in leases]
+        return [(lease, self._end_released(after)) for lease, after in given]
 
-    def release_all(self, owner_pid: int) -> list[tuple[Lease, Lease | None]]:
-        """Give back every held lease whose owner process is `owner_pid`.
+    def release_all(
+        self, owner_pid: int, *, end: Collection[str] = ()
+    ) -> list[tuple[Lease, Lease | None]]:
+        """Give back every held lease whose owner process is `owner_pid`, and take back the
+        instances of the resources in `end`, as `release` does.
 
-        Return each lease, and the lease while it drains or None when its resource is free.
+        Return each lease, and the lease while it drains or after it was quarantined, or None
+        when its resource is free.
         """
         with self._lock():
             started = self._start_time(owner_pid)
@@ -824,7 +841,8 @@ class Store:
                 and entry.state in HELD
                 and (entry.owner_pid, entry.owner_started) == (owner_pid, started)
             ]
-            return [(lease, self._give_back(lease)) for lease in mine]
+            given = [(lease, self._give_back(lease, lease.resource in end)) for lease in mine]
+        return [(lease, self._end_released(after)) for lease, after in given]
 
     def force_release(self, resource: str) -> tuple[Lease | Unreadable, tuple[User, ...]]:
         """Remove the lease on a resource in any state, without a hook and without a signal.
@@ -919,6 +937,18 @@ class Store:
                 # take the lease over at once. A quarantine then also belongs to this boot, so
                 # that later commands do not run a failed take-back again.
                 lease = replace(lease, boot_id=boot_id)
+                if not lease.ended and lease.void_reason == RELEASED_END and lease.users:
+                    # The holder released the lease while its scripts ran, so its instance ends
+                    # only after them, and they can still use it meanwhile.
+                    outcome, users = _settled(lease, table, now)
+                    if outcome == QUARANTINED:
+                        reaped.append(self._finish(lease, outcome, users))
+                        continue
+                    if outcome == DRAINING:
+                        if replace(lease, users=users) != found:
+                            self._write(replace(lease, users=users))
+                        continue
+                    lease = replace(lease, users=())
                 if not lease.ended and lease.attempts >= TAKE_BACK_ATTEMPTS:
                     # Every reaper so far ended before it finished, for example because its
                     # caller stopped it. A take-back in every command would block every command.
@@ -956,18 +986,35 @@ class Store:
         # Taking a resource back can take seconds, for example to end an emulator or to wait
         # for processes to end, so it runs outside the lock. No ownership check passes a
         # draining lease.
+        if lease.void_reason == RELEASED_END and lease.users:
+            # The holder gave the lease back while its scripts ran: they end first, and the
+            # instance only after them.
+            self._stop(lease)
+            with self._lock():
+                current = self._claimed(lease, me)
+                if current is None:
+                    return []
+                table = self.system.process_table()
+                outcome, users = _settled(current, table, self.system.clock())
+                if outcome == QUARANTINED:
+                    return [self._finish(current, outcome, users)]
+                if outcome == DRAINING:
+                    # A later reaper takes the instance back when the scripts have ended. This
+                    # claim did not start a take-back.
+                    waiting = replace(
+                        current,
+                        users=users,
+                        attempts=current.attempts - 1,
+                        reaper_pid=None,
+                        reaper_started=None,
+                    )
+                    return [Reaped(self._write(waiting), DRAINING, users)]
+                lease = self._write(replace(current, users=()))
         freed = lease.void_reason == RELEASE or self._take_back(lease)
-        if lease.users and self._stopping(lease):
-            # A script that left meanwhile no longer uses the resource, so it is not stopped.
-            fencing.stop(replace(lease, users=self._users_now(lease)), self.system)
+        self._stop(lease)
         with self._lock():
-            current = self._read(lease.resource)
-            if (
-                not isinstance(current, Lease)
-                or current.lease_id != lease.lease_id
-                or current.state != DRAINING
-                or (current.reaper_pid, current.reaper_started) != me
-            ):
+            current = self._claimed(lease, me)
+            if current is None:
                 return []
             if not freed:
                 quarantined = self._write(_quarantined(current))
@@ -980,9 +1027,27 @@ class Store:
                 return [Reaped(self._write(replace(ended, users=users)), DRAINING, users)]
             return [self._finish(ended, outcome, users)]
 
+    def _stop(self, lease: Lease) -> None:
+        if lease.users and self._stopping(lease):
+            # A script that left meanwhile no longer uses the resource, so it is not stopped.
+            fencing.stop(replace(lease, users=self._users_now(lease)), self.system)
+
+    def _claimed(self, lease: Lease, me: tuple[int, str]) -> Lease | None:
+        """Return the lease that this reaper claimed, as its file holds it now, or None when the
+        file holds another lease or another claim."""
+        current = self._read(lease.resource)
+        if (
+            not isinstance(current, Lease)
+            or current.lease_id != lease.lease_id
+            or current.state != DRAINING
+            or (current.reaper_pid, current.reaper_started) != me
+        ):
+            return None
+        return current
+
     def _finish(self, lease: Lease, outcome: str, users: tuple[User, ...]) -> Reaped:
         if outcome == RELEASED:
-            how = RELEASE_EVENT if lease.void_reason == RELEASE else VOID
+            how = RELEASE_EVENT if lease.void_reason in (RELEASE, RELEASED_END) else VOID
             self._delete(lease.resource, lease, how)
             self._log(REAP, lease, reason=lease.void_reason)
             return Reaped(lease, RELEASED)
@@ -1008,21 +1073,48 @@ class Store:
         table = self.system.process_table()
         return tuple(user for user in lease.users if fencing.runs(user, table))
 
-    def _give_back(self, lease: Lease) -> Lease | None:
+    def _give_back(self, lease: Lease, end: bool = False) -> Lease | None:
         running = self._running_users(lease)
         spent = self._spent(lease, final=True)
-        if not self._reset_runs(lease):
+        resetting = self._reset_runs(lease)
+        if not resetting:
             lease = replace(lease, reaper_pid=None, reaper_started=None)
-            if not running:
+            if not running and not end:
                 self._delete(lease.resource, lease, RELEASE_EVENT)
-                self._log(RELEASE_EVENT, lease, drained=False, **spent)
+                self._log(RELEASE_EVENT, lease, drained=False, end=False, **spent)
                 return None
         # The scripts, and a reset by another banksman process, must end before the resource is
         # handed on, as for a void lease. The holder gives the instance back as it is, so no
-        # hook ends it.
-        drained = _drained(replace(lease, users=running), RELEASE, self.system.clock())
-        self._log(RELEASE_EVENT, lease, drained=True, running=processes(running), **spent)
+        # hook ends it, unless the holder asks banksman to end it.
+        reason = RELEASED_END if end else RELEASE
+        drained = _drained(replace(lease, users=running), reason, self.system.clock())
+        if end and not resetting:
+            # This command takes the instance back itself, as a reaper that has claimed the
+            # lease: no request gets the instance meanwhile, and no other reaper acts on it.
+            me = os.getpid()
+            drained = replace(
+                drained, attempts=1, reaper_pid=me, reaper_started=self._start_time(me)
+            )
+        self._log(
+            RELEASE_EVENT,
+            lease,
+            drained=bool(running) or resetting,
+            end=end,
+            running=processes(running),
+            **spent,
+        )
         return self._write(drained)
+
+    def _end_released(self, lease: Lease | None) -> Lease | None:
+        """Take back, outside the lock, the instance of a lease that this command released and
+        claimed. Return the lease while it drains or after it was quarantined, or None when its
+        resource is free."""
+        if lease is None or lease.void_reason != RELEASED_END or lease.reaper_pid != os.getpid():
+            return lease
+        assert lease.reaper_started is not None
+        for item in self._end(lease, (lease.reaper_pid, lease.reaper_started)):
+            return None if item.outcome == RELEASED else item.lease
+        return None
 
     def _see(
         self, entries: list[Lease | Unreadable], seen: Sequence[SerialSeen]
@@ -1355,7 +1447,12 @@ class Store:
     def _record_end(self, resource: str, lease: Lease | None, how: str) -> None:
         ends = self._ends()
         boot_id = self.system.boot_id()
-        hook = how == VOID and lease is not None and self._hooked(lease)
+        hook = (
+            how != FORCE_RELEASE
+            and lease is not None
+            and _taken_back(lease)
+            and self._hooked(lease)
+        )
         before = ends[resource].last_use if resource in ends else None
         if lease is None:
             # Nobody knows who held a lease file that cannot be read.
@@ -1499,6 +1596,14 @@ def _used(lease: Lease) -> bool:
     # reaper's lease gets the void reason rebooted when it is taken back after a restart, so its
     # owner tells it apart: the owner of a holder is the path of a worktree.
     return lease.boot_deadline is None and lease.owner != REAPER_OWNER
+
+
+def _taken_back(lease: Lease) -> bool:
+    """Whether the end of a lease took its instance back: ended it, and ran the hook of its kind.
+
+    Only a release without an end gives the instance back as it is.
+    """
+    return lease.void_reason not in (None, RELEASE)
 
 
 def _forced(how: str, before: str) -> str:

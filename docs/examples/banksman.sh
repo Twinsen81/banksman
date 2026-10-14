@@ -66,11 +66,12 @@ banksman_run() {
     fi
 }
 
-# Give back the new lease that banksman_acquire got in this script. Without banksman, or when
-# acquire kept a lease of the caller, does nothing.
+# Give back the new lease that banksman_acquire got in this script: banksman release with these
+# options, such as --end, which also ends an emulator that banksman started. Without banksman, or
+# when acquire kept a lease of the caller, does nothing.
 banksman_release() {
     if [ -n "${_banksman_new:-}" ] && command -v banksman >/dev/null 2>&1; then
-        banksman release --resource "$_banksman_new_resource" --lease "$_banksman_new" >&2 ||
+        banksman release --resource "$_banksman_new_resource" --lease "$_banksman_new" "$@" >&2 ||
             return
         _banksman_new=
     fi

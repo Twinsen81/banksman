@@ -67,6 +67,7 @@ EVENT = {
     "held": (*NUMBER, None),
     "longest_quiet": (*NUMBER, None),
     "drained": (bool, None),
+    "end": (bool, None),
     "running": [USER],
     "stopping": (bool, None),
     "problem": TEXT,

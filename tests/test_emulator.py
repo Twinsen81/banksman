@@ -619,6 +619,170 @@ def test_a_release_keeps_the_emulator_that_banksman_started(capsys, config_path,
     assert len(sdk.emulator_calls()) == 1
 
 
+@pytest.mark.parametrize("on_void", [False, True])
+def test_release_with_end_ends_the_emulator_that_banksman_started(
+    capsys, config_path, sdk, on_void
+):
+    keys = f"on_void = {json.dumps([sys.executable, '-c', 'pass'])}\n" if on_void else ""
+    configure(config_path, sdk, keys)
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    pid = known()["qa_phone"].pid
+    assert main(["release", "--lease", values["LEASE"], "--end"]) == 0
+    assert capsys.readouterr().out == (
+        "Released qa_phone: banksman ended its instance, and it is free.\n"
+    )
+    assert not runs(pid)
+    assert (leases(), known()) == ({}, {})
+    assert main(["log", "--json"]) == 0
+    events = json.loads(capsys.readouterr().out)["events"]
+    assert [(each["event"], each["end"], each["reason"]) for each in events] == [
+        ("acquire", None, None),
+        ("release", True, None),
+        ("reap", None, "released_end"),
+    ]
+    # The disk of the AVD keeps what the worktree set up, unless a hook can have changed it.
+    status, again, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert (status, again["PREVIOUS"]) == (0, "other" if on_void else "self"), err
+    assert len(sdk.emulator_calls()) == 2
+
+
+def test_release_with_end_leaves_the_emulator_that_banksman_did_not_start(
+    capsys, config_path, sdk
+):
+    configure(config_path, sdk)
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone")
+    assert status == 0, err
+    holder = sdk.start_emulator("qa_phone", 5556)
+    wait_for(lambda: listed(sdk, "emulator-5556"))
+    assert main(["release", "--lease", values["LEASE"], "--end"]) == 0
+    assert capsys.readouterr().out == (
+        "Released qa_phone: it is free. banksman did not start its emulator, so it leaves it"
+        " running.\n"
+    )
+    assert runs(holder.pid)
+    # It ran when its lease ended, so it is free for the next request, not unmanaged.
+    assert known()["qa_phone"].created is False
+    assert states(capsys)["qa_phone"] == "free"
+
+
+def test_release_with_end_of_an_emulator_that_does_not_run_says_so(capsys, config_path, sdk):
+    configure(config_path, sdk)
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone")
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"], "--end"]) == 0
+    assert capsys.readouterr().out == (
+        "Released qa_phone: it is free. Its emulator does not run, so there is nothing to end.\n"
+    )
+
+
+def test_release_with_end_ends_the_emulator_after_the_scripts(capsys, config_path, sdk):
+    configure(config_path, sdk)
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    pid = known()["qa_phone"].pid
+    script = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        lease = ["--resource", "qa_phone", "--lease", values["LEASE"]]
+        assert main(["enter", *lease, "--pid", str(script.pid)]) == 0
+        assert main(["release", "--lease", values["LEASE"], "--end"]) == 0
+        assert capsys.readouterr().out == (
+            f"Released qa_phone: it is free when its scripts have ended: pid {script.pid}, and"
+            " banksman has ended its instance.\n"
+        )
+        # The script can still use the emulator.
+        assert main(["reap"]) == 0
+        assert runs(pid)
+        assert leases()["qa_phone"].state == "draining"
+    finally:
+        script.kill()
+        script.wait()
+    capsys.readouterr()
+    assert main(["reap"]) == 0
+    assert capsys.readouterr().out == (
+        "qa_phone: released, because the holder released the lease, and asked banksman to end"
+        " its instance\n"
+    )
+    assert not runs(pid)
+    assert (leases(), known()) == ({}, {})
+
+
+def test_release_with_end_during_a_reset_leaves_an_emulator_that_banksman_did_not_start(
+    capsys, config_path, sdk, state_dir, tmp_path
+):
+    hooked = tmp_path / "on_void"
+    reset = json.dumps([sys.executable, "-c", "import time; time.sleep(3)"])
+    void = json.dumps([sys.executable, "-c", f"open({str(hooked)!r}, 'w').close()"])
+    configure(config_path, sdk, f'unmanaged = "grant"\non_acquire = {reset}\non_void = {void}\n')
+    person = sdk.start_emulator("qa_phone", 5556)
+    wait_for(lambda: listed(sdk, "emulator-5556"))
+    process = acquire_in_child("--where", "avd=qa_phone")
+    wait_for(lambda: (state_dir / "qa_phone.json").exists())
+    lease = leases()["qa_phone"]
+    assert lease.state == "booting"
+    assert main(["release", "--lease", lease.lease_id, "--end"]) == 0
+    assert capsys.readouterr().out == (
+        f"Released qa_phone: it is free when banksman process {process.pid} has ended its reset,"
+        " and banksman has ended its instance, if it started it.\n"
+    )
+    assert process.wait(timeout=60) == 1
+    assert main(["reap"]) == 0
+    # The records say that a person started the emulator, so it runs on, and no hook ran.
+    assert runs(person.pid)
+    assert not hooked.exists()
+    assert leases() == {}
+    assert known()["qa_phone"].created is False
+
+
+def test_release_with_end_quarantines_an_emulator_that_does_not_end(
+    capsys, config_path, sdk, monkeypatch
+):
+    configure(config_path, sdk)
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    monkeypatch.setattr(emulator, "stop", lambda system, pid, started: False)
+    assert main(["release", "--lease", values["LEASE"], "--end"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == (
+        "Released qa_phone: its instance did not end, so it is quarantined until the operator"
+        " releases it.\n"
+    )
+    assert "cannot take back qa_phone: the emulator of qa_phone (pid" in captured.err
+    assert leases()["qa_phone"].state == "quarantined"
+
+
+def test_release_with_end_never_ends_the_emulator_of_another_holder(capsys, config_path, sdk):
+    configure(config_path, sdk)
+    status, first, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", first["LEASE"]]) == 0
+    status, second, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", first["LEASE"], "--end"]) == 3
+    assert main(["release", "--lease", first["LEASE"], "--resource", "qa_phone", "--end"]) == 3
+    assert runs(known()["qa_phone"].pid)
+    assert leases()["qa_phone"].lease_id == second["LEASE"]
+
+
+def test_release_of_a_holding_with_end_ends_each_emulator_that_banksman_started(
+    capsys, config_path, sdk
+):
+    configure(config_path, sdk)
+    parts = ["--as", "phone", "--where", "avd=qa_phone"]
+    parts += ["--as", "tablet", "--where", "avd=qa_tablet"]
+    status, values, err = acquire(capsys, "--holding", "ui", *ME, "--start", *parts)
+    assert status == 0, err
+    pids = [entry.pid for entry in known().values()]
+    assert len(pids) == 2
+    assert main(["release", "--holding", "ui", *ME, "--end"]) == 0
+    assert sorted(capsys.readouterr().out.splitlines()) == [
+        "Released qa_phone: banksman ended its instance, and it is free.",
+        "Released qa_tablet: banksman ended its instance, and it is free.",
+    ]
+    assert not any(runs(pid) for pid in pids)
+    assert (leases(), known()) == ({}, {})
+
+
 def test_run_with_where_and_start_leaves_the_emulator_running(capsys, config_path, sdk, tmp_path):
     configure(config_path, sdk)
     shown = tmp_path / "shown"

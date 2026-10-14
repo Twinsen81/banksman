@@ -505,6 +505,19 @@ def test_the_log_text_says_why_a_release_drains():
     ]
 
 
+def test_the_log_text_says_that_a_release_ends_the_instance():
+    at_once = Event(1_790_000_000.0, "release", "qa_phone", held=60.0, drained=False, end=True)
+    later = Event(
+        1_790_000_000.0, "release", "qa_phone", drained=True, end=True, running=(Process(7, 8),)
+    )
+    reaped = Event(1_790_000_000.0, "reap", "qa_phone", reason="released_end")
+    assert [console.log_rows([event])[0][4] for event in (at_once, later, reaped)] == [
+        "held 1m; banksman ends its instance",
+        "it drains while its scripts run: pid 7 in group 8; banksman ends its instance after that",
+        "banksman ended the instance, as its holder asked at the release",
+    ]
+
+
 def test_the_log_text_says_that_banksman_ended_a_free_instance():
     reaped = Event(1_790_000_000.0, "reap", "qa_phone", owner="banksman", reason="free_timeout")
     (row,) = console.log_rows([reaped])

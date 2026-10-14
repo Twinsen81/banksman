@@ -114,7 +114,7 @@ project, and source it from the scripts that use a device. It is POSIX `sh`.
 |---|---|---|
 | `banksman_acquire [OPTION ...]` | Runs `banksman acquire` with the options, and sets `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_LEASE`, `BANKSMAN_PREVIOUS`, and `BANKSMAN_SERIAL`, `BANKSMAN_HANDLE`, and `BANKSMAN_ACCOUNTS` when the grant has them. Returns the status of `acquire`, for example 4 when every matching resource is in use. | Returns 0, and sets nothing. |
 | `banksman_run COMMAND [ARGUMENT ...]` | Runs the command with `banksman run` under the lease. Returns the status of the command, or 3 when the lease was lost. | Runs the command as it is. |
-| `banksman_release` | Gives back the new lease that `banksman_acquire` got in this script. A lease that `acquire` kept stays with the caller. | Does nothing. |
+| `banksman_release [OPTION ...]` | Gives back the new lease that `banksman_acquire` got in this script, with `banksman release` and the options, such as `--end`. A lease that `acquire` kept stays with the caller. | Does nothing. |
 
 ```sh
 #!/bin/sh
@@ -203,6 +203,12 @@ banksman acquire --holding ui-tests --where form=phone --start --for "UI tests" 
   reaper ends an emulator that banksman started when its lease becomes void, and, with the
   `free_timeout` of the kind, when no lease of its AVD has existed for that time. So a script
   uses `--start` also for an AVD that ran before.
+- A script that does not need the emulator again soon, for example at the end of a run of the
+  whole suite, gives it back with `banksman release --end`, or `banksman_release --end`:
+  banksman then ends the emulator at once when it started it, after the scripts of the lease,
+  and the disk of the AVD keeps the setup for the next `--start` of the worktree. An emulator
+  that banksman did not start keeps running. For a remote device, `--end` removes the
+  reservation that banksman created, so that it costs nothing more.
 - A preparation of the device that is not an app setup, such as a setting of the system, stays
   in an `on_acquire` hook of the kind. App setup stays in the scripts of the project.
 

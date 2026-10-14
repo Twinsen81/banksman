@@ -167,6 +167,8 @@ class Event:
     longest_quiet: float | None = None
     # For a release: whether scripts still ran, so that the lease drains first.
     drained: bool | None = None
+    # For a release: whether banksman ends the instance, which it started, as the holder asked.
+    end: bool | None = None
     running: tuple[Process, ...] = ()
     # For a quarantine because of scripts that still ran: whether stopping was on for the kind.
     stopping: bool | None = None
@@ -217,6 +219,7 @@ class Event:
             "held": self.held,
             "longest_quiet": self.longest_quiet,
             "drained": self.drained,
+            "end": self.end,
             "running": [{"pid": each.pid, "pgid": each.pgid} for each in self.running],
             "stopping": self.stopping,
             "problem": self.problem,
@@ -265,6 +268,7 @@ class Event:
             held=_get(data, "held", _optional(_is_seconds)),
             longest_quiet=_get(data, "longest_quiet", _optional(_is_seconds)),
             drained=_get(data, "drained", _optional(lambda value: isinstance(value, bool))),
+            end=_get(data, "end", _optional(lambda value: isinstance(value, bool))),
             running=tuple(Process(each["pid"], each.get("pgid")) for each in running),
             stopping=_get(data, "stopping", _optional(lambda value: isinstance(value, bool))),
             problem=_get(data, "problem", _optional(_is_problem)),

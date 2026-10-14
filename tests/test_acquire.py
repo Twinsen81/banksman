@@ -507,6 +507,25 @@ def test_release_all_gives_back_only_the_leases_of_one_agent_process(capsys, con
     assert capsys.readouterr().out == f"Process {os.getpid()} holds no lease.\n"
 
 
+def test_release_with_end_gives_back_an_instance_that_banksman_did_not_start_as_it_is(
+    capsys, config_path
+):
+    configure(config_path)
+    me = ["--owner-pid", str(os.getpid())]
+    acquire(capsys, "--where", "kind=build", *me)
+    acquire(capsys, "--where", "form=phone", *me)
+    assert main(["release", "--all", "--end", *me]) == 0
+    kept = "banksman did not start its instance, so it leaves it as it is."
+    assert capsys.readouterr().out.splitlines() == [
+        f"Released build-0: it is free. {kept}",
+        f"Released qa_phone: it is free. {kept}",
+    ]
+    assert leases() == {}
+    assert main(["log", "--json", "--event", "release"]) == 0
+    events = json.loads(capsys.readouterr().out)["events"]
+    assert [event["end"] for event in events] == [False, False]
+
+
 def test_release_all_without_an_agent_process_is_an_error(capsys, config_path):
     configure(config_path)
     assert main(["release", "--all"]) == 1

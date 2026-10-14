@@ -29,7 +29,15 @@ from banksman.history import (
     WARNED,
     Event,
 )
-from banksman.lease import DRAINING, FREE_TIMEOUT, VOID_REASONS, Lease, User, free_by
+from banksman.lease import (
+    DRAINING,
+    FREE_TIMEOUT,
+    RELEASED_END,
+    VOID_REASONS,
+    Lease,
+    User,
+    free_by,
+)
 from banksman.request import Search
 from banksman.sanitize import clean
 from banksman.store import Snapshot
@@ -506,7 +514,10 @@ def _details(event: Event) -> str:
             drains = f"it drains while its scripts run: {processes_text(event.running)}"
         elif event.drained:
             drains = "it drains while another banksman process resets its instance"
-        return "; ".join(part for part in (_held(event), drains) if part) or NONE
+        end = ""
+        if event.end:
+            end = "banksman ends its instance" + (" after that" if drains else "")
+        return "; ".join(part for part in (_held(event), drains, end) if part) or NONE
     if event.event == VOID:
         return "; ".join(part for part in (void_text(event.reason), _held(event)) if part)
     if event.event == QUARANTINE:
@@ -526,6 +537,8 @@ def _details(event: Event) -> str:
         return text
     if event.reason == FREE_TIMEOUT:
         return "banksman ended the instance, which had no lease for the free timeout of its kind"
+    if event.reason == RELEASED_END:
+        return "banksman ended the instance, as its holder asked at the release"
     # A reap frees the resource of a void or released lease.
     return f"the resource is free again ({void_text(event.reason)})"
 

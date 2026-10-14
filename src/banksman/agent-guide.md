@@ -66,6 +66,12 @@ banksman release --holding login-tests
   waits for a person blocks every other agent. A release does not undo what you set up on the
   device: after the wait, `acquire` gives you the same device first when it is free, with
   `PREVIOUS=self` when nobody used it in between.
+- When you will not need the device again soon, for example at the end of your task, release
+  with `--end`: `banksman release --holding login-tests --end`. banksman then also ends an
+  emulator that it started, or a remote device that it reserved, so that it uses no memory and
+  costs no money. A later `acquire --start` starts it again. banksman leaves a device that it did
+  not start as it is. Do not use `--end` before a wait for a person: the next start of an
+  emulator takes minutes.
 - Do not use `banksman release --all`: it gives back the holdings of every subagent of your
   session.
 
