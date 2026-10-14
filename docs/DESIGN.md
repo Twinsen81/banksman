@@ -8,7 +8,7 @@ exist. Sections 3 to 9, 11, 12, and 15 are implemented, with
 `banksman agent-guide`, the commands that scripts run (`enter`, `check`, `leave`, and `run`),
 `banksman guard`, `banksman admin discover`,
 `banksman admin release --force`, `banksman admin gradle-init`, and `banksman admin adb-shim`.
-Of section 10, `status`, `watch`, and `log` are implemented.
+Of section 10, `status`, `watch`, `log`, and `banksman admin doctor` are implemented.
 `explain` and the queue of the callers that wait are not implemented yet.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
@@ -1123,6 +1123,33 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   earlier output schema whose events it knows, so an upgrade does not hide the history.
   `BANKSMAN_LOG` changes the path for tests; when only `BANKSMAN_STATE_DIR` is set, the log is
   next to that directory.
+- `banksman admin doctor` checks an install for the operator, and changes nothing. Each check is
+  `ok`, `warn`, `fail`, or `skip`, and the command exits with status 1 when a check fails. It
+  checks the Python version; which banksman runs, and whether it is the first `banksman` in an
+  absolute directory of the `PATH`, as the adb wrapper and the Gradle scripts find it; that the
+  configuration loads; that the inventory exists when a kind is discovered, and which allowed
+  instances discovery finds now, without the accounts, with the notes of the discovery; that the
+  adb of the configuration exists, with what `adb version` says, that it can list the devices
+  when a kind uses an Android preset, and the emulator for a kind of the `android-emulator`
+  preset; that the first `adb` on the `PATH` is the adb wrapper, when one is saved (section 12);
+  that the saved adb wrapper, the two Gradle files (section 11), and the guide for agents saved
+  as a skill in `~/.claude/skills/banksman/SKILL.md` and `~/.codex/skills/banksman/SKILL.md` are
+  what the installed banksman prints; that the state directory, the quarantine directory, the
+  log, and the record of lease ends belong to the user and can be written; the quarantined
+  leases, as a warning; and the holder that `whoami` shows in this shell. It compares the
+  content of each file, so a printed file needs no version stamp, also while every development
+  install has the same version. A file that is missing is `skip`, because each of these parts is
+  optional, but a part that another part needs is a failure: an init script without the
+  build-slot part, or without `[kinds.build]` in the configuration, fails every build. A missing
+  inventory is a failure when a kind is discovered, because agents then get no instance of it. A
+  file at the place where the setup saves the adb wrapper is the saved wrapper, also when it is
+  empty: the redirection of a save empties the file before banksman runs, so a save that failed
+  leaves an empty `adb`, which does nothing. For a failure or a warning, the doctor gives the
+  command or the step that repairs it. It does not reap, creates no directory, writes no log,
+  and calls no network. It runs discovery, as `status` does, `adb version`, and `adb devices
+  -l`, and none of them changes a device. The doctor sees the `PATH` and the home directory of
+  its own shell, which can differ from those of the agents. `--json` prints each check with
+  `check`, `status`, `detail`, and `fix`.
 - Not implemented yet: `banksman explain --where ...` answers the question "can I get one
   now?". For each matching resource it says free, held by whom and until when, not
   permitted, not present, or quarantined, and it gives the caller's place in the queue. An
@@ -1160,7 +1187,9 @@ project's own build script.
   ```
 
   banksman does not write the files itself, because `~/.gradle` belongs to Gradle and to the
-  operator. After an upgrade of banksman, the operator saves both files again. The build-slot
+  operator. After an upgrade of banksman, the operator saves both files again;
+  `banksman admin doctor` shows a saved file that differs from what banksman prints now, and
+  an init script without the build-slot part or without `[kinds.build]`. The build-slot
   part is outside `init.d`, because Gradle applies every file in `init.d`. When the build-slot
   part is missing, every build fails with a message that gives the command that saves it.
   Without `banksman` on the `PATH` of the build, the build-slot part does nothing. It looks
@@ -1253,9 +1282,11 @@ is a setup of the operator, and a project needs nothing for it.
   other without end. The wrapper uses only a `banksman` in an absolute directory of the
   `PATH`, so a file in a project cannot stand in for it. banksman does not install the wrapper
   itself: the operator chooses where it goes. After an upgrade of banksman, or a change of `sdk`
-  in `[android]`, the operator saves it again. A wrapper on the `PATH` is better than a hook of
-  one agent that runs before each shell command: it also sees the adb calls inside scripts, and
-  it works the same for every agent.
+  in `[android]`, the operator saves it again. `banksman admin doctor` shows a saved wrapper
+  that differs from what banksman prints now, or that runs another adb than the configuration,
+  and a wrapper that comes after another `adb` on the `PATH`. A wrapper on the `PATH` is better
+  than a hook of one agent that runs before each shell command: it also sees the adb calls
+  inside scripts, and it works the same for every agent.
 - **Which device.** The guard reads the command line as adb reads it. The device comes from
   `-t`, then `-s`, then `-d` or `-e`, then `ANDROID_SERIAL`, and then it is the only device that
   adb knows. `-s` also takes the other names that adb takes, such as `model:Pixel_8`, a USB
@@ -1407,6 +1438,7 @@ banksman admin discover [--kind <kind>] [--all] [--json] [--yes]
 banksman admin release --force --resource <name>
 banksman admin gradle-init [--build-slot]                          # optional build slots
 banksman admin adb-shim                                            # optional adb guard
+banksman admin doctor [--json]                                     # check the install
 ```
 
 Commands that grant a resource print `KEY=value` lines, for example `RESOURCE=`, `SERIAL=`,
@@ -1619,6 +1651,8 @@ Done:
   says with `PREVIOUS` whether the instance is as the worktree left it.
 - `release --end`: a holder that does not come back soon also ends the emulator that banksman
   started, or the reservation that it created, as a take-back after the scripts of the lease.
+- `banksman admin doctor`: a check of the install, the configuration, and the files that the
+  operator saved from banksman, which changes nothing.
 - One command on several devices: `run --holding` runs under every lease of the holding, or
   under those that `--resource` names, with `{serials}`, `{resources}`, `BANKSMAN_SERIALS`, and
   `BANKSMAN_RESOURCES`, and stops when any of the leases is lost.

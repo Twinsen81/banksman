@@ -19,7 +19,7 @@ from importlib import resources
 import pytest
 from helpers import SRC, write_config
 
-from banksman import cli
+from banksman import cli, printed
 from banksman.cli import main
 from banksman.lease import Holder
 from banksman.store import Store
@@ -27,7 +27,7 @@ from banksman.system import Machine
 
 INIT_SCRIPT, BUILD_SLOT_SCRIPT = (
     resources.files("banksman").joinpath(name).read_text(encoding="utf-8")
-    for name in (cli.GRADLE_INIT_SCRIPT, cli.GRADLE_BUILD_SLOT_SCRIPT)
+    for name in (printed.GRADLE_INIT_SCRIPT, printed.GRADLE_BUILD_SLOT_SCRIPT)
 )
 GRADLE = os.environ.get("BANKSMAN_TEST_GRADLE")
 # The first version that applies the build-slot part, and the first with --configuration-cache.

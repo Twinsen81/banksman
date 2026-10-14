@@ -336,6 +336,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release with an end counts as a release for `PREVIOUS`, unless an `on_void` hook ran. The
   lease schema is now 11 for the new void reason, and banksman also reads lease files of
   schemas 8, 9, and 10. The output schema stays 6.
+- `banksman admin doctor` checks an install and changes nothing: the Python version, the
+  banksman on the `PATH`, the configuration, the inventory and which allowed instances
+  discovery finds now, the adb and the emulator of the Android SDK with `adb version` and
+  whether adb can list the devices, the adb that comes first on the `PATH`, the directories of
+  banksman, and the quarantined leases. It
+  compares the saved adb wrapper, the two Gradle files, and the guide for agents saved as a
+  skill with what this banksman prints, and gives the command that saves a file again. Each
+  check is `ok`, `warn`, `fail`, or `skip`, the exit status is 1 when a check fails, and
+  `--json` prints the checks.
 - `run --holding` without `--resource` runs the command under every held lease of the
   holding, also the lease of a port or an account in it, and `--resource` can be repeated to
   choose some of the leases. The run registers its group with each lease, checks each one, and
