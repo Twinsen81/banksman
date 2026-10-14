@@ -202,6 +202,11 @@ SHAPES: dict[str, Any] = {
             "tags": MapOf([str]),
         },
     },
+    "admin doctor": {
+        "schema": int,
+        "version": str,
+        "checks": [{"check": str, "status": str, "detail": str, "fix": TEXT}],
+    },
     "log line": {"schema": int, **EVENT},
 }
 

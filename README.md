@@ -85,6 +85,13 @@ python3 -m venv ~/.venvs/banksman
 ~/.venvs/banksman/bin/banksman status --json
 ```
 
+After you install or upgrade banksman, and after you change its setup, run
+`banksman admin doctor`. It checks the configuration, the inventory, the Android SDK, the
+`PATH`, and the directories of banksman, and it compares the files that you saved from
+banksman, such as the adb wrapper, the Gradle scripts, and the guide for agents, with what the
+installed banksman prints. It changes nothing, says how to repair each problem, and exits with
+status 1 when a check fails.
+
 ## License
 
 [Apache License 2.0](LICENSE). Contributions are welcome; see

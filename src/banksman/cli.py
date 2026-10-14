@@ -6,14 +6,12 @@ import argparse
 import contextlib
 import json
 import os
-import shlex
 import signal
 import sys
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from importlib import resources
 
 from banksman import (
     LEASE_SCHEMA,
@@ -21,9 +19,11 @@ from banksman import (
     __version__,
     android,
     console,
+    doctor,
     emulator,
     guard,
     hooks,
+    printed,
     remote,
 )
 from banksman.assign import MAX_ACCOUNTS, MAX_PARTS
@@ -121,17 +121,6 @@ OTHER = "other"
 POLL_SECONDS = 5.0
 # How often watch shows the table again by default. Each refresh also runs discovery.
 WATCH_SECONDS = 5
-# The Gradle scripts in this package: the init script, and the build-slot part that it applies
-# on Gradle 7.4 and later to take a build slot for every build.
-GRADLE_INIT_SCRIPT = "gradle-init.gradle"
-GRADLE_BUILD_SLOT_SCRIPT = "build-slot.gradle"
-# The adb wrapper that runs the adb guard, and the text in it that becomes the path of the real
-# adb.
-ADB_SHIM_SCRIPT = "adb-shim.sh"
-ADB_SHIM_PATH = "@ADB@"
-# The guide for agents, in the format of a skill, and the text in it that becomes the version.
-AGENT_GUIDE = "agent-guide.md"
-AGENT_GUIDE_VERSION = "@VERSION@"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -509,6 +498,13 @@ def _build_parser() -> argparse.ArgumentParser:
         " directory that is first on the PATH of the agents",
         allow_abbrev=False,
     )
+    doctor_command = admin_commands.add_parser(
+        "doctor",
+        help="check the install, the configuration, and the files that the operator saved, and"
+        " change nothing; exit status 1 when a check fails",
+        allow_abbrev=False,
+    )
+    doctor_command.add_argument("--json", action="store_true", help="print JSON")
     return parser
 
 
@@ -1054,10 +1050,7 @@ def _cmd_held(args: argparse.Namespace) -> int:
 
 
 def _cmd_agent_guide(args: argparse.Namespace) -> int:
-    # The text of the installed version, so that an agent that reads it never follows rules of
-    # another version. A copy that the operator saved names the version that printed it.
-    guide = resources.files("banksman").joinpath(AGENT_GUIDE).read_text(encoding="utf-8")
-    sys.stdout.write(guide.replace(AGENT_GUIDE_VERSION, __version__))
+    sys.stdout.write(printed.agent_guide())
     return 0
 
 
@@ -2157,9 +2150,7 @@ def _cmd_admin_release(args: argparse.Namespace) -> int:
 
 def _cmd_admin_gradle_init(args: argparse.Namespace) -> int:
     # banksman does not write the files itself: ~/.gradle belongs to Gradle and to the operator.
-    name = GRADLE_BUILD_SLOT_SCRIPT if args.build_slot else GRADLE_INIT_SCRIPT
-    script = resources.files("banksman").joinpath(name)
-    sys.stdout.write(script.read_text(encoding="utf-8"))
+    sys.stdout.write(printed.build_slot() if args.build_slot else printed.gradle_init())
     return 0
 
 
@@ -2169,9 +2160,32 @@ def _cmd_admin_adb_shim(args: argparse.Namespace) -> int:
     adb = android.adb_path(load_config().android)
     if not os.path.isfile(adb):
         _warn(f"{adb} does not exist. Set sdk in [android] to the Android SDK")
-    script = resources.files("banksman").joinpath(ADB_SHIM_SCRIPT).read_text(encoding="utf-8")
-    sys.stdout.write(script.replace(ADB_SHIM_PATH, shlex.quote(adb)))
+    sys.stdout.write(printed.adb_shim(adb))
     return 0
+
+
+def _cmd_admin_doctor(args: argparse.Namespace) -> int:
+    shell = doctor.Shell(doctor.home_directory(), os.environ.get("PATH", ""), sys.argv[0])
+    checks = doctor.run(shell)
+    if args.json:
+        _print_json(
+            {
+                "schema": OUTPUT_SCHEMA,
+                "version": __version__,
+                "checks": [
+                    {
+                        "check": check.name,
+                        "status": check.status,
+                        "detail": clean(check.detail),
+                        "fix": None if check.fix is None else clean(check.fix),
+                    }
+                    for check in checks
+                ],
+            }
+        )
+    else:
+        print(doctor.report(checks))
+    return 1 if doctor.failed(checks) else 0
 
 
 @dataclass
@@ -2544,6 +2558,7 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "admin discover": _cmd_admin_discover,
     "admin gradle-init": _cmd_admin_gradle_init,
     "admin adb-shim": _cmd_admin_adb_shim,
+    "admin doctor": _cmd_admin_doctor,
 }
 
 

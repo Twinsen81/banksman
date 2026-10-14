@@ -37,6 +37,7 @@ from banksman.history import (
     History,
 )
 from banksman.lease import Holder, SerialSeen
+from banksman.printed import ADB_SHIM_PATH, ADB_SHIM_SCRIPT
 from banksman.store import Choice, Need, Store, log_lock
 from banksman.system import MachineError
 
@@ -975,8 +976,8 @@ def run_wrapper(shim, *arguments, path, env=None):
 
 
 def test_admin_adb_shim_prints_the_wrapper_with_the_adb_of_the_sdk(shim, fake_adb):
-    template = resources.files("banksman").joinpath(cli.ADB_SHIM_SCRIPT).read_text()
-    assert shim.read_text() == template.replace(cli.ADB_SHIM_PATH, shlex.quote(str(fake_adb)))
+    template = resources.files("banksman").joinpath(ADB_SHIM_SCRIPT).read_text()
+    assert shim.read_text() == template.replace(ADB_SHIM_PATH, shlex.quote(str(fake_adb)))
 
 
 def test_admin_adb_shim_warns_when_the_sdk_has_no_adb(config_path, tmp_path, capsys):
