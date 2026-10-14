@@ -157,7 +157,11 @@ passes on to the group the SIGHUP, SIGINT, SIGQUIT, and SIGTERM that it gets, an
 group when the lease is lost. The command gets the resource, the kind, and the lease id in its
 environment, and the serial, the id of the reservation, and the accounts of its lease, all with
 the characters of a resource name only. An argument that is exactly `{serial}` or `{resource}` is replaced with one
-of these values; no other text of the command changes, and no shell reads it.
+of these values; no other text of the command changes, and no shell reads it. A run under
+several leases of a holding gets the lists of the resources and the serials, comma-separated,
+in `BANKSMAN_RESOURCES`, `BANKSMAN_SERIALS`, `{resources}`, and `{serials}`; a resource name or
+a serial has no comma, so the lists cannot be read in another way. It gets the id of only one
+lease, and it stops when any of its leases is lost.
 
 **The serial comes from discovery, or from a start that banksman performed.** `run` and the
 hooks act on the serial in a lease:

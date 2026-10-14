@@ -353,21 +353,29 @@ def test_run_takes_a_label(capsys, config_path):
     assert "has no held holding with the label other" in done.stderr
 
 
-def test_run_with_a_label_of_several_resources_needs_the_resource(capsys, config_path):
+def test_run_with_a_label_runs_under_every_lease_of_the_holding_or_the_chosen_ones(
+    capsys, config_path
+):
     configure(config_path)
     _, values, _ = acquire(
         capsys, "--holding", "tests", "--as", "a", "--where", "form=phone", "--as", "b", *ME
     )
-    done = run_in_child("--holding", "tests", *ME, "--", sys.executable, "-c", SHOW)
-    assert done.returncode == 1
-    assert done.stderr == (
-        "banksman: the holding tests has several resources: build-0, qa_phone. Give one with"
-        " --resource\n"
+    assert (values["A_RESOURCE"], values["B_RESOURCE"]) == ("qa_phone", "build-0")
+    # BANKSMAN_LEASE names one lease of the holding, the first in the order of the resources.
+    done = run_in_child(
+        "--holding", "tests", *ME, "--", sys.executable, "-c", SHOW, "{resources}", "{serials}"
+    )
+    assert (done.returncode, done.stdout) == (
+        0,
+        f"{values['B_LEASE']} build-0,qa_phone emulator-5554\n",
     )
     done = run_in_child(
         "--holding", "tests", "--resource", "qa_phone", *ME, "--", sys.executable, "-c", SHOW
     )
     assert (done.returncode, done.stdout) == (0, f"{values['A_LEASE']}\n")
+    done = run_in_child("--holding", "tests", "--resource", "qa_tablet", *ME, "--", "true")
+    assert done.returncode == cli.EXIT_LOST
+    assert "the holding tests has no held lease on qa_tablet" in done.stderr
 
 
 # The guide for agents.

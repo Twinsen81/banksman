@@ -67,7 +67,9 @@ banksman run --lease "$LEASE" --resource "$RESOURCE" -- ./gradlew connectedCheck
   serial, so the command gets the serial of an emulator that its holder started or restarted
   after the grant. When discovery cannot confirm the serial then, for example because adb
   fails, the command gets no serial. It never takes `BANKSMAN_SERIAL` from the environment of
-  the caller.
+  the caller. The command also gets `BANKSMAN_RESOURCES`, and `BANKSMAN_SERIALS` when the
+  serial is known: the lists of a run under several leases (see "One command on several
+  devices" below), here with one value.
 - For a kind with an Android preset, the command also gets `ANDROID_SERIAL`, which `adb`
   without `-s` and the connected tests of the Android Gradle plugin use. So a tool that a
   script calls without the serial still acts on the leased device. While the serial is not
@@ -87,14 +89,15 @@ banksman run --lease "$LEASE" --resource "$RESOURCE" -- ./gradlew connectedCheck
 
   A part of an argument, such as `--device={serial}`, is not replaced. When the command has
   `{serial}` and the serial is not known, banksman exits with status 1 before the command
-  starts; with `--where`, it gives the lease back.
+  starts; with `--where`, it gives the lease back. `{resources}` and `{serials}` become the
+  same values as lists of one.
 
 With `--where` instead of `--lease`, banksman leases a resource for the command, and gives it
 back after the command. The lease belongs to the run: its owner process is `banksman run`
 itself, so the lease ends with the run, also when something kills the run. `--accounts`,
 `--for`, `--expect`, `--wait`, `--issue`, and `--owner-pid` work as for `acquire`. Such a
-request has one part; for several resources at the same time, use `acquire` with `--as`, and
-run each command with `--lease`. `{resource}` passes the resource that banksman chose, for
+request has one part; for several resources at the same time, use `acquire` with `--as` and
+`--holding`, and run the command with `--holding`, as below. `{resource}` passes the resource that banksman chose, for
 example a port: `banksman run --where kind=port -- ./server --port {resource}`.
 
 A counted kind with `count = 1` is a mutex for one command at a time, for example for the
@@ -103,6 +106,46 @@ creation of an AVD or for `sdkmanager`:
 ```sh
 banksman run --where kind=sdk --wait 5m --for "create an AVD" -- avdmanager create avd ...
 ```
+
+### One command on several devices
+
+A test runner that shards one run over several devices uses all of them at once. With
+`--holding` and without `--resource`, banksman runs the command under every held lease of the
+holding, also the lease of a port or an account in it. `--resource` can be repeated to choose
+some of the leases:
+
+```sh
+banksman acquire --holding shards --as a --where form=phone --as b --where form=phone \
+                 --for "sharded UI tests" --wait 5m
+banksman run --holding shards -- ./scripts/sharded-tests.sh --serials {serials}
+```
+
+- banksman registers the group of the command with each lease, checks each one, and stops the
+  group when any of them is lost, with status 3, as one `acquire` gets all its resources or
+  none. A holding with a lease that is still booting is refused with status 4.
+- `{resources}` becomes the resources, and `{serials}` the serials, comma-separated, as
+  `BANKSMAN_ACCOUNTS` lists the accounts. The command gets the same lists in
+  `BANKSMAN_RESOURCES` and `BANKSMAN_SERIALS`. No resource name and no serial has a comma. The
+  order is the order of the resource names, or the order of the `--resource` options when they
+  are given. A lease records no part name of its request, so the order does not follow the
+  `--as` options.
+- `BANKSMAN_SERIALS` and `{serials}` list only the serials that are known: a port or an account
+  has none. When the serial of a device is not known, for example because its emulator does not
+  run, a command with `{serials}` does not start, and banksman names the device; without
+  `{serials}`, the command starts, and banksman says on standard error that `BANKSMAN_SERIALS`
+  does not list the device.
+- `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_SERIAL`, `BANKSMAN_HANDLE`, and
+  `BANKSMAN_ACCOUNTS` name one lease, so they are not set, and `{serial}` and `{resource}` are
+  an error that names `{serials}` and `{resources}`. `BANKSMAN_LEASE` is the id of one lease of
+  the holding: any lease id names its holding, so a script of the project that the command
+  starts keeps the holding, and the adb guard lets the command use every device of the holding.
+- When the run has several devices of a kind with an Android preset, `ANDROID_SERIAL` is
+  `banksman-serial-unknown`, so that `adb` without `-s`, and the connected tests of the Android
+  Gradle plugin, fail instead of choosing one device, which can also be the device of another
+  holder. Pass the serials to each tool. With one device and a port or an account,
+  `ANDROID_SERIAL` names the device, as under its own lease.
+- Under one lease, nothing changes: `run --holding <label> --resource <name>` gives the
+  variables and the placeholders of that lease, as `run --lease` does.
 
 ## The helper
 
@@ -151,7 +194,8 @@ new lease, also one that joins the caller's holding, the script gives back. Insi
 uses that lease in the same way, and the lease keeps the run as its owner process.
 
 The helper reads only a grant with one part. A script that needs several resources at the same
-time calls `banksman acquire` with `--as` itself.
+time calls `banksman acquire` with `--as` and `--holding` itself, and runs its command with
+`banksman run --holding` (see "One command on several devices" above).
 
 ## Setup that the device still has
 
@@ -231,8 +275,10 @@ the tests of the project, and put it on `PATH` as `banksman`:
   set, for example to 4 for a busy machine, it prints nothing and exits with that status.
 - `run` runs the command after `--` as `banksman run --lease` runs it for a device:
   with `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, and `BANKSMAN_LEASE`, with `stub-serial` in
-  `BANKSMAN_SERIAL` and `ANDROID_SERIAL`, and with each argument `{serial}` and `{resource}`
-  replaced. Every other command does nothing.
+  `BANKSMAN_SERIAL` and `ANDROID_SERIAL`, with the same values in `BANKSMAN_RESOURCES` and
+  `BANKSMAN_SERIALS`, and with each argument `{serial}`, `{resource}`, `{serials}`, and
+  `{resources}` replaced. The resource is `stub-0` unless `--resource` names another. Every
+  other command does nothing.
 
 ```sh
 stub=$(mktemp -d)
@@ -279,9 +325,11 @@ banksman acquire --holding login-tests --as phone --where form=phone \
 
 `ACCOUNT_RESOURCE` names the account, and the test signs in with it. The names of the
 accounts stay in the configuration of the operator, not in banksman, and their passwords stay
-where the project keeps them. The holding has two resources, so `banksman run --holding
-login-tests` needs `--resource` with the device, and `banksman release --holding login-tests`
-gives back both.
+where the project keeps them. `banksman run --holding login-tests` runs the tests under both
+leases, so that they stop when either lease is lost. The run has one device, so
+`ANDROID_SERIAL` names it, and `{serials}` is its serial; `{serial}` needs `--resource` with the
+device, which runs the tests under the lease of the device alone. `banksman release --holding
+login-tests` gives back both.
 
 ## Rules for agents
 

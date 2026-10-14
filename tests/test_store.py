@@ -1214,6 +1214,27 @@ def test_leave_of_a_script_that_did_not_enter_changes_nothing(store, system):
     assert users(store) == [201]
 
 
+def test_a_script_enters_every_lease_that_it_names_or_none(store, system, state_dir):
+    for pid, (ppid, pgid) in AGENT_APP.items():
+        system.spawn(pid, parent=ppid, group=pgid)
+    needs = [Need((Choice(name, "device"),)) for name in ("phone-1", "phone-2")]
+    first, second = (each.lease for each in store.grant(needs, Holder(OWNER, owner_pid=101)))
+    named = [("phone-1", first.lease_id), ("phone-2", second.lease_id)]
+    with pytest.raises(NotHeld, match="phone-2 has another lease now"):
+        store.enter_leases([named[0], ("phone-2", "an-earlier-lease")], 201, 300)
+    assert lease_file(state_dir, "phone-1")["users"] == []
+    system.advance(60)
+    entered = store.enter_leases(named, 201, 300)
+    assert [(lease.touched, [user.pgid for user in lease.users]) for lease in entered] == [
+        (system.now, [300]),
+        (system.now, [300]),
+    ]
+    system.advance(60)
+    assert [lease.touched for lease in store.check_leases(named)] == [system.now] * 2
+    with pytest.raises(NotHeld, match="phone-2 has another lease now"):
+        store.check_leases([named[0], ("phone-2", "an-earlier-lease")])
+
+
 def test_a_void_lease_waits_for_its_scripts_and_sends_no_signal(store, system):
     entered(store, system)
     system.advance(20 * 60)

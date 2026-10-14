@@ -752,25 +752,45 @@ class Store:
 
     def enter(self, resource: str, lease_id: str, pid: int, pgid: int | None = None) -> Lease:
         """Check the lease, touch it, and register a script as a user of the resource."""
+        return self.enter_leases([(resource, lease_id)], pid, pgid)[0]
+
+    def enter_leases(
+        self, leases: Sequence[tuple[str, str]], pid: int, pgid: int | None = None
+    ) -> list[Lease]:
+        """Enter each lease, given by its resource and its id, as `enter` does: every one, or
+        none when one of them is not held."""
         with self._lock():
-            lease = self._held(resource, lease_id)
+            held = [self._held(resource, lease_id) for resource, lease_id in leases]
             table = self.system.process_table()
-            user = fencing.register(table, lease, pid, pgid)
-            # A new record replaces the one of the same process and group, and the records of
-            # scripts that have ended go. Another group of the same process can still run.
-            users = [
-                other
-                for other in lease.users
-                if (other.pid, other.started, other.pgid) != (user.pid, user.started, user.pgid)
-                and fencing.runs(other, table)
-            ]
-            return self._touch_holding(replace(lease, users=(*users, user)), None)[0]
+            entered = []
+            for lease in held:
+                user = fencing.register(table, lease, pid, pgid)
+                # A new record replaces the one of the same process and group, and the records
+                # of scripts that have ended go. Another group of the same process can still
+                # run.
+                users = [
+                    other
+                    for other in lease.users
+                    if (other.pid, other.started, other.pgid) != (user.pid, user.started, user.pgid)
+                    and fencing.runs(other, table)
+                ]
+                entered.append(replace(lease, users=(*users, user)))
+            for lease in entered:
+                self._write(lease)
+            return self._touch_held(entered)
 
     def check(self, resource: str, lease_id: str) -> Lease:
         """Touch the lease and its holding while the caller may still use the resource, or
         raise NotHeld."""
+        return self.check_leases([(resource, lease_id)])[0]
+
+    def check_leases(self, leases: Sequence[tuple[str, str]]) -> list[Lease]:
+        """Check and touch each lease, given by its resource and its id, as `check` does, or
+        raise NotHeld for the first one that is not held."""
         with self._lock():
-            return self._touch_holding(self._held(resource, lease_id), None)[0]
+            return self._touch_held(
+                [self._held(resource, lease_id) for resource, lease_id in leases]
+            )
 
     def leave(self, resource: str, lease_id: str, pid: int) -> None:
         """Remove the record of a script that no longer uses the resource."""
@@ -1337,6 +1357,15 @@ class Store:
                 each = replace(each, expected=each.touched + expect)
             touched.append(self._write(each))
         return touched
+
+    def _touch_held(self, leases: Sequence[Lease]) -> list[Lease]:
+        """Touch held leases and their holdings, each holding once. Return the leases as they
+        are now."""
+        touched: dict[str, Lease] = {}
+        for lease in leases:
+            if lease.resource not in touched:
+                touched.update((each.resource, each) for each in self._touch_holding(lease, None))
+        return [touched[lease.resource] for lease in leases]
 
     def _touched(self, lease: Lease, owner_pid: int | None) -> Lease:
         now = self.system.clock()

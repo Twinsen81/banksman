@@ -1,10 +1,10 @@
-"""Run a command that uses a leased resource, inside the fence of the lease.
+"""Run a command that uses leased resources, inside the fence of their leases.
 
 The command runs in a process group of its own, which the program in leader.py leads. banksman
-registers the group with the lease before the command starts. While the command runs, banksman
-checks the lease, and the check also touches it. When the lease is lost, banksman stops the
-group, and it leaves the lease only after the group has ended, so that the resource is never
-handed on while a process of the command can still use it.
+registers the group with each lease before the command starts. While the command runs, banksman
+checks the leases, and the check also touches them. When one lease is lost, banksman stops the
+group, and it leaves the leases only after the group has ended, so that no resource is handed on
+while a process of the command can still use it.
 
 This is the only module that runs such a command.
 """
@@ -72,22 +72,21 @@ def check_interval(lease: Lease) -> float:
 
 def run(
     store: Store,
-    resource: str,
-    lease_id: str,
+    leases: Sequence[Lease],
     command: Sequence[str],
     env: Mapping[str, str],
     warn: Warn,
 ) -> Outcome:
-    """Run a command under a lease, and return how it ended."""
-    return _Run(store, resource, lease_id, warn).run(command, env)
+    """Run a command under leases, and return how it ended."""
+    return _Run(store, leases, warn).run(command, env)
 
 
 class _Run:
-    def __init__(self, store: Store, resource: str, lease_id: str, warn: Warn) -> None:
+    def __init__(self, store: Store, leases: Sequence[Lease], warn: Warn) -> None:
         self.store = store
         self.system = store.system
-        self.resource = resource
-        self.lease_id = lease_id
+        self.leases = [(lease.resource, lease.lease_id) for lease in leases]
+        self.resources = ", ".join(lease.resource for lease in leases)
         self.warn = warn
         self.leader: subprocess.Popen[bytes] | None = None
         self.group = 0
@@ -112,7 +111,7 @@ class _Run:
             self.anchored = True
             previous: dict[int, object] = {}
             try:
-                lease = self.store.enter(self.resource, self.lease_id, self.group, self.group)
+                leases = self.store.enter_leases(self.leases, self.group, self.group)
                 # A signal that the caller ignores, as nohup does, stays ignored.
                 for signum in FORWARDED:
                     if signal.getsignal(signum) != signal.SIG_IGN:
@@ -120,7 +119,7 @@ class _Run:
                 self.tty = _foreground_terminal()
                 self._give_terminal()
                 ours.sendall(leader.GO)
-                return self._supervise(ours, check_interval(lease))
+                return self._supervise(ours, min(map(check_interval, leases)))
             finally:
                 self._take_terminal()
                 if self.tty is not None:
@@ -157,7 +156,7 @@ class _Run:
                 self.warn(
                     f"the command has ended, but processes that it started still run in its"
                     f" process group: {_pids(left)}. banksman waits for them, because they can"
-                    f" still use {self.resource}"
+                    f" still use {self.resources}"
                 )
                 shown = True
             self.system.sleep(min(_GROUP_POLL_SECONDS, max(0.0, due - self.system.clock())))
@@ -179,21 +178,22 @@ class _Run:
         return Outcome(returncode, error=error, terminal=terminal)
 
     def _check(self) -> str | None:
-        """Check and touch the lease. Return why it is lost, or None while it is held."""
+        """Check and touch the leases. Return why one is lost, or None while all are held."""
         try:
-            self.store.check(self.resource, self.lease_id)
+            self.store.check_leases(self.leases)
         except NotHeld as exc:
             return str(exc)
         except (BanksmanError, OSError) as exc:
             # A check that cannot run now, for example while another command holds the lock for
             # too long, does not stop the command. The next check tries again.
             if not self.warned:
-                self.warn(f"cannot check the lease on {self.resource} now: {exc}")
+                leases = "lease" if len(self.leases) == 1 else "leases"
+                self.warn(f"cannot check the {leases} on {self.resources} now: {exc}")
                 self.warned = True
         return None
 
     def _stop(self, channel: socket.socket, lost: str) -> Outcome:
-        """Stop the group of a lost lease: SIGTERM, then SIGKILL to what still runs."""
+        """Stop the group after a lost lease: SIGTERM, then SIGKILL to what still runs."""
         terminal = self._take_terminal()
         if self.anchored:
             self._signal(signal.SIGTERM)
@@ -207,8 +207,8 @@ class _Run:
             self._ended(TERM_WAIT_SECONDS)
         left = tuple(self._members())
         if left:
-            # banksman does not leave: the lease drains until these processes end, and the
-            # reaper quarantines it at its drain deadline when they still run.
+            # banksman does not leave: a lease drains until these processes end, and the reaper
+            # quarantines it at its drain deadline when they still run.
             return Outcome(None, lost=lost, running=left, terminal=terminal)
         self._finish(channel)
         return Outcome(None, lost=lost, terminal=terminal)
@@ -217,8 +217,9 @@ class _Run:
         with contextlib.suppress(OSError):
             channel.sendall(leader.DONE)
         self._reap()
-        with contextlib.suppress(NotHeld):
-            self.store.leave(self.resource, self.lease_id, self.group)
+        for resource, lease_id in self.leases:
+            with contextlib.suppress(NotHeld):
+                self.store.leave(resource, lease_id, self.group)
 
     def _leader_runs(self) -> bool:
         """Whether the leader still runs. A stop of the group is passed on to banksman's job."""

@@ -10,7 +10,7 @@ import shlex
 import signal
 import sys
 import time
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from importlib import resources
@@ -381,8 +381,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--resource",
-        help="with --lease: the leased resource; with --holding: needed when the holding has"
-        " several resources",
+        action="append",
+        help="with --lease: the leased resource; with --holding: a resource of the holding,"
+        " repeat it for more; by default the command runs under every lease of the holding",
     )
     run.add_argument(
         "--where",
@@ -1116,8 +1117,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "run needs one of --lease and --resource, --holding, or --where, and only one"
         )
     if args.parts is None:
-        if args.lease is not None and args.resource is None:
+        chosen = args.resource or []
+        if args.lease is not None and not chosen:
             raise BanksmanError("run --lease needs --resource, the leased resource")
+        if args.lease is not None and len(chosen) > 1:
+            raise BanksmanError(
+                "run --lease takes one --resource; for several resources of a holding, use"
+                " --holding"
+            )
         given = [
             flag
             for flag, value in (
@@ -1136,42 +1143,24 @@ def _cmd_run(args: argparse.Namespace) -> int:
             raise BanksmanError(f"run {given[0]} needs {needs}")
         config = load_config()
         store, _ = _reaped_store(config)
-        resource, lease_id = args.resource, args.lease
-        if args.holding is not None:
+        if args.holding is None:
+            named = [(chosen[0], args.lease)]
+        else:
             owner = _owner_process(config, args.owner_pid)
-            named = _labelled(store, owner, args.holding, args.resource, one=True)
-            if named.state == BOOTING:
+            held = _labelled_leases(store, owner, args.holding, chosen)
+            booting = [lease.resource for lease in held if lease.state == BOOTING]
+            if booting:
                 # Only the acquire that starts or resets the instance gives the lease to its
                 # holder, so a command must not use the instance before that.
                 raise Busy(
-                    f"{named.resource} of the holding {args.holding} is still booting: {_BOOTING}."
-                    f" Wait until it is ready, or give it back with banksman release --holding"
-                    f" {args.holding}"
+                    f"{', '.join(booting)} of the holding {args.holding} is still booting:"
+                    f" {_BOOTING}. Wait until it is ready, or give it back with banksman release"
+                    f" --holding {args.holding}"
                 )
-            resource, lease_id = named.resource, named.lease_id
-        # A lease that is lost runs no discovery.
-        lease = store.check(resource, lease_id)
-        kind = config.kinds.get(lease.kind)
-        seen: tuple[SerialSeen, ...] = ()
-        if kind is not None and kind.discovered:
-            # The holder can have started or restarted the instance since the grant.
-            clock = store.system.clock
-            seen = serial_now(kind, config, lease.resource, lease.serial, clock)
-            store.observe(seen)
-            lease = store.check(resource, lease_id)
-            if _disconnected(kind, lease, seen):
-                again = _reconnect(store, config, kind, lease)
-                store.observe([again])
-                seen += (again,)
-                lease = store.check(resource, lease_id)
-        # The command acts on the serial, so it gets only one that discovery confirms now: a
-        # discovery that fails cannot tell whether another instance has the serial by now.
-        if lease.resource not in {each.resource for each in seen if each.serial is not None}:
-            lease = replace(lease, serial=None)
-        command = _command_line(command, lease)
-        outcome = run_command(
-            store, lease.resource, lease.lease_id, command, _command_env(lease, kind), _warn
-        )
+            named = [(lease.resource, lease.lease_id) for lease in held]
+        leases = _with_serials_now(store, config, named)
+        command = _command_line(command, leases, config.kinds)
+        outcome = run_command(store, leases, command, _command_env(leases, config.kinds), _warn)
         return _run_status(outcome, command)
     if args.resource is not None:
         raise BanksmanError(
@@ -1192,50 +1181,148 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     (lease,) = grant.leases
     try:
-        command = _command_line(command, lease)
+        command = _command_line(command, [lease], grant.config.kinds)
         outcome = run_command(
-            grant.store,
-            lease.resource,
-            lease.lease_id,
-            command,
-            _command_env(lease, grant.config.kinds.get(lease.kind)),
-            _warn,
+            grant.store, [lease], command, _command_env([lease], grant.config.kinds), _warn
         )
     finally:
         _give_back_after_run(lease)
     return _run_status(outcome, command)
 
 
+def _with_serials_now(
+    store: Store, config: Config, named: Sequence[tuple[str, str]]
+) -> list[Lease]:
+    """Check the leases, given by resource and lease id, and return them with the serials that
+    discovery confirms now."""
+    # A lease that is lost runs no discovery.
+    leases = store.check_leases(named)
+    kinds = [config.kinds.get(lease.kind) for lease in leases]
+    seen: tuple[SerialSeen, ...] = ()
+    for lease, kind in zip(leases, kinds):
+        # One discovery of a kind can find the instances of several leases.
+        if kind is not None and kind.discovered and lease.resource not in _found(seen):
+            # The holder can have started or restarted the instance since the grant.
+            seen += serial_now(kind, config, lease.resource, lease.serial, store.system.clock)
+    if any(kind is not None and kind.discovered for kind in kinds):
+        store.observe(seen)
+        leases = store.check_leases(named)
+        disconnected = [
+            (lease, kind)
+            for lease, kind in zip(leases, kinds)
+            if kind is not None and _disconnected(kind, lease, seen)
+        ]
+        for lease, kind in disconnected:
+            again = _reconnect(store, config, kind, lease)
+            store.observe([again])
+            seen += (again,)
+        if disconnected:
+            leases = store.check_leases(named)
+    # The command acts on the serials, so it gets only those that discovery confirms now: a
+    # discovery that fails cannot tell whether another instance has the serial by now.
+    confirmed = _found(each for each in seen if each.serial is not None)
+    return [each if each.resource in confirmed else replace(each, serial=None) for each in leases]
+
+
+def _found(seen: Iterable[SerialSeen]) -> set[str]:
+    return {each.resource for each in seen}
+
+
 # The arguments of a command that run replaces. The shell of the caller cannot expand a variable
 # that banksman sets only for the command, so a placeholder is the short way to pass a value.
 SERIAL_PLACEHOLDER = "{serial}"
 RESOURCE_PLACEHOLDER = "{resource}"
+# The lists of a run under several leases, comma-separated. They have one value for one lease.
+SERIALS_PLACEHOLDER = "{serials}"
+RESOURCES_PLACEHOLDER = "{resources}"
 
 
-def _command_line(command: Sequence[str], lease: Lease) -> list[str]:
+def _command_line(
+    command: Sequence[str], leases: Sequence[Lease], kinds: Mapping[str, Kind]
+) -> list[str]:
     """Replace each argument that is a placeholder, as a whole, with its value."""
-    if SERIAL_PLACEHOLDER in command and lease.serial is None:
-        raise BanksmanError(
-            f"the serial of {lease.resource} is not known, so {SERIAL_PLACEHOLDER} cannot be"
-            " replaced: the instance does not run, or discovery does not find its serial. Start"
-            " the instance, and run the command again"
-        )
-    values = {SERIAL_PLACEHOLDER: lease.serial, RESOURCE_PLACEHOLDER: lease.resource}
+    names = ", ".join(lease.resource for lease in leases)
+    values = {RESOURCES_PLACEHOLDER: ",".join(lease.resource for lease in leases)}
+    if SERIALS_PLACEHOLDER in command:
+        for lease in leases:
+            kind = kinds.get(lease.kind)
+            if lease.serial is None and kind is not None and kind.discovered:
+                raise BanksmanError(_unknown_serial(lease.resource, SERIALS_PLACEHOLDER))
+        serials = _serials(leases)
+        if not serials:
+            raise BanksmanError(
+                f"no resource of the run has a serial: {names}, so {SERIALS_PLACEHOLDER} cannot"
+                " be replaced"
+            )
+        values[SERIALS_PLACEHOLDER] = serials
+    if len(leases) == 1:
+        (lease,) = leases
+        if SERIAL_PLACEHOLDER in command and lease.serial is None:
+            raise BanksmanError(_unknown_serial(lease.resource, SERIAL_PLACEHOLDER))
+        values.update({SERIAL_PLACEHOLDER: lease.serial, RESOURCE_PLACEHOLDER: lease.resource})
+    else:
+        for one, every in (
+            (SERIAL_PLACEHOLDER, SERIALS_PLACEHOLDER),
+            (RESOURCE_PLACEHOLDER, RESOURCES_PLACEHOLDER),
+        ):
+            if one in command:
+                raise BanksmanError(
+                    f"the command runs under several leases: {names}, so {one} cannot be"
+                    f" replaced. Use {every}, which lists them with commas, or choose one with"
+                    " --resource"
+                )
     return [values.get(argument) or argument for argument in command]
 
 
-def _command_env(lease: Lease, kind: Kind | None) -> dict[str, str]:
+def _unknown_serial(resource: str, placeholder: str) -> str:
+    return (
+        f"the serial of {resource} is not known, so {placeholder} cannot be replaced: the"
+        " instance does not run, or discovery does not find its serial. Start the instance, and"
+        " run the command again"
+    )
+
+
+def _serials(leases: Sequence[Lease]) -> str:
+    """Return the known serials of the leases, comma-separated. No serial has a comma."""
+    return ",".join(lease.serial for lease in leases if lease.serial is not None)
+
+
+def _command_env(leases: Sequence[Lease], kinds: Mapping[str, Kind]) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key not in hooks.VARIABLES}
-    android = hooks.is_android(kind)
-    env.update(hooks.variables(lease, android=android), BANKSMAN_LEASE=lease.lease_id)
-    if lease.accounts:
-        env["BANKSMAN_ACCOUNTS"] = ",".join(lease.accounts)
-    if android and lease.serial is None:
-        _warn(
-            f"the serial of {lease.resource} is not known, so {hooks.ANDROID_SERIAL} names no"
-            f" device ({hooks.NO_SERIAL}): adb without -s, and the connected tests of Gradle,"
-            " find no device"
-        )
+    env["BANKSMAN_RESOURCES"] = ",".join(lease.resource for lease in leases)
+    if serials := _serials(leases):
+        env["BANKSMAN_SERIALS"] = serials
+    devices = [lease for lease in leases if hooks.is_android(kinds.get(lease.kind))]
+    if len(leases) == 1:
+        (lease,) = leases
+        env.update(hooks.variables(lease, android=bool(devices)), BANKSMAN_LEASE=lease.lease_id)
+        if lease.accounts:
+            env["BANKSMAN_ACCOUNTS"] = ",".join(lease.accounts)
+        if devices and lease.serial is None:
+            _warn(
+                f"the serial of {lease.resource} is not known, so {hooks.ANDROID_SERIAL} names no"
+                f" device ({hooks.NO_SERIAL}): adb without -s, and the connected tests of Gradle,"
+                " find no device"
+            )
+        return env
+    # Every lease id names its holding, so with any one of them the adb guard lets the command
+    # use every device of the holding, without the process list.
+    env["BANKSMAN_LEASE"] = leases[0].lease_id
+    if len(devices) == 1 and devices[0].serial is not None:
+        # One device with a port or an account, for example: the command has one device, as
+        # under the lease of the device alone.
+        env[hooks.ANDROID_SERIAL] = devices[0].serial
+    elif devices:
+        # adb without -s must not choose one of several devices, which can also be the device
+        # of another holder.
+        env[hooks.ANDROID_SERIAL] = hooks.NO_SERIAL
+    for lease in leases:
+        kind = kinds.get(lease.kind)
+        if lease.serial is None and kind is not None and kind.discovered:
+            _warn(
+                f"the serial of {lease.resource} is not known, so BANKSMAN_SERIALS does not"
+                " list it"
+            )
     return env
 
 
@@ -2071,27 +2158,26 @@ def _adopt(config: Config, leases: Sequence[Lease]) -> None:
             _warn(f"cannot record that {lease.resource} runs, so it is unmanaged now: {exc}")
 
 
-def _labelled(
-    store: Store, owner: int | None, label: str, resource: str | None, *, one: bool = False
-) -> Lease:
+def _labelled(store: Store, owner: int | None, label: str, resource: str | None) -> Lease:
     """Return a held lease of the holding with this label of the owner process: the lease of
-    `resource`, or any lease of the holding. With `one`, a holding of several resources needs
-    `resource`."""
+    `resource`, or any lease of the holding."""
+    return _labelled_leases(store, owner, label, [] if resource is None else [resource])[0]
+
+
+def _labelled_leases(
+    store: Store, owner: int | None, label: str, resources: Sequence[str]
+) -> list[Lease]:
+    """Return the held leases of the holding with this label of the owner process: the leases of
+    `resources`, in their order, or every lease of the holding, in the order of the resources."""
     if owner is None:
         raise BanksmanError(_no_agent("--holding"))
     leases = store.labelled(owner, label)
     if not leases:
         raise NotHeld(f"process {owner} has no held holding with the label {label}")
-    if resource is not None:
+    for resource in resources:
         if resource not in leases:
             raise NotHeld(f"the holding {label} has no held lease on {resource}")
-        return leases[resource]
-    if one and len(leases) > 1:
-        raise BanksmanError(
-            f"the holding {label} has several resources: {', '.join(sorted(leases))}. Give one"
-            " with --resource"
-        )
-    return leases[min(leases)]
+    return [leases[resource] for resource in dict.fromkeys(resources or sorted(leases))]
 
 
 def _no_agent(flag: str) -> str:
