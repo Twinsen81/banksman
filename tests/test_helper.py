@@ -164,6 +164,20 @@ def test_the_stub_records_the_calls_of_the_script(project_script, with_stub):
     ]
 
 
+def test_the_release_of_the_helper_passes_its_options_on(tmp_path, with_stub):
+    path, calls = with_stub
+    script = tmp_path / "end.sh"
+    script.write_text(
+        '. "$HELPER"\nbanksman_acquire --where kind=sdk || exit\nbanksman_release --end\n'
+    )
+    for shell in SHELLS:
+        result = run_script((shell, script), path, BANKSMAN_STUB_LOG=str(calls))
+        assert result.returncode == 0, result.stderr
+        assert calls.read_text().splitlines()[-1] == (
+            "release --resource stub-0 --lease stub-lease --end"
+        )
+
+
 def test_the_stub_can_play_an_instance_that_the_worktree_left_as_it_is(project_script, with_stub):
     path, calls = with_stub
     result = run_script(

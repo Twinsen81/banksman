@@ -267,6 +267,20 @@ def test_a_guard_event_has_a_reason_of_the_guard_and_no_other_event_has_one(tmp_
     assert history.read() == ([warned], 2)
 
 
+def test_a_release_records_whether_it_ends_the_instance(tmp_path):
+    history = History(tmp_path / "log.jsonl")
+    ended = Event(1_790_000_000.0, RELEASE, "qa_phone", drained=False, end=True)
+    history.append(ended)
+    # A line of a banksman that did not know the field.
+    line = {**Event(1_790_000_001.0, RELEASE, "qa_phone", drained=False).to_json()}
+    del line["end"]
+    with history.path.open("a") as file:
+        file.write(json.dumps(line) + "\n")
+        file.write(json.dumps({**line, "end": "yes"}) + "\n")
+    events, skipped = history.read()
+    assert ([event.end for event in events], skipped) == ([True, None], 1)
+
+
 def test_the_lines_of_an_earlier_banksman_are_read(tmp_path):
     # An upgrade must not hide the history that the earlier version wrote.
     history = History(tmp_path / "log.jsonl")

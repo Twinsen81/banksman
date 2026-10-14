@@ -17,7 +17,8 @@ from helpers import SRC, age_lease, drain, edit_lease, reap_in_child
 from banksman import LEASE_SCHEMA
 from banksman.errors import BanksmanError
 from banksman.fencing import Refused
-from banksman.history import REAP
+from banksman.history import ACQUIRE, QUARANTINE, REAP
+from banksman.history import RELEASE as RELEASE_EVENT
 from banksman.lease import (
     ACQUIRE_GONE,
     BOOT_TIMEOUT,
@@ -31,6 +32,7 @@ from banksman.lease import (
     READY,
     REBOOTED,
     RELEASE,
+    RELEASED_END,
     Holder,
     SerialSeen,
     Timeouts,
@@ -1335,6 +1337,201 @@ def test_with_stopping_on_a_script_that_left_meanwhile_is_not_stopped(state_dir,
     assert 202 in system.processes
 
 
+# A release that ends the instance.
+
+
+def test_a_release_with_end_takes_the_instance_back_at_once(state_dir, system):
+    seen = []
+
+    def take_back(lease):
+        seen.append(lease)
+        # A request during the end waits, as for an instance in use, and a forced release waits
+        # for the end.
+        other = Store(state_dir, system)
+        assert grant_one(other, [Choice("emu-1", "emulator")], Holder(OTHER)) is None
+        with pytest.raises(BanksmanError, match=f"process {os.getpid()} takes emu-1 back"):
+            other.force_release("emu-1")
+        return True
+
+    events = []
+    store = Store(state_dir, system, take_back=take_back, record=events.append)
+    lease = store.acquire("emu-1", "emulator", Holder(OWNER))
+    system.advance(60)
+    assert store.release("emu-1", lease.lease_id, end=True) is None
+    (taken,) = seen
+    assert (taken.lease_id, taken.state, taken.void_reason) == (
+        lease.lease_id,
+        DRAINING,
+        RELEASED_END,
+    )
+    assert (taken.reaper_pid, taken.attempts) == (os.getpid(), 1)
+    assert resources(store) == []
+    assert [(each.event, each.reason, each.end, each.drained) for each in events] == [
+        (ACQUIRE, None, None, None),
+        (RELEASE_EVENT, None, True, False),
+        (REAP, RELEASED_END, None, None),
+    ]
+    assert events[1].held == 60
+
+
+def test_a_release_without_end_says_so_in_the_log(state_dir, system):
+    events = []
+    store = Store(state_dir, system, record=events.append)
+    lease = store.acquire("emu-1", "emulator", Holder(OWNER))
+    store.release("emu-1", lease.lease_id)
+    assert [(each.event, each.end) for each in events] == [(ACQUIRE, None), (RELEASE_EVENT, False)]
+
+
+def test_a_release_with_end_waits_for_the_scripts_before_the_instance_ends(state_dir, system):
+    seen = []
+    store = Store(state_dir, system, take_back=lambda lease: seen.append(lease) or True)
+    lease = entered(store, system)
+    drained = store.release("phone-1", lease.lease_id, end=True)
+    assert (drained.state, drained.void_reason) == (DRAINING, RELEASED_END)
+    assert ([user.pid for user in drained.users], drained.reaper_pid, drained.attempts) == (
+        [201],
+        None,
+        0,
+    )
+    with pytest.raises(Busy, match="draining"):
+        store.acquire("phone-1", "device", Holder(OTHER))
+    # The scripts can still use the instance, so it does not end yet.
+    assert store.reap() == []
+    assert lease_file(state_dir, "phone-1")["state"] == DRAINING
+    assert (seen, system.signals) == ([], [])
+    end_the_script(system)
+    assert reaped(store) == [("phone-1", RELEASED_END, RELEASED)]
+    assert [(each.void_reason, each.users, each.attempts) for each in seen] == [
+        (RELEASED_END, (), 1)
+    ]
+
+
+def test_a_release_with_end_whose_scripts_still_run_at_the_drain_deadline_is_quarantined(
+    state_dir, system
+):
+    store = Store(state_dir, system, take_back=lambda lease: pytest.fail("took back"))
+    lease = entered(store, system)
+    store.release("phone-1", lease.lease_id, end=True)
+    system.advance(5 * 60)
+    (item,) = store.reap()
+    assert (item.outcome, item.lease.void_reason) == (QUARANTINED, RELEASED_END)
+    assert [user.pid for user in item.running] == [201]
+
+
+def test_with_stopping_on_a_release_with_end_stops_the_scripts_before_the_end(state_dir, system):
+    seen = []
+    store = stopping(
+        state_dir, system, take_back=lambda lease: seen.append(list(system.signals)) or True
+    )
+    lease = entered(store, system)
+    assert store.release("phone-1", lease.lease_id, end=True) is None
+    assert seen == [[("pid", 201, signal.SIGTERM), ("group", 300, signal.SIGTERM)]]
+    assert resources(store) == []
+
+
+def test_a_release_with_end_whose_scripts_outlive_the_stop_waits_for_them(state_dir, system):
+    seen = []
+    store = stopping(state_dir, system, take_back=lambda lease: seen.append(lease) or True)
+    lease = entered(store, system)
+    system.ignores[201] = {signal.SIGTERM, signal.SIGKILL}
+    drained = store.release("phone-1", lease.lease_id, end=True)
+    assert (drained.state, [user.pid for user in drained.users]) == (DRAINING, [201])
+    assert (drained.reaper_pid, drained.attempts, seen) == (None, 0, [])
+    signals = len(system.signals)
+    assert store.reap() == []
+    # The later reapers only wait: the release stopped the scripts once.
+    assert len(system.signals) == signals
+    system.end(201)
+    assert reaped(store) == [("phone-1", RELEASED_END, RELEASED)]
+    assert len(seen) == 1
+
+
+def test_a_release_with_end_whose_instance_does_not_end_is_quarantined(state_dir, system):
+    events = []
+    store = Store(state_dir, system, take_back=lambda lease: False, record=events.append)
+    lease = store.acquire("emu-1", "emulator", Holder(OWNER))
+    quarantined = store.release("emu-1", lease.lease_id, end=True)
+    assert (quarantined.state, quarantined.void_reason) == (QUARANTINED, RELEASED_END)
+    assert lease_file(state_dir, "emu-1")["state"] == QUARANTINED
+    assert (events[-1].event, events[-1].problem) == (
+        QUARANTINE,
+        "its instance could not be taken back",
+    )
+    with pytest.raises(Busy, match="quarantined"):
+        store.acquire("emu-1", "emulator", Holder(OTHER))
+
+
+def test_a_release_with_end_that_ends_in_the_middle_is_finished_by_the_next_reaper(
+    state_dir, system
+):
+    attempts = []
+
+    def take_back(lease):
+        attempts.append(lease.attempts)
+        if len(attempts) == 1:
+            raise KeyboardInterrupt
+        return True
+
+    store = Store(state_dir, system, take_back=take_back)
+    lease = store.acquire("emu-1", "emulator", Holder(OWNER))
+    with pytest.raises(KeyboardInterrupt):
+        store.release("emu-1", lease.lease_id, end=True)
+    assert lease_file(state_dir, "emu-1")["state"] == DRAINING
+    # The releasing command has ended, so another one takes its claim over.
+    edit_lease(state_dir, "emu-1", lambda data: data.update(reaper_pid=4242))
+    assert reaped(store) == [("emu-1", RELEASED_END, RELEASED)]
+    assert attempts == [1, 2]
+
+
+def test_a_release_with_end_during_a_reset_by_another_process_waits_for_the_reset(
+    state_dir, system
+):
+    seen = []
+    store = Store(state_dir, system, take_back=lambda lease: seen.append(lease) or True)
+    lease = reset_by_another_process(store, system, state_dir)
+    drained = store.release("emu-1", lease.lease_id, end=True)
+    assert (drained.state, drained.void_reason, drained.reaper_pid) == (
+        DRAINING,
+        RELEASED_END,
+        4242,
+    )
+    assert reaped(store) == []
+    system.end(4242)
+    assert reaped(store) == [("emu-1", RELEASED_END, RELEASED)]
+    assert len(seen) == 1
+
+
+def test_a_release_with_end_needs_the_current_lease(state_dir, system):
+    store = Store(state_dir, system, take_back=lambda lease: pytest.fail("took back"))
+    earlier = store.acquire("emu-1", "emulator", Holder(OWNER))
+    store.release("emu-1", earlier.lease_id)
+    store.acquire("emu-1", "emulator", Holder(OTHER))
+    with pytest.raises(NotHeld, match="another lease"):
+        store.release("emu-1", earlier.lease_id, end=True)
+    with pytest.raises(NotHeld):
+        store.release_holding(earlier.lease_id, end={"emu-1"})
+    assert [lease.owner for lease in store.snapshot().leases] == [OTHER]
+
+
+def test_a_holding_release_ends_only_the_instances_that_it_names(state_dir, system):
+    seen = []
+    store = Store(state_dir, system, take_back=lambda lease: seen.append(lease.resource) or True)
+    system.spawn(100)
+    needs = [Need((Choice("emu-1", "emulator"),)), Need((Choice("phone-1", "device"),))]
+    granted = store.grant(needs, Holder(OWNER, owner_pid=100))
+    released = store.release_holding(granted[0].lease.lease_id, end={"emu-1"})
+    assert sorted((lease.resource, after) for lease, after in released) == [
+        ("emu-1", None),
+        ("phone-1", None),
+    ]
+    assert seen == ["emu-1"]
+    store.acquire("emu-2", "emulator", Holder(OWNER, owner_pid=100))
+    store.acquire("emu-3", "emulator", Holder(OWNER, owner_pid=100))
+    assert len(store.release_all(100, end={"emu-3"})) == 2
+    assert seen == ["emu-1", "emu-3"]
+    assert resources(store) == []
+
+
 def test_a_take_back_that_never_finishes_is_quarantined(state_dir, system):
     # Every reaper ends in the middle of the take-back, for example because its caller stops
     # it after a timeout.
@@ -1578,6 +1775,25 @@ def test_a_release_while_scripts_run_is_a_release(state_dir, system):
     assert reaped(store) == [("phone-1", RELEASE, RELEASED)]
     assert last_use(store).how == "release"
     assert last_use(store).left_as_is(OWNER, "boot-1", None)
+
+
+@pytest.mark.parametrize("on_void", [False, True])
+def test_a_release_with_end_is_a_release_that_ran_the_hook_of_the_kind(state_dir, system, on_void):
+    store = Store(state_dir, system, hooked=lambda lease: on_void)
+    lease = store.acquire("phone-1", "device", Holder(OWNER))
+    store.release("phone-1", lease.lease_id, end=True)
+    use = last_use(store)
+    assert (use.how, use.reason, use.hook) == ("release", None, on_void)
+    # Without a hook, the disk of the instance keeps what the holder left on it.
+    assert use.left_as_is(OWNER, "boot-1", None) is not on_void
+
+
+def test_a_forced_release_of_a_release_with_end_ran_no_hook(state_dir, system):
+    store = Store(state_dir, system, hooked=lambda lease: True)
+    lease = entered(store, system)
+    store.release("phone-1", lease.lease_id, end=True)
+    store.force_release("phone-1")
+    assert (last_use(store).how, last_use(store).hook) == ("force_release", False)
 
 
 @pytest.mark.parametrize("on_void", [False, True])

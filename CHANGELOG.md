@@ -318,6 +318,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lease: the command warns, and deletes the record, so that it does not name an earlier holder
   as the last one. `BANKSMAN_ENDED` changes its path for tests. The lease schema and
   the output schema do not change.
+- `release --end`, with `--lease`, `--holding`, `--resource`, or `--all`, gives the lease back
+  and ends its instance when banksman started it: the emulator that banksman started, or the
+  reservation of a remote device that banksman created. A release otherwise leaves the
+  emulator running until the free timeout of its kind, and keeps the reservation, which costs
+  money, until its own end. For an instance that banksman did not start, or a reservation that
+  it adopted, the release says that it leaves the instance as it is, and releases anyway. The
+  end is a take-back: the lease drains with the new void reason `released_end` and the
+  releasing command as its reaper, so that no request gets the instance and the adb guard
+  refuses it meanwhile; the command then ends the instance, runs the `on_void` hook of the
+  kind, and deletes the lease. While scripts of the lease still run, the lease drains first,
+  with `stop = true` the release stops them first, and the instance ends only after them, at a
+  later command. An instance that does not end quarantines the lease. The log records a
+  `release` event with the new field `end`, then a `reap` with the reason `released_end`. A
+  release with an end counts as a release for `PREVIOUS`, unless an `on_void` hook ran. The
+  lease schema is now 11 for the new void reason, and banksman also reads lease files of
+  schemas 8, 9, and 10. The output schema stays 6.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

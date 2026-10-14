@@ -50,7 +50,10 @@ system gave the pid to later. It never signals a process group: other emulators 
 `netsimd` daemon that an emulator can start in its group. An emulator that the holder or a
 person started is never ended. With the `free_timeout` of its kind, the reaper also ends a free
 emulator that banksman started; under the lock of the lease store, it first writes a lease of
-its own for the emulator, so that no request gets the emulator while it ends.
+its own for the emulator, so that no request gets the emulator while it ends. `release --end`
+ends an emulator in the same way, as a take-back with the `on_void` hook of the kind, and only
+the emulator of the lease that the command names by its lease id or its label, and only when
+banksman started it.
 
 **Configuration runs as code.** A kind's hooks are commands that banksman runs as the
 user. So banksman refuses a configuration file that a user other than the user and root
@@ -63,7 +66,7 @@ a file in a project cannot stand in for it. banksman ends only the reservations 
 devices that it created itself, and it records them in
 `~/.local/state/banksman/remote`, which it creates with mode `0700`; it refuses a file there
 that another user owns or that group or others can write to, because that record decides
-which reservations the reaper ends.
+which reservations the reaper and `release --end` end.
 
 **Agents are clients, not operators.** Agents acquire, touch, check, and release leases.
 Discovery, which decides what agents may use, and forced release, which takes a resource

@@ -905,6 +905,73 @@ def test_a_release_keeps_the_reservation_for_the_next_request(capsys, config_pat
     assert cli.calls().count("device remote create tokay/34 --connect") == 1
 
 
+def test_release_with_end_removes_the_reservation_that_banksman_created(
+    capsys, config_path, sdk, cli, tmp_path, monkeypatch
+):
+    work_in(monkeypatch, tmp_path / "tree-a")
+    values, _ = start_one(capsys, config_path, sdk, cli)
+    assert main(["release", "--lease", values["LEASE"], "--end"]) == 0
+    assert capsys.readouterr().out == (
+        "Released tokay:34: banksman ended its instance, and it is free.\n"
+    )
+    assert cli.calls()[-1] == f"device remote remove {FIRST}"
+    assert (leases(), sessions()) == ({}, {})
+    # The connection ends with the reservation, and the next start creates another one: another
+    # device.
+    cli.connected({})
+    adb_lists(sdk, [49523])
+    answers = lifecycle(cli, create=create_answer(cli, handle=SECOND, port=49523))
+    answers[f"device remote extend {SECOND} --duration=*"] = answers.pop(
+        f"device remote extend {FIRST} --duration=*"
+    )
+    cli.answer(answers)
+    status, again, err = acquire(capsys, "--where", "codename=tokay", "--paid", "--start")
+    assert (status, again["HANDLE"], again["PREVIOUS"]) == (0, SECOND, "other"), err
+
+
+def test_release_with_end_keeps_a_reservation_that_banksman_did_not_create(
+    capsys, config_path, sdk, cli
+):
+    values, _ = start_one(capsys, config_path, sdk, cli, listed=LIST)
+    assert main(["release", "--lease", values["LEASE"], "--end"]) == 0
+    assert capsys.readouterr().out == (
+        f"Released tokay:34: it is free. banksman did not create its reservation {FIRST}, so it"
+        " keeps it.\n"
+    )
+    assert not any("remove" in call for call in cli.calls())
+    assert sessions()[FIRST].created is False
+
+
+def test_release_with_end_of_a_model_without_a_reservation_says_so(capsys, config_path, sdk, cli):
+    configure(config_path, sdk, cli)
+    save_catalogue()
+    adb_lists(sdk, [])
+    status, values, err = acquire(capsys, "--where", "codename=OP573DL1", "--paid")
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"], "--end"]) == 0
+    assert capsys.readouterr().out == (
+        "Released OP573DL1:34: it is free. It has no reservation, so there is nothing to end.\n"
+    )
+    assert cli.calls() == []
+
+
+def test_release_with_end_quarantines_a_model_whose_reservation_does_not_end(
+    capsys, config_path, sdk, cli
+):
+    values, answers = start_one(capsys, config_path, sdk, cli)
+    answers[f"device remote remove {FIRST}"] = {"err": "Error: UNAVAILABLE\n", "status": 1}
+    cli.answer(answers)
+    assert main(["release", "--lease", values["LEASE"], "--end"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == (
+        "Released tokay:34: its instance did not end, so it is quarantined until the operator"
+        " releases it.\n"
+    )
+    assert "cannot take back tokay:34: android device remote remove failed" in captured.err
+    assert leases()["tokay:34"].state == "quarantined"
+    assert FIRST in sessions()
+
+
 def test_a_worktree_gets_back_the_model_that_it_used_last_with_its_reservation(
     capsys, config_path, sdk, cli, tmp_path, monkeypatch
 ):

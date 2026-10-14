@@ -26,6 +26,8 @@ HARD_CAP = "hard_cap"
 OWNER_GONE = "owner_gone"
 IDLE = "idle"
 RELEASE = "release"
+# The holder released the lease, and asked banksman to end its instance, which banksman started.
+RELEASED_END = "released_end"
 # The reason of the lease that the reaper writes for a free instance that it ends. No holder had
 # that lease.
 FREE_TIMEOUT = "free_timeout"
@@ -38,6 +40,7 @@ VOID_REASONS = {
     OWNER_GONE: "the owner process ended, and nothing touched the lease for the grace period",
     IDLE: "nothing touched the lease for the idle timeout",
     RELEASE: "the holder released the lease while its scripts still ran",
+    RELEASED_END: "the holder released the lease, and asked banksman to end its instance",
     FREE_TIMEOUT: "the instance had no lease for the free timeout of its kind",
 }
 

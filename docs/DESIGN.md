@@ -148,7 +148,8 @@ leases instead.
   take-back never runs next to a start or a reset. The reaper also ends a free emulator that
   banksman started, after the free timeout of its kind: under the lock, it first writes a
   `draining` lease of its own for the emulator, and then takes that lease back in the same way
-  (section 8).
+  (section 8). A release with `--end` takes the instance of the lease back in the same way too,
+  with the releasing command as the reaper (section 4).
 - **The serial.** A lease of an instance that runs records its serial: the address that tools
   such as adb use, for example `emulator-5554`. Only discovery (section 8), or a start that
   banksman performs (section 6), sets it, never the holder, because `banksman run` and the hooks
@@ -257,6 +258,25 @@ minutes, and its lease can become void in the middle.
   scripts still run, the lease drains like a void lease, so that the scripts end before the
   resource is handed on. The `on_void` hook does not run: the holder gives the instance back
   as it is.
+- **A release can end the instance.** A release leaves an emulator running, and keeps the
+  reservation of a remote device, so that the next request gets the instance without a start
+  (section 8). That costs memory, or money, until the free timeout of the kind or the end of the
+  reservation. The holder knows whether it comes back soon, and banksman does not. So
+  `release --end` also ends the instance when banksman started it: the emulator that banksman
+  started, or the reservation that it created. banksman decides that from its records while the
+  lease is still held. For an instance that banksman did not start, or a reservation that it
+  adopted, the release says that it leaves the instance as it is, and releases anyway: banksman
+  never ends what it did not start. The end is a take-back. Under the lock, the lease drains
+  with the void reason `released_end`, and names the releasing command in the fields that name
+  a reaper, so that no request gets the instance, the adb guard refuses it, and no other reaper
+  acts on it. Outside the lock, the command ends the instance, runs the `on_void` hook of the
+  kind, and deletes the lease. An instance that does not end quarantines the lease, as for a
+  void lease, and a command that ends in the middle leaves the end to the next command. While
+  scripts of the lease still run, the instance ends only after them, so that they can finish
+  their work on it: the release stops them first when stopping is on, and later commands only
+  wait for them, take the instance back when they have ended, and quarantine the lease when
+  they still run at the drain deadline. The command takes only the lease id or the label of the
+  caller, so it never ends the instance of another holder.
 - **Stopping is opt-in.** The operator can turn stopping on for a kind with `stop = true`
   (section 5). The reaper then sends SIGTERM to the registered scripts and to their process
   groups, waits up to 10 seconds, sends SIGKILL to those that still run, and confirms their
@@ -512,9 +532,11 @@ holdings apart (section 9).
   cost needs a measurement first.
 - **`PREVIOUS`** says whether the instance is as the caller's worktree left it, as far as
   banksman knows. It is `self` when the last lease that a holder used was of the caller's
-  worktree and ended with a release on this boot, no take-back hook ran since, the kind has no
-  `on_acquire` hook, which changes the instance for every new lease, the instance is not
-  unmanaged, and it has the same handle, so for a remote device the same reservation. A kept
+  worktree and ended with a release on this boot, also a release that ended the instance
+  (section 4), no take-back hook ran then or since, the kind has no `on_acquire` hook, which
+  changes the instance for every new lease, the instance is not unmanaged, and it has the same
+  handle, so for a remote device the same reservation. An AVD that a release ended keeps its
+  disk, so the next `acquire --start` of the worktree boots it with its state. A kept
   lease is `self` too. In every other case it is `other`: a lease of another worktree, a void
   lease, a forced release, a restart of the machine, a new reservation, or no entry. Two values
   keep the logic of a project to one branch. `self` is not a proof: a person or a program
@@ -807,13 +829,14 @@ holdings apart (section 9).
   that banksman knows.
 
   **The end.** A release leaves the emulator running, and the next request gets it without a
-  start. The reaper ends the emulator of a void lease only when the record says that banksman
+  start, unless the holder asks for the end with `release --end` (section 4). The reaper ends the emulator of a void lease only when the record says that banksman
   started it, whichever lease it started it for: SIGTERM to the emulator process, SIGKILL when
   it still runs after 20 seconds, and the end confirmed by pid and start time. It never
   signals a process group, because an emulator can start the `netsimd` daemon in its group,
   and the other emulators use that daemon. When the emulator does not end, the lease is
-  quarantined. An emulator that the holder started stays, and banksman records it. An
-  `acquire --start` that is killed in the middle, for example by the shell tool of an agent,
+  quarantined. A release with `--end` ends the emulator in the same way, and only when the
+  record says that banksman started it. An emulator that the holder started stays, and
+  banksman records it. An `acquire --start` that is killed in the middle, for example by the shell tool of an agent,
   leaves the lease `booting`. The tool can have ended the emulator too, because it can signal
   every process below the command. The lease is void as soon as that `acquire` has ended
   (section 3), and the next command ends the emulator if it still runs, and frees the AVD.
@@ -916,7 +939,9 @@ holdings apart (section 9).
   emulator that a release leaves running. When the connection has ended meanwhile, the next
   `acquire --start` of the model adopts the reservation, and affinity makes the model the first
   choice of the worktree that used it (section 6), so that it does not pay for a second
-  reservation. A new handle means a new device, so `PREVIOUS` is then `other`. The reaper ends
+  reservation. A new handle means a new device, so `PREVIOUS` is then `other`. A holder that
+  does not come back soon releases with `--end` (section 4): banksman then removes the
+  reservation when it created it, and keeps a reservation that it adopted. The reaper ends
   only what banksman started: for a
   void lease whose handle the record lists as created by banksman, it runs
   `android device remote remove <id>`. A reservation that has ended already counts as gone.
@@ -1076,7 +1101,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   drain deadline and whether stopping was on for the kind, so that an operator can see what
   the reaper would have stopped before turning `stop = true` on (section 4). The end of a free
   emulator after its free timeout is a reap with the reason `free_timeout` and the holder
-  `banksman` (section 8).
+  `banksman` (section 8). A release says with `end` whether banksman ends the instance, and that
+  end is a reap with the reason `released_end` (section 4).
 - **The log file** is `~/.local/state/banksman/log.jsonl`, with the home directory from the
   user database. It is outside `/tmp`, as the quarantines are, because the history must
   outlive restarts and cleaners of temporary files. It has one JSON object for each event,
@@ -1356,8 +1382,8 @@ banksman run     --where <attr><op><value> ... [--accounts <n>] [--for <text>] [
 banksman touch   (--lease <id> | --holding <label>) [--resource <name>] [--expect <duration>]
                  [--owner-pid <pid>]
 banksman release (--lease <id> | --holding <label>) [--resource <name>]
-                 [--owner-pid <pid>]                               # the holding, or one resource
-banksman release --all [--owner-pid <pid>]                         # the leases of this agent
+                 [--owner-pid <pid>] [--end]                       # the holding, or one resource
+banksman release --all [--owner-pid <pid>] [--end]                 # the leases of this agent
 banksman held    [--owner-pid <pid>] [--json]                      # the holdings of this agent
 banksman status  [--json] [--verbose]
 banksman whoami  [--json]
@@ -1404,9 +1430,9 @@ permission rules can refuse all of them with one pattern, including ones added l
   command (section 3). A new value of a field, such as a new void reason, changes it too,
   because an earlier banksman refuses the file. banksman also reads the files of an earlier
   lease schema when each of them is a valid file of its own schema: schema 9 only added the
-  void reason `free_timeout`, and schema 10 only added the void reason `acquire_gone`, so
-  banksman reads lease files of schemas 8 and 9, and an upgrade does not lose the leases that
-  are held.
+  void reason `free_timeout`, schema 10 only added the void reason `acquire_gone`, and schema
+  11 only added the void reason `released_end`, so banksman reads lease files of schemas 8, 9,
+  and 10, and an upgrade does not lose the leases that are held.
 - The output schema is the version of the JSON that the commands print and of the lines of
   the log. A new field does not change it, so a reader ignores the fields that it does not
   know. It changes when a field is removed or renamed, or changes its type or its meaning. A
@@ -1572,6 +1598,8 @@ Done:
   without a lease, under a lease of its own, so that no request gets it meanwhile.
 - Affinity: a request gets the free instance that its worktree used last first, and the grant
   says with `PREVIOUS` whether the instance is as the worktree left it.
+- `release --end`: a holder that does not come back soon also ends the emulator that banksman
+  started, or the reservation that it created, as a take-back after the scripts of the lease.
 
 Next:
 
