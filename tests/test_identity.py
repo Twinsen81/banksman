@@ -352,10 +352,15 @@ def test_whoami_finds_an_agent_on_the_real_machine(tmp_path):
 # process between them has ended.
 DETACHED = """
 import os, sys, time
+# Before the fork: the parent can end before the child runs, and the child would then wait for
+# a change of its adopter.
+parent = os.getpid()
 if os.fork():
     os._exit(0)
-parent = os.getppid()
+deadline = time.monotonic() + 10
 while os.getppid() == parent:
+    if time.monotonic() > deadline:
+        sys.exit("the process between them did not end")
     time.sleep(0.01)
 os.execv(sys.executable, [sys.executable, "-m", "banksman", "whoami", "--json"])
 """
