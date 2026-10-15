@@ -43,32 +43,99 @@ AGENT_IN_AN_APP = processes(
 
 
 def test_the_agent_is_the_nearest_ancestor_with_a_known_program():
-    assert find_agent(AGENT_IN_AN_APP, ("claude", "codex"), 500) == (300, "claude")
+    assert find_agent(AGENT_IN_AN_APP, ("claude", "codex"), 500, {}) == (300, "claude")
 
 
 def test_the_nearest_agent_wins():
     table = processes((500, "/bin/sh"), (400, "codex"), (300, "/usr/local/bin/claude"))
-    assert find_agent(table, ("claude", "codex"), 500) == (400, "codex")
+    assert find_agent(table, ("claude", "codex"), 500, {}) == (400, "codex")
 
 
 def test_the_program_name_is_compared_case_sensitively():
     # The Claude app's own executable is "Claude"; the agent is "claude".
     table = processes((500, "/bin/sh"), (400, "/Applications/Claude.app/Contents/MacOS/Claude"))
-    assert find_agent(table, ("claude",), 500) == (None, None)
+    assert find_agent(table, ("claude",), 500, {}) == (None, None)
 
 
 def test_a_part_of_a_program_name_is_not_an_agent():
     table = processes((500, "/bin/sh"), (400, "/usr/local/bin/claude-helper"))
-    assert find_agent(table, ("claude",), 500) == (None, None)
+    assert find_agent(table, ("claude",), 500, {}) == (None, None)
 
 
 def test_without_agents_in_the_configuration_there_is_no_agent():
-    assert find_agent(AGENT_IN_AN_APP, (), 500) == (None, None)
+    assert find_agent(AGENT_IN_AN_APP, (), 500, {}) == (None, None)
 
 
 def test_the_process_itself_is_not_its_own_agent():
     table = processes((500, "codex"), (400, "/bin/sh"))
-    assert find_agent(table, ("codex",), 500) == (None, None)
+    assert find_agent(table, ("codex",), 500, {}) == (None, None)
+
+
+def detached(agent_program=CLAUDE_IN_AN_APP, agent_started="1000", caller_started="2000"):
+    """Return a process table in which a command runs outside the process tree of its agent: the
+    init process adopted the shell that runs banksman when the shell's parent ended."""
+    system = FakeSystem()
+    system.spawn(100, program="/Applications/Agent App.app/Contents/MacOS/agent-app")
+    system.spawn(300, parent=100, program=agent_program)
+    system.spawn(400, program="/bin/zsh")
+    system.spawn(500, parent=400, program="/opt/python/bin/python3")
+    # Clock ticks after boot, as the process list on Linux gives a start time.
+    system.processes.update({100: "10", 300: agent_started, 400: "1500", 500: caller_started})
+    return system.process_table()
+
+
+def test_a_command_outside_the_tree_of_its_agent_finds_the_agent_by_the_variable():
+    assert find_agent(detached(), ("claude", "codex"), 500, {}) == (None, None)
+    assert find_agent(detached(), ("claude", "codex"), 500, {"CLAUDE_PID": "300"}) == (
+        300,
+        "claude",
+    )
+
+
+@pytest.mark.parametrize(
+    ("table", "value"),
+    [
+        # The process does not run, for example because the agent has ended.
+        (detached(), "301"),
+        # The process is not the agent that sets the variable.
+        (detached(agent_program="/bin/zsh"), "300"),
+        (detached(agent_program="/usr/local/bin/codex"), "300"),
+        # The process started after the caller, so the system gave the pid to a new process.
+        (detached(agent_started="2001"), "300"),
+        # The caller itself, and the init process.
+        (detached(), "500"),
+        (detached(), "1"),
+    ],
+)
+def test_the_variable_names_the_agent_only_when_its_process_qualifies(table, value):
+    assert find_agent(table, ("claude", "codex"), 500, {"CLAUDE_PID": value}) == (None, None)
+
+
+def test_an_agent_that_started_in_the_same_second_as_the_caller_counts():
+    # ps gives whole seconds, so the order inside one second is not known.
+    second = "Thu Oct 15 10:09:25 2026"
+    table = detached(agent_started=second, caller_started=second)
+    assert find_agent(table, ("claude",), 500, {"CLAUDE_PID": "300"}) == (300, "claude")
+
+
+@pytest.mark.parametrize(
+    "value", ["", "abc", "-300", "+300", " 300", "300 ", "\u0663\u0660\u0660", "1" * 11]
+)
+def test_a_value_that_is_not_a_pid_names_no_agent(value):
+    assert find_agent(detached(), ("claude",), 500, {"CLAUDE_PID": value}) == (None, None)
+
+
+def test_the_variable_names_no_agent_when_the_agent_is_not_in_the_configuration():
+    assert find_agent(detached(), ("codex",), 500, {"CLAUDE_PID": "300"}) == (None, None)
+    assert find_agent(detached(), (), 500, {"CLAUDE_PID": "300"}) == (None, None)
+
+
+def test_the_nearest_agent_above_the_caller_wins_over_the_variable():
+    # One agent runs another: the variable has the pid of the outer agent.
+    table = processes(
+        (500, "/bin/sh"), (400, "codex"), (300, "/usr/local/bin/claude"), (200, "/bin/zsh")
+    )
+    assert find_agent(table, ("claude", "codex"), 500, {"CLAUDE_PID": "300"}) == (400, "codex")
 
 
 def test_the_owner_is_the_toplevel_of_the_repository(tmp_path):
@@ -160,6 +227,13 @@ def test_the_holder_of_an_agent_in_a_repository(tmp_path):
     assert holder.purpose is None
 
 
+def test_the_holder_of_a_command_outside_the_tree_of_its_agent(tmp_path):
+    env = {"CLAUDE_PID": "300", "CLAUDE_CODE_SESSION_ID": "0b7a1c2e-6f1d-4c52-9a51-1b9b2b3c4d5e"}
+    holder = find_holder(detached(), RULES, cwd=str(tmp_path), env=env, pid=500)
+    assert (holder.owner_pid, holder.agent) == (300, "claude")
+    assert holder.session == env["CLAUDE_CODE_SESSION_ID"]
+
+
 def test_a_person_at_a_terminal_has_no_owner_process(tmp_path):
     table = processes((500, "/opt/python/bin/python3"), (400, "/bin/zsh"), (300, "login"))
     holder = find_holder(table, RULES, cwd=str(tmp_path), env={}, pid=500)
@@ -237,3 +311,40 @@ def test_whoami_finds_an_agent_on_the_real_machine(tmp_path):
     )
     assert isinstance(shown["owner_pid"], int)
 
+
+
+# A program that a test starts as its agent, through a link named like the agent, and a script
+# that runs banksman outside the process tree of the test: the init process adopts it when the
+# process between them has ended.
+DETACHED = """
+import os, sys, time
+if os.fork():
+    os._exit(0)
+parent = os.getppid()
+while os.getppid() == parent:
+    time.sleep(0.01)
+os.execv(sys.executable, [sys.executable, "-m", "banksman", "whoami", "--json"])
+"""
+
+
+@pytest.mark.skipif(not os.path.exists("/bin/sleep"), reason="needs /bin/sleep")
+def test_whoami_finds_the_agent_by_the_variable_on_the_real_machine(tmp_path):
+    agent_program = tmp_path / "bin" / "claude"
+    agent_program.parent.mkdir()
+    agent_program.symlink_to("/bin/sleep")
+    agent = subprocess.Popen([str(agent_program), "60"])
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", DETACHED],
+            cwd=tmp_path,
+            env={**os.environ, "PYTHONPATH": SRC, "CLAUDE_PID": str(agent.pid)},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+    finally:
+        agent.kill()
+        agent.wait()
+    shown = json.loads(result.stdout)
+    assert (shown["agent"], shown["owner_pid"]) == ("claude", agent.pid)

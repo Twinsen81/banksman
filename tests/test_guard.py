@@ -258,6 +258,52 @@ def test_a_person_passes_also_on_the_device_of_another_holding(store, system):
     assert check(system, "-s", "emulator-5554", "shell") is None
 
 
+def detach(system, agent_started="1000"):
+    """Make the caller a command that has left the process tree of its agent, and return its
+    environment, which names the agent."""
+    # Clock ticks after boot, as the process list on Linux gives a start time.
+    system.processes.update({AGENT: agent_started, ME: "2000"})
+    system.parents[ME] = 1
+    return {"CLAUDE_PID": str(AGENT)}
+
+
+def test_a_detached_command_of_an_agent_is_refused_on_the_device_of_another_holding(
+    store, system
+):
+    env = detach(system)
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    assert "another holder" in check(system, "-s", "emulator-5554", "shell", env=env)
+    assert "refused" in check(system, "kill-server", env=env)
+    # Without the variable, it passes as a person's.
+    assert check(system, "-s", "emulator-5554", "shell") is None
+
+
+def test_a_detached_command_of_the_holder_passes_on_its_own_device(store, system):
+    env = detach(system)
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    lease(store, system, "e2e_tablet", other(), serial="emulator-5556")
+    assert check(system, "-s", "emulator-5554", "shell", env=env) is None
+    assert "another holder" in check(system, "-s", "emulator-5556", "shell", env=env)
+
+
+def test_a_detached_command_names_its_agent_in_the_refusal_log(
+    machine, store, system, worktree, log_path, monkeypatch
+):
+    monkeypatch.setenv("CLAUDE_PID", detach(system)["CLAUDE_PID"])
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    assert guarded("-s", "emulator-5554", "shell") == guard.EXIT_REFUSED
+    (event,) = logged(log_path)
+    assert (event.owner_pid, event.agent, event.session) == (AGENT, "claude", "session-1")
+
+
+def test_a_variable_that_names_a_process_started_after_the_caller_counts_for_nothing(
+    store, system
+):
+    env = detach(system, agent_started="2001")
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    assert check(system, "-s", "emulator-5554", "shell", env=env) is None
+
+
 def test_a_device_without_a_lease_passes_without_the_process_list(store, system):
     lease(store, system, "e2e_phone", other(), serial="emulator-5554")
     assert check(NoProcessList(), "-s", "emulator-5556", "shell") is None
@@ -1009,6 +1055,18 @@ def test_the_lease_id_of_banksman_run_touches_and_keeps_the_owner(
     (phone,) = touched(state_dir, "e2e_phone")
     assert phone["awake"]["touched"] == system.now
     assert phone["owner_pid"] == OTHER_AGENT
+
+
+def test_a_detached_call_of_the_holder_touches_its_holding(
+    machine, store, system, state_dir, monkeypatch
+):
+    monkeypatch.setenv("CLAUDE_PID", detach(system)["CLAUDE_PID"])
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    system.advance(61)
+    assert guarded("-s", "emulator-5554", "shell") == 0
+    (phone,) = touched(state_dir, "e2e_phone")
+    assert phone["awake"]["touched"] == system.now
+    assert phone["owner_pid"] == AGENT
 
 
 def test_a_call_of_a_person_touches_nothing(machine, store, system, monkeypatch):

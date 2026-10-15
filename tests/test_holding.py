@@ -421,7 +421,7 @@ def test_held_leaves_out_the_calls_of_an_earlier_agent_process_with_the_same_pid
     capsys, config_path, log_path, monkeypatch, agent, arguments, shown
 ):
     configure(config_path)
-    monkeypatch.setattr(cli, "find_agent", lambda table, agents, pid: (os.getpid(), agent))
+    monkeypatch.setattr(cli, "find_agent", lambda table, agents, pid, env: (os.getpid(), agent))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "session-2")
     # The system gave the pid of an earlier agent process, of session-1, to this one.
     guard_call(log_path, 300, "emulator-5554", session="session-1", reason=NOT_LEASED)
@@ -448,7 +448,7 @@ def test_status_of_an_agent_points_to_held_for_its_refused_calls(
 ):
     configure(config_path)
     agent = (os.getpid(), "codex")
-    monkeypatch.setattr(cli, "find_agent", lambda table, agents, pid: agent)
+    monkeypatch.setattr(cli, "find_agent", lambda table, agents, pid, env: agent)
     assert main(["status"]) == 0
     assert "adb guard" not in capsys.readouterr().out
     guard_call(log_path, 10, "qa_phone2", reason=NOT_LEASED)

@@ -913,7 +913,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
     # An agent often runs status when a script failed. The calls are its own, so held shows
     # them, and status only points there; the JSON stays the same for every caller.
     with contextlib.suppress(BanksmanError, OSError):
-        owner, agent = find_agent(Machine().process_table(), config.holder.agents, os.getpid())
+        owner, agent = find_agent(
+            Machine().process_table(), config.holder.agents, os.getpid(), os.environ
+        )
         if owner is not None and _guard_calls(
             owner, status.clock.wall, agent_session(agent, os.environ)
         ):
@@ -1019,7 +1021,9 @@ def _cmd_held(args: argparse.Namespace) -> int:
     store, _ = _reaped_store(config)
     session = None
     if args.owner_pid is None:
-        owner, agent = find_agent(Machine().process_table(), config.holder.agents, os.getpid())
+        owner, agent = find_agent(
+            Machine().process_table(), config.holder.agents, os.getpid(), os.environ
+        )
         session = agent_session(agent, os.environ)
     else:
         owner = args.owner_pid
@@ -2281,7 +2285,8 @@ def _owner_process(config: Config, owner_pid: int | None) -> int | None:
     # records its new process, so that the lease does not end with the earlier one.
     if owner_pid is not None:
         return owner_pid
-    return find_agent(Machine().process_table(), config.holder.agents, os.getpid())[0]
+    table = Machine().process_table()
+    return find_agent(table, config.holder.agents, os.getpid(), os.environ)[0]
 
 
 def _released(
