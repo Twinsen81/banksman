@@ -7,7 +7,7 @@ import time
 import pytest
 
 from banksman import system
-from banksman.system import Machine, MachineError, Process
+from banksman.system import Machine, MachineError, Process, started_no_later
 
 # These tests read the real machine: its boot id, its clock, and processes that the tests
 # start themselves. They change nothing.
@@ -126,6 +126,41 @@ def test_a_child_in_a_new_session_leads_its_own_group():
     finally:
         child.kill()
         child.wait()
+
+
+def test_a_process_started_no_later_than_its_child():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        table = Machine().process_table()
+        assert started_no_later(table[os.getpid()].started, table[child.pid].started)
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ("4300", "4301", True),
+        ("4300", "4300", True),
+        ("4301", "4300", False),
+        ("999", "1000", True),
+        ("Thu Oct 15 10:09:25 2026", "Thu Oct 15 10:09:26 2026", True),
+        ("Thu Oct 15 10:09:25 2026", "Thu Oct 15 10:09:25 2026", True),
+        ("Thu Oct 15 10:09:26 2026", "Thu Oct 15 10:09:25 2026", False),
+        ("Wed Sep 30 23:59:59 2026", "Thu Oct 1 00:00:00 2026", True),
+        ("Thu Oct 1 09:00:00 2026", "Thu Oct 10 08:00:00 2026", True),
+        ("Thu Dec 31 23:59:59 2026", "Fri Jan 1 00:00:00 2027", True),
+        # Start times that cannot be compared prove nothing.
+        ("4300", "Thu Oct 15 10:09:25 2026", False),
+        ("", "4300", False),
+        ("Thu Okt 15 10:09:25 2026", "Thu Oct 15 10:09:26 2026", False),
+        ("Thu Oct 15 10:09 2026", "Thu Oct 15 10:09:26 2026", False),
+        ("start-1", "start-2", False),
+    ],
+)
+def test_the_order_of_two_start_times(first, second, expected):
+    assert started_no_later(first, second) is expected
 
 
 def test_a_zombie_is_not_in_the_process_table():

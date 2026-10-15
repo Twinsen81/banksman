@@ -994,12 +994,39 @@ for any agent and for a person at a terminal.
 |---|---|
 | owner | the worktree: the nearest directory, from the caller's working directory up, that has a `.git` entry; outside a repository, the working directory |
 | issue | `--issue`, otherwise the first match of `issue_pattern` in the branch name, then in the name of the worktree directory |
-| agent | the nearest ancestor process whose program is in `agents`: the last part of its executable path, with case |
+| agent | the nearest ancestor process whose program is in `agents`: the last part of its executable path, with case; otherwise the agent process that the agent's pid variable names, `CLAUDE_PID` for `claude` |
 | owner process | that process's pid and start time, used for liveness |
 | session | an agent-specific extra when the environment has one, never required: `CLAUDE_CODE_SESSION_ID` for `claude` |
 
-If no known agent is in the ancestry, the owner is the worktree, and only the touch-based
-expiry applies, unless the caller passes `--owner-pid`.
+A command can leave the process tree of its agent: a script that starts a test runner with
+`nohup` or in a session of its own, or a background job whose shell has ended. The init process
+adopts it, and no agent is in its ancestry. But it keeps the environment that it got from the
+agent, and an agent can give the pid of its agent process there. So when no known agent is in
+the ancestry, banksman reads the pid variable of the agent from its own environment, and takes
+the process that it names as the agent process when that process runs, its program is the agent
+that sets the variable and is in `agents`, and it started no later than the caller and each of
+its ancestors below the nearest ancestor that they share. The walk comes first: when one agent
+runs another, the variable names the outer one, and the nearest agent runs the command. Acquire,
+`touch`, `release --all`, `held`, `whoami`, and the adb guard (section 12) find the agent
+process in the same way. The map of variables is built in, as for the session: only `claude`
+sets one, and Codex does not.
+
+- The process list that banksman reads already has the process, so the variable costs no more
+  reads, and a person at a terminal, who has no such variable, gets the same result as before.
+- The checks keep a value that is invented or stale from naming a process that is not that
+  agent. The processes from the caller up to the nearest ancestor that it shares with the agent
+  got the variable from the agent, so the agent started before each of them. The init process,
+  or on Linux a nearer process that adopts orphans such as `systemd --user`, adopted the top of
+  that branch, and it is an ancestor of the agent too. A pid that the system gave to another
+  agent process after the agent ended counts only when the whole branch started after the agent
+  ended, and a person's shell that has the variable from
+  elsewhere does not count when it is older than the process that the variable names. A caller
+  can set the variable itself, as it can pass `--owner-pid`.
+- A long-lived process, such as a daemon that a command of an agent started, keeps the variable
+  of that agent, so its commands act for that agent while that agent runs.
+
+If no agent process is found, the owner is the worktree, and only the touch-based expiry
+applies, unless the caller passes `--owner-pid`.
 
 The owner is the readable name of a holding, not its identity: several agents can work in one
 worktree at the same time, each with its own agent process. The lease id identifies a
@@ -1010,7 +1037,9 @@ agent, through its own agent process.
   holding, so a lease survives a restart of the agent. A lease whose owner process still runs
   and started the caller keeps that owner, also for `acquire --lease`: the caller works within
   the life of that process. So a script that `banksman run --where` runs cannot move the lease
-  of the run to the agent, and the lease still ends with the run.
+  of the run to the agent, and the lease still ends with the run. A script that has left the
+  process tree of the run counts as started by it when its `BANKSMAN_LEASE` names a lease of the
+  holding.
 - `release --all` gives back only the leases whose owner process is the caller's agent
   process, so it acts for one agent. After a restart of the agent, it finds a lease only
   after a touch has recorded the new agent process; until then, the lease ends by its
@@ -1318,11 +1347,14 @@ is a setup of the operator, and a project needs nothing for it.
   date in held leases only (section 3); and a lease in any state whose resource is the serial,
   as for a physical device. A lease file that cannot be read keeps its device out of use.
 - **Who may use the device.** The call runs when one of these is true:
-  - No agent process (section 9) is above the caller, for example for a person in a terminal.
+  - The caller has no agent process (section 9): none is above it, and its environment names
+    none, for example for a person in a terminal.
   - The device has no lease, and the guard is not strict.
   - The lease is held, and its holding is the caller's: `BANKSMAN_LEASE` names a lease of the
     holding, as `banksman run` sets it, or the owner process of a lease of the holding is above
-    the caller.
+    the caller, or is the agent process that the environment of the caller names. So a script
+    that has left the process tree of its agent can use the devices of its agent, and is refused
+    on the device of another holder.
   - The banksman process that the lease names is above the caller: the `acquire` that resets
     the instance, or the reaper that takes it back. Their hooks act on the device, and a reaper
     can run inside a command of another agent (section 5).
@@ -1337,8 +1369,9 @@ is a setup of the operator, and a project needs nothing for it.
   uses its device with direct adb calls, for example to verify a change on the device, makes
   many device calls and no banksman call. So a device command that the guard lets run because
   a held lease of the caller's holding has the device, through `BANKSMAN_LEASE` or through the
-  owner process above the caller, touches that lease and the other held leases of its holding,
-  as `touch` does (section 7). The idle timeout then counts the time without a banksman call
+  owner process above the caller or named in its environment, touches that lease and the other
+  held leases of its holding, as `touch` does (section 7). The idle timeout then counts the
+  time without a banksman call
   and without a device call of the holder. The guard touches the holding when the last touch
   of one of its held leases is more than a minute old, or more than a quarter of the idle
   timeout of that lease when that is shorter. So a lease of the holding with an idle timeout of
@@ -1352,8 +1385,8 @@ is a setup of the operator, and a project needs nothing for it.
   script never moves a lease to another owner (section 9). A touch that cannot be done, because
   the lock is held or a file cannot be written, changes nothing for the call, and the guard
   says nothing about it, because a script can read standard error with the output of adb. A
-  call that the guard refuses, that warn mode lets run, that passes because no agent process
-  is above the caller, or that acts on every device touches nothing: a person's call is not
+  call that the guard refuses, that warn mode lets run, that passes because the caller has no
+  agent process, or that acts on every device touches nothing: a person's call is not
   use by the holder, and a call on a device of another holder is not use of the caller's
   device. The log records nothing for a touch, as for every other touch (section 10). A tool
   that talks to the adb server itself, such as the connected tests of the Android Gradle
@@ -1463,10 +1496,13 @@ is a setup of the operator, and a project needs nothing for it.
   adb server itself, such as the connected tests of the Android Gradle plugin, for which the
   `ANDROID_SERIAL` of `banksman run` names the leased device (section 4); and the emulator
   console. A second connection to an emulator, with `adb connect` to its adb port, has another
-  serial, and the guard does not know that it is the same device. A process that no agent
-  process is above passes as a person's, for example a task that a Gradle daemon runs after an
-  earlier build started the daemon. The guard never acquires a lease itself: that would make it
-  a second way to get a device, and hide that two holders want the same one.
+  serial, and the guard does not know that it is the same device. A process that has no agent
+  process passes as a person's, for example a task that a Gradle daemon runs after an earlier
+  build started the daemon, when the pid variable of an agent does not reach the task. A
+  process that keeps the pid variable of another agent, such as a daemon that a command of that
+  agent started, acts for that agent while that agent runs (section 9). The guard never
+  acquires a lease itself: that would make it a second way to get a device, and hide that two
+  holders want the same one.
 
 ## 13. Command line (sketch)
 

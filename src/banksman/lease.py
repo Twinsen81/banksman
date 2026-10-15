@@ -57,6 +57,8 @@ SESSION = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 # printed as a KEY=value line.
 LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 MAX_PURPOSE_LENGTH = 200
+# The variable in which `banksman run` gives its command the id of its lease.
+LEASE_VARIABLE = "BANKSMAN_LEASE"
 # The most accounts that one lease can list.
 MAX_LEASE_ACCOUNTS = 100
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")

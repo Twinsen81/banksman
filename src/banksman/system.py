@@ -20,6 +20,7 @@ _TIMEOUT_SECONDS = 5.0
 _MAX_MACOS_PID = 99_999
 # With LC_ALL=C, ps prints a start time as "Fri Oct  2 10:09:25 2026".
 _LSTART_FIELDS = 5
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _CTL_KERN = 1
 _KERN_ARGMAX = 8
 _KERN_PROCARGS2 = 49
@@ -130,6 +131,35 @@ class Machine:
 
 
 _LINUX = sys.platform.startswith("linux")
+
+
+def started_no_later(first: str, second: str) -> bool:
+    """Whether a process that started at `first` started no later than one that started at
+    `second`, both as the process list of this machine gives them. False when they cannot be
+    compared.
+
+    ps gives whole seconds, so two processes that started in the same second count as started
+    in either order.
+    """
+    earlier, later = _start_order(first), _start_order(second)
+    if earlier is None or later is None or len(earlier) != len(later):
+        return False
+    return earlier <= later
+
+
+def _start_order(started: str) -> tuple[int, ...] | None:
+    # Clock ticks after boot from /proc, or "Fri Oct 2 10:09:25 2026" in UTC from ps.
+    if started.isascii() and started.isdigit():
+        return (int(started),)
+    fields = started.split()
+    if len(fields) != _LSTART_FIELDS or fields[1] not in _MONTHS:
+        return None
+    clock = fields[3].split(":")
+    numbers = [fields[4], fields[2], *clock]
+    if len(clock) != 3 or not all(part.isascii() and part.isdigit() for part in numbers):
+        return None
+    year, day, hour, minute, second = (int(part) for part in numbers)
+    return (year, _MONTHS.index(fields[1]), day, hour, minute, second)
 
 
 def _check_visible(processes: dict[int, object]) -> None:

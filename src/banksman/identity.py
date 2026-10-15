@@ -1,9 +1,10 @@
 """Holder identity: who asks for a lease, found from facts that every caller has.
 
 The owner is the worktree. The agent is the nearest ancestor process whose program is a known
-agent, and that process decides liveness. The issue comes from the caller, otherwise from the
-branch name or the worktree directory name. It works the same for any agent and for a person
-at a terminal, and the caller types none of it.
+agent, otherwise the agent process that the environment names, and that process decides
+liveness. The issue comes from the caller, otherwise from the branch name or the worktree
+directory name. It works the same for any agent and for a person at a terminal, and the caller
+types none of it.
 """
 
 from __future__ import annotations
@@ -17,11 +18,16 @@ from banksman.config import HolderRules
 from banksman.errors import BanksmanError
 from banksman.lease import ISSUE, MAX_PURPOSE_LENGTH, SESSION, Holder
 from banksman.sanitize import clean
-from banksman.system import Process
+from banksman.system import Process, started_no_later
 
 # The variable in which an agent gives the id of its session, for the agents that set one. It
 # is only for display, so an agent without one loses nothing.
 SESSION_VARIABLES = {"claude": "CLAUDE_CODE_SESSION_ID"}
+# The variable in which an agent gives the pid of its agent process, for the agents that set
+# one. A command that has left the process tree of its agent, for example with nohup, keeps the
+# environment that it got from the agent.
+PID_VARIABLES = {"claude": "CLAUDE_PID"}
+_MAX_PID_DIGITS = 10
 _MAX_GIT_FILE = 4096
 _HEAD_BRANCH = "ref: refs/heads/"
 
@@ -46,7 +52,8 @@ def find_holder(
     except FileNotFoundError:
         raise BanksmanError("the working directory does not exist") from None
     owner = worktree(directory)
-    agent_pid, agent = find_agent(table, rules.agents, os.getpid() if pid is None else pid)
+    env = os.environ if env is None else env
+    agent_pid, agent = find_agent(table, rules.agents, os.getpid() if pid is None else pid, env)
     if issue is not None and ISSUE.fullmatch(issue) is None:
         raise BanksmanError(
             "an issue id has 1 to 64 letters, digits, and the characters '#', '.', '_', '/',"
@@ -59,7 +66,7 @@ def find_holder(
         owner_pid=agent_pid if owner_pid is None else owner_pid,
         issue=issue,
         agent=agent,
-        session=agent_session(agent, os.environ if env is None else env),
+        session=agent_session(agent, env),
         purpose=None if purpose is None else purpose_text(purpose),
     )
 
@@ -122,20 +129,79 @@ def issue_of(rules: HolderRules, *texts: str | None) -> str | None:
 
 
 def find_agent(
-    table: Mapping[int, Process], agents: Sequence[str], pid: int
+    table: Mapping[int, Process], agents: Sequence[str], pid: int, env: Mapping[str, str]
 ) -> tuple[int | None, str | None]:
-    """Return the nearest ancestor of a process whose program is a known agent, and its name."""
+    """Return the agent process of a process and the name of its program: the nearest ancestor
+    whose program is a known agent, otherwise the agent process that `env`, the environment of
+    the process, names."""
     for ancestor in fencing.ancestors(table, pid):
         process = table.get(ancestor)
         if process is None:
             break
-        # macOS shows the full path of the executable, which for an agent that an app ships is
-        # a path inside the app. The name is compared case-sensitively: the Claude app itself is
-        # "Claude", and it is not the agent.
-        name = os.path.basename(process.program)
-        if name in agents:
+        name = agent_name(process, agents)
+        if name is not None:
             return ancestor, name
+    caller = table.get(pid)
+    return (None, None) if caller is None else named_agent(table, agents, env, caller)
+
+
+def named_agent(
+    table: Mapping[int, Process], agents: Sequence[str], env: Mapping[str, str], caller: Process
+) -> tuple[int | None, str | None]:
+    """Return the agent process that the environment of a process names, and the name of its
+    program, when that process runs, is the known agent that sets the variable, and started no
+    later than each process of the branch of the caller (see `caller_branch`).
+
+    The walk up the process tree comes first: when one agent runs another, the variable names the
+    outer one, and the nearest one runs the command.
+    """
+    for agent, variable in PID_VARIABLES.items():
+        value = env.get(variable, "")
+        if not (value.isascii() and value.isdigit() and len(value) <= _MAX_PID_DIGITS):
+            continue
+        process = table.get(int(value))
+        if (
+            process is not None
+            and process.pid != caller.pid
+            and agent_name(process, agents) == agent
+            and all(
+                started_no_later(process.started, each.started)
+                for each in caller_branch(table, caller, process)
+            )
+        ):
+            return process.pid, agent
     return None, None
+
+
+def caller_branch(
+    table: Mapping[int, Process], caller: Process, agent: Process
+) -> list[Process]:
+    """Return the caller and its ancestors below the nearest ancestor that it shares with the
+    process that its environment names as the agent process.
+
+    When that process is the agent that set the variable, every process of the branch descends
+    from it, so each started after it. The init process, or the nearest ancestor that adopts
+    orphans, adopted the top of the branch, and it is an ancestor of the agent too. A pid that
+    the system gave to a new process after the agent ended started after the top of the branch,
+    unless the whole branch started after the agent ended.
+    """
+    shared = set(fencing.ancestors(table, agent.pid))
+    found = [caller]
+    for pid in fencing.ancestors(table, caller.pid):
+        process = table.get(pid)
+        if pid in shared or process is None:
+            break
+        found.append(process)
+    return found
+
+
+def agent_name(process: Process, agents: Sequence[str]) -> str | None:
+    """Return the name of the program of a process when it is a known agent."""
+    # macOS shows the full path of the executable, which for an agent that an app ships is a
+    # path inside the app. The name is compared case-sensitively: the Claude app itself is
+    # "Claude", and it is not the agent.
+    name = os.path.basename(process.program)
+    return name if name in agents else None
 
 
 def purpose_text(text: str) -> str | None:

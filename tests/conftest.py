@@ -6,7 +6,9 @@ from helpers import FakeSystem
 
 from banksman import cli
 from banksman.config import CONFIG_ENV
+from banksman.identity import PID_VARIABLES
 from banksman.inventory import INVENTORY_ENV
+from banksman.lease import LEASE_VARIABLE
 from banksman.store import ENDED_ENV, LOG_ENV, QUARANTINE_DIR_ENV, STATE_DIR_ENV, Store
 
 
@@ -57,6 +59,14 @@ def inventory_path(tmp_path, monkeypatch):
     path = tmp_path / "inventory.toml"
     monkeypatch.setenv(INVENTORY_ENV, str(path))
     return path
+
+
+@pytest.fixture(autouse=True)
+def no_agent_pid(monkeypatch):
+    # The agent that runs the tests, and a banksman run around them, must not change the owner
+    # process of a test.
+    for variable in (*PID_VARIABLES.values(), LEASE_VARIABLE):
+        monkeypatch.delenv(variable, raising=False)
 
 
 @pytest.fixture

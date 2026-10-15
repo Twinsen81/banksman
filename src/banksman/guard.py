@@ -44,7 +44,7 @@ from banksman.history import (
     History,
 )
 from banksman.identity import find_agent, find_holder
-from banksman.lease import HELD, RESOURCE_NAME, Holder, Lease
+from banksman.lease import HELD, LEASE_VARIABLE, RESOURCE_NAME, Holder, Lease
 from banksman.sanitize import clean
 from banksman.store import (
     Snapshot,
@@ -60,7 +60,6 @@ from banksman.system import Machine, Process, System
 
 # The status of `check` for a lost lease: the caller must not use the device.
 EXIT_REFUSED = 3
-LEASE_VARIABLE = "BANKSMAN_LEASE"
 USAGE = "usage: banksman guard adb [--fallback-adb PATH] -- [ADB ARGUMENT ...]"
 # The adb that the wrapper saved, for a configuration that names no SDK or cannot be read.
 FALLBACK_OPTION = "--fallback-adb"
@@ -327,8 +326,9 @@ class Caller:
         return next((lease.holding for lease in self.leases if lease.lease_id == lease_id), None)
 
     def is_agent(self) -> bool:
-        """Whether a known agent process is among the processes above the caller."""
-        return find_agent(self._table, self.rules.agents, self.pid)[0] is not None
+        """Whether the caller has an agent process: one above it, or one that its environment
+        names."""
+        return self._agent is not None
 
     def holder(self) -> Holder:
         """Return the caller as acquire would record it: the worktree, the agent, and the issue."""
@@ -336,7 +336,10 @@ class Caller:
 
     def descends_from(self, pid: int | None, started: str | None) -> bool:
         process = None if pid is None else self._table.get(pid)
-        return process is not None and process.started == started and pid in self._above
+        if process is None or process.started != started:
+            return False
+        # A command that has left the process tree of its agent still acts for that agent.
+        return pid in self._above or pid == self._agent
 
     @cached_property
     def holdings(self) -> set[str]:
@@ -357,6 +360,10 @@ class Caller:
     @cached_property
     def _above(self) -> set[int]:
         return set(ancestors(self._table, self.pid))
+
+    @cached_property
+    def _agent(self) -> int | None:
+        return find_agent(self._table, self.rules.agents, self.pid, self.env)[0]
 
 
 def decide(
@@ -390,7 +397,7 @@ def decide(
     token = caller.token_holding()
     if not unreadable and all(lease.state in HELD and lease.holding == token for lease in leases):
         return Decision(used=tuple(leases))
-    # A call that no agent process is above is a person's: it may use any device, and it is no
+    # A call without an agent process is a person's: it may use any device, and it is no
     # use by the holder.
     if not caller.is_agent():
         return RUNS

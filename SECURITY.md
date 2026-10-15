@@ -188,8 +188,12 @@ protection either: any process of the user can name the agent process with `--ow
 section 12), an `adb` wrapper on the `PATH` refuses an agent's device command on the device of
 another holder. It stops a careless agent or script, not a determined one: a call through the
 full path of adb, a tool that talks to the adb server itself, a second connection to an
-emulator, and a process that no agent process is above all pass, and the lease id that lets a
-call pass is the same token as for the scripts. The wrapper runs only a `banksman` in an
+emulator, and a process that has no agent process all pass, and the lease id that lets a
+call pass is the same token as for the scripts. A process can name an agent process in the pid
+variable of the agent, such as `CLAUDE_PID`, as it can with `--owner-pid`: banksman checks only
+that the process runs, is that agent, and started before the processes that got the variable
+from it. The wrapper runs
+only a `banksman` in an
 absolute directory of the `PATH`, so a file in a project cannot stand in for it, and the wrapper
 runs the adb of the SDK of the configuration, or the adb that it saved, never one from the
 `PATH`. A refusal names the
