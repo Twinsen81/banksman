@@ -750,6 +750,27 @@ class Store:
                 raise NotHeld(f"the holding of the lease {lease_id} has no held lease")
             return self._touch_holding(leases[0], owner_pid, expect)
 
+    def touch_seen(self, seen: Sequence[Lease]) -> list[Lease]:
+        """Touch the holdings of leases that the adb guard read without the lock, as `touch`
+        does, but record no owner process. Return the leases that it touched.
+
+        A lease that is no longer held, that is void, or that another process changed since the
+        guard read it, for example with a touch, is left as it is. The lock comes without the
+        clean-up of a change, as for an event of the log, because the guard runs before an adb
+        call.
+        """
+        with self._lock(clean=False):
+            touched: dict[str, Lease] = {}
+            for lease in seen:
+                if lease.resource in touched:
+                    continue
+                held = self._held_leases(self._scan(), lease.holding)
+                if held.get(lease.resource) != lease:
+                    continue
+                for each in held.values():
+                    touched[each.resource] = self._write(self._touched(each, None))
+            return list(touched.values())
+
     def enter(self, resource: str, lease_id: str, pid: int, pgid: int | None = None) -> Lease:
         """Check the lease, touch it, and register a script as a user of the resource."""
         return self.enter_leases([(resource, lease_id)], pid, pgid)[0]
@@ -1551,7 +1572,7 @@ class Store:
         return ends
 
     @contextmanager
-    def _lock(self) -> Iterator[None]:
+    def _lock(self, *, clean: bool = True) -> Iterator[None]:
         # flock belongs to an open file, so a second lock in this process would wait for
         # the first one.
         if self._locked:
@@ -1560,8 +1581,9 @@ class Store:
         fd = _take_lock(self.directory / _LOCK_FILE, self._lock_wait)
         self._locked = True
         try:
-            _remove_temp_files(self.directory)
-            self._restore_quarantines()
+            if clean:
+                _remove_temp_files(self.directory)
+                self._restore_quarantines()
             yield
         finally:
             self._locked = False

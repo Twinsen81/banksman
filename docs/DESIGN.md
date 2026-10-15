@@ -125,7 +125,8 @@ leases instead.
   grace period is its idle timeout. A run that is really gone frees its resource within
   minutes.
 - **Renewal needs no agent cooperation.** A project's device scripts touch the lease on
-  every call. A long-running script keeps a touch loop alive for its own lifetime.
+  every call. A long-running script keeps a touch loop alive for its own lifetime. With the
+  adb guard, an adb call of the holder on its own device touches the lease too (section 12).
 - **Reboots.** Lease state must not outlive a reboot, because the emulators it describes do
   not. A lease records the machine's boot session id, and a lease from an earlier boot is
   void, also a quarantined one: no process of an earlier boot still runs, so its registered
@@ -1117,7 +1118,9 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   use devices without banksman, one line for each worktree, agent, and device, however many
   adb calls they make. A release and a void record how long the lease was held and the longest
   time between two touches, both in awake time. They are the data for tuning the hard cap and
-  the idle timeout. A quarantine records its problem, or the scripts that still ran at the
+  the idle timeout. Behind the adb guard, a device call of the holder is a touch too
+  (section 12), so for such a holder the longest time between two touches is the longest time
+  without a banksman call and without a device call. A quarantine records its problem, or the scripts that still ran at the
   drain deadline and whether stopping was on for the kind, so that an operator can see what
   the reaper would have stopped before turning `stop = true` on (section 4). The end of a free
   emulator after its free timeout is a reap with the reason `free_timeout` and the holder
@@ -1329,6 +1332,31 @@ is a setup of the operator, and a project needs nothing for it.
   without the guide of section 15 learns how to get a device. The purpose in it is untrusted
   text, as in `status`. When the lease belongs to the caller's holding but is no longer held,
   for example because it drains, the guard says that the lease is lost.
+- **Touches.** The idle timeout ends a lease that nothing touched (section 3). An agent that
+  uses its device with direct adb calls, for example to verify a change on the device, makes
+  many device calls and no banksman call. So a device command that the guard lets run because
+  a held lease of the caller's holding has the device, through `BANKSMAN_LEASE` or through the
+  owner process above the caller, touches that lease and the other held leases of its holding,
+  as `touch` does (section 7). The idle timeout then counts the time without a banksman call
+  and without a device call of the holder. The guard touches the holding when the last touch
+  of one of its held leases is more than a minute old, or more than a quarter of the idle
+  timeout of that lease when that is shorter. So a lease of the holding with an idle timeout of
+  a minute or less is kept too, also when it is not the lease of the device, for example the
+  lease of a port. The time of the last touch comes from the lease files that the guard read
+  without the lock, so a call within that time takes no lock. A touch that is due takes the lock as an event of the log does: it waits for
+  half a second at most, and does not clean up or restore the quarantines. Under the lock, the
+  guard reads the lease again, and touches the holding only while the lease is held with the
+  same id, is not void, and no other process changed it since the guard read it. So a touch
+  never makes a void lease valid again. The touch records no owner process, so a call from a
+  script never moves a lease to another owner (section 9). A touch that cannot be done, because
+  the lock is held or a file cannot be written, changes nothing for the call, and the guard
+  says nothing about it, because a script can read standard error with the output of adb. A
+  call that the guard refuses, that warn mode lets run, that passes because no agent process
+  is above the caller, or that acts on every device touches nothing: a person's call is not
+  use by the holder, and a call on a device of another holder is not use of the caller's
+  device. The log records nothing for a touch, as for every other touch (section 10). A tool
+  that talks to the adb server itself, such as the connected tests of the Android Gradle
+  plugin, does not pass through the guard, and `banksman run` touches the lease for it.
 - **Starts.** The start of an emulator records its serial before the boot. The serial of a
   remote device, `localhost:<port>`, is a serial like any other, and the start records it in
   the lease before the lease is ready. So the guard protects an instance that banksman starts
@@ -1387,8 +1415,9 @@ is a setup of the operator, and a project needs nothing for it.
   It reads the process list only when the lease id in `BANKSMAN_LEASE` does not decide, and it
   asks `adb devices` only when the command line does not name the device by a serial that a
   lease has. It takes the lock of the lease store only to add an event to the log, that is, for
-  a call that it refuses or warns about, and waits for it for half a second at most; it does
-  not then clean up or restore the quarantines, as a change of a lease does. In strict mode and
+  a call that it refuses or warns about, and for a touch that is due, about once a minute
+  for each holding that uses its device. It waits for the lock for half a second at most, and
+  does not then clean up or restore the quarantines, as the other commands do. In strict mode and
   warn mode, a device command on a device without a lease also reads the process list. On the
   Mac where it was measured, the wrapper and the guard together add about 35 ms to a call that
   needs no process list, and about 70 ms to one that needs it.
