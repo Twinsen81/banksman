@@ -502,7 +502,8 @@ When several resources match, banksman chooses in a fixed order:
    instance never counts as the caller's, because a person can use it.
 5. An instance that runs before one that does not run, which saves the time and the memory
    of a start. Of the instances that run, one that banksman knows comes before an unmanaged
-   one, which a request gets only with `unmanaged = "grant"`.
+   one, which a request gets only with `unmanaged = "grant"`. An unmanaged emulator that the
+   agent process of the caller started counts as one that banksman knows.
 6. The resource name.
 
 `acquire` without `--lease` or `--holding` never grants a held resource, also not to the same
@@ -600,6 +601,19 @@ holdings apart (section 9).
   or by a take-back, banksman records the instance that runs then, so an emulator that the
   holder started under its lease is not unmanaged when it is free. banksman knows an emulator
   by its pid and start time, and a remote device by the id of its reservation (section 8).
+- **An emulator that an agent started outside banksman.** A project whose scripts still start
+  the emulator before they ask for a lease leaves an emulator that is unmanaged. Its agent's
+  `acquire --start` would then start a second AVD, and the first emulator would run until the
+  machine restarts, because banksman ends only what it started. So for a request whose agent
+  process started the emulator, it is not unmanaged: the request gets it as one that banksman
+  knows. Discovery finds that agent process as for a caller (section 9): the nearest agent above
+  the emulator, otherwise the agent process that the pid variable in the environment of the
+  emulator names, which the emulator keeps also after the init process adopts it. The caller's
+  agent process counts, not its owner process, so `run --where` of that agent gets it too. For
+  every other request, it stays unmanaged. The grant prints `STARTED=false` and
+  `PREVIOUS=other`, and the end of the lease records the emulator as for any emulator that ran
+  under a lease, so from then on every request can get it. banksman still ends no emulator that
+  it did not start, also when the agent that started it has ended (section 17).
 - **The agent can choose.** `acquire` grants one resource for each part of the request and
   names it. It does not return a list, because two callers that choose from the same list
   choose the same resource. An agent that needs a specific resource asks for it, for example
@@ -800,7 +814,12 @@ holdings apart (section 9).
   that adb scans. banksman reads each argument as the process got it, from `/proc` on Linux
   and from the kernel on macOS, so a shell whose script starts an emulator is not an emulator.
   An AVD that runs as several emulators, for example with `-read-only`, has no serial, because
-  banksman cannot tell which of them a lease has; a held lease keeps its own.
+  banksman cannot tell which of them a lease has; a held lease keeps its own. For the only
+  emulator of an AVD that runs and that banksman does not know, the preset also reads the
+  environment, from `/proc` on Linux and with the same call as the arguments on macOS, to find
+  the agent process that started it (section 6). It reads no environment of an emulator that
+  banksman knows, and an environment that it cannot read, as of a process of another user or
+  inside a sandbox, names no agent. banksman uses only the pid variable of each agent from it.
   `preset = "android-device"` finds the physical devices that adb lists, with the facts
   `serial`, `manufacturer`, `model`, `codename`, `api`, `abi`, `form`, and `running`, which
   is always true, and their accounts. The facts are what the device gives: a Samsung phone
@@ -1024,6 +1043,10 @@ sets one, and Codex does not.
   can set the variable itself, as it can pass `--owner-pid`.
 - A long-lived process, such as a daemon that a command of an agent started, keeps the variable
   of that agent, so its commands act for that agent while that agent runs.
+- The same rule finds the agent process that started an emulator outside banksman, with the
+  environment of the emulator in place of the caller's (section 6). When the variable names a
+  known agent whose process no longer runs, or a process that started after the emulator and
+  so got the pid after the agent ended, `status` shows that this agent has ended.
 
 If no agent process is found, the owner is the worktree, and only the touch-based expiry
 applies, unless the caller passes `--owner-pid`.
@@ -1110,7 +1133,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   included, and every resource that has a lease file: resource, kind, serial, form and API level,
   state, since, last use, the three "free by" values, the accounts of the lease, and the
   holder. The state is `free`, `unmanaged` for an instance without a lease that runs but that
-  banksman did not start (section 6), `booting`, `ready`, `draining`, `quarantined`, `absent` for an
+  banksman did not start (section 6), with the agent process that started it in the holder
+  column when banksman finds one, `booting`, `ready`, `draining`, `quarantined`, `absent` for an
   allowed instance that discovery does not find now, or `unreadable` for a lease file that
   cannot be read. An instance that discovery finds but that the inventory does not allow is
   never shown, also not to agents, because it can be personal. `status` runs discovery, so
@@ -1762,6 +1786,8 @@ Done:
 - One command on several devices: `run --holding` runs under every lease of the holding, or
   under those that `--resource` names, with `{serials}`, `{resources}`, `BANKSMAN_SERIALS`, and
   `BANKSMAN_RESOURCES`, and stops when any of the leases is lost.
+- An emulator that an agent started outside banksman goes to that agent, as one that banksman
+  knows, and `status` shows the agent of an unmanaged emulator.
 
 Next:
 
@@ -1770,6 +1796,10 @@ Next:
 
 ## 17. Open questions
 
+- How many emulators that an agent started outside banksman stay without a lease after the
+  agent has ended? banksman does not end them, and `status` shows them as unmanaged, started
+  by an agent that has ended. If there are many, a key of the kind, off by default, could let
+  the reaper end them under a lease of its own, as for the free timeout.
 - Does each agent run its shell commands in their own process group? That decides how a
   script isolates the group that the reaper signals. Checked for Claude Code and Codex, both
   as command-line tools and in their Mac apps: each shell command has its own process

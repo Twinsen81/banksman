@@ -257,3 +257,39 @@ def test_the_arguments_of_procargs2():
     assert system._procargs(data) == ("zsh", "-c", "echo -avd x")
     # A value that has fewer arguments than it says is not trusted.
     assert system._procargs((9).to_bytes(4, sys.byteorder) + b"/bin/zsh\0zsh\0") == ()
+
+
+def test_the_environment_of_a_process_of_the_same_user():
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        env={**os.environ, "BANKSMAN_TEST_VALUE": "two words", "BANKSMAN_TEST_EMPTY": ""},
+    )
+    try:
+        environment = Machine().environment(child.pid)
+        assert environment is not None
+        assert environment["BANKSMAN_TEST_VALUE"] == "two words"
+        assert environment["BANKSMAN_TEST_EMPTY"] == ""
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_the_environment_of_an_ended_process_cannot_be_read():
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    assert Machine().environment(child.pid) is None
+
+
+def test_the_environment_of_procargs2():
+    count = (3).to_bytes(4, sys.byteorder)
+    data = (
+        count
+        + b"/bin/zsh\0\0\0\0zsh\0-c\0\0HOME=/home/me\0CLAUDE_PID=300\0CLAUDE_PID=400\0no-equals\0"
+        # The strings of the system for the loader come after an empty one.
+        + b"\0\0executable_path=/bin/zsh\0ptr_munge=\0"
+    )
+    assert system._procargs(data) == ("zsh", "-c", "")
+    assert system._procenv(data) == {"HOME": "/home/me", "CLAUDE_PID": "300"}
+    # A platform binary gets no environment here.
+    assert system._procenv(count + b"/bin/zsh\0\0zsh\0-c\0x\0") == {}
+    assert system._procenv((9).to_bytes(4, sys.byteorder) + b"/bin/zsh\0zsh\0A=1\0") == {}

@@ -29,6 +29,7 @@ from banksman.history import (
     WARNED,
     Event,
 )
+from banksman.identity import StartedBy
 from banksman.lease import (
     DRAINING,
     FREE_TIMEOUT,
@@ -72,6 +73,8 @@ class Resource:
     handle: str | None = None
     # When that reservation ends, in wall-clock time, when discovery knows it.
     ends: float | None = None
+    # For an unmanaged instance, the agent process that started it, when banksman finds one.
+    started_by: StartedBy | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +146,7 @@ def resources(snapshot: Snapshot, found: Search, paid: Collection[str] = ()) -> 
                 paid=candidate.paid,
                 handle=handle_of(candidate.facts),
                 ends=_ends(candidate.facts),
+                started_by=candidate.started_by if candidate.unmanaged else None,
             )
     for name, kind in absent.items():
         if name not in shown:
@@ -211,6 +215,13 @@ def _resource_json(
         else {"at": utc(item.ends), "in": round(item.ends - clock.wall)},
         "facts": dict(item.facts),
         "lease": None if item.lease is None else lease_json(item.lease, clock, running, verbose),
+        "started_by": None
+        if item.started_by is None
+        else {
+            "agent": item.started_by.agent,
+            "pid": item.started_by.pid,
+            "running": item.started_by.running,
+        },
     }
     if item.error is not None:
         shown["error"] = item.error
@@ -308,7 +319,11 @@ def status_rows(
         if item.paid:
             kind = f"{kind} (paid)"
         if lease is None:
-            holder = NONE if item.error is None else f"lease file: {item.error}"
+            holder = NONE
+            if item.error is not None:
+                holder = f"lease file: {item.error}"
+            elif item.started_by is not None:
+                holder = started_text(item.started_by)
             rows.append([item.name, kind, serial, *facts, item.state, *[NONE] * 6, holder])
             continue
         ends = free_by(lease, running)
@@ -334,6 +349,12 @@ def status_rows(
             ]
         )
     return rows
+
+
+def started_text(started: StartedBy) -> str:
+    """Return, for example, "started by claude (pid 4242)" for an unmanaged instance."""
+    text = f"started by {started.agent} (pid {started.pid})"
+    return text if started.running else f"{text}, which has ended"
 
 
 def holder_label(lease: Lease | Event) -> str:

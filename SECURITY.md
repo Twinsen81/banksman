@@ -55,6 +55,18 @@ ends an emulator in the same way, as a take-back with the `on_void` hook of the 
 the emulator of the lease that the command names by its lease id or its label, and only when
 banksman started it.
 
+**The environment of an unmanaged emulator.** To give an emulator that an agent started
+outside banksman to that agent, discovery reads the environment of the only emulator of an
+AVD that runs and that banksman does not know, from `/proc` on Linux and from the kernel on
+macOS. The environment can hold secrets of the person or the program that started the
+emulator, so banksman uses only the pid variable of each agent from it, stores nothing of it,
+and shows nothing of it except the pid of the agent in `status`. It reads no environment of
+an emulator that banksman knows, and the kernel gives no environment of a process of another
+user. A process of the user can set the pid variable of a running agent in an emulator that it
+starts, and so give that emulator to that agent; that is no more than the process could do if
+it gave the agent the serial of the emulator, and banksman still ends no emulator that it did
+not start.
+
 **Configuration runs as code.** A kind's hooks are commands that banksman runs as the
 user. So banksman refuses a configuration file that a user other than the user and root
 owns, or that group or others can write to. The reaper runs at the start of most commands,

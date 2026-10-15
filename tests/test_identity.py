@@ -10,7 +10,16 @@ from helpers import SRC, FakeSystem
 
 from banksman.config import HolderRules
 from banksman.errors import BanksmanError
-from banksman.identity import branch, find_agent, find_holder, issue_of, purpose_text, worktree
+from banksman.identity import (
+    StartedBy,
+    branch,
+    find_agent,
+    find_holder,
+    issue_of,
+    purpose_text,
+    started_by,
+    worktree,
+)
 from banksman.lease import MAX_PURPOSE_LENGTH
 
 # An agent that an app ships: macOS shows the full path, which can contain spaces.
@@ -170,6 +179,78 @@ def test_the_nearest_agent_above_the_caller_wins_over_the_variable():
         (500, "/bin/sh"), (400, "codex"), (300, "/usr/local/bin/claude"), (200, "/bin/zsh")
     )
     assert find_agent(table, ("claude", "codex"), 500, {"CLAUDE_PID": "300"}) == (400, "codex")
+
+
+def emulator_outside(agent_program=CLAUDE_IN_AN_APP, agent_started="1000", agent=True):
+    """Return a process table with an emulator that the init process adopted, and its process:
+    an agent started it in the background, and the shell between them has ended."""
+    system = FakeSystem()
+    system.spawn(100, program="/Applications/Agent.app/Contents/MacOS/agent-app")
+    if agent:
+        system.spawn(300, parent=100, program=agent_program)
+    system.spawn(600, program="/sdk/emulator/qemu/darwin-aarch64/qemu-system-aarch64")
+    starts = {100: "10", 300: agent_started, 600: "2000"}
+    system.processes.update({pid: starts[pid] for pid in system.processes})
+    table = system.process_table()
+    return table, table[600]
+
+
+def test_the_agent_that_started_an_emulator_outside_its_tree_is_found_by_the_variable():
+    table, emulator = emulator_outside()
+    assert started_by(table, ("claude",), emulator, {}) is None
+    assert started_by(table, ("claude",), emulator, {"CLAUDE_PID": "300"}) == StartedBy(
+        "claude", 300
+    )
+
+
+def test_the_agent_above_an_emulator_started_it():
+    table = processes(
+        (600, "/sdk/emulator/emulator"), (400, "/bin/zsh"), (300, "/usr/local/bin/claude")
+    )
+    assert started_by(table, ("claude",), table[600], {}) == StartedBy("claude", 300)
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        emulator_outside(agent=False)[0],
+        # The system gave the pid to a process that started after the emulator.
+        emulator_outside(agent_started="2001")[0],
+        emulator_outside(agent_program="/bin/zsh", agent_started="2500")[0],
+    ],
+)
+def test_an_agent_that_has_ended_since_it_started_the_emulator_is_shown_as_ended(table):
+    emulator = table[600]
+    assert started_by(table, ("claude",), emulator, {"CLAUDE_PID": "300"}) == StartedBy(
+        "claude", 300, running=False
+    )
+
+
+@pytest.mark.parametrize(
+    ("table", "agents", "value"),
+    [
+        # A process that started before the emulator, but that is not the agent: the value is
+        # not from that agent.
+        (emulator_outside(agent_program="/bin/zsh")[0], ("claude",), "300"),
+        (emulator_outside()[0], ("codex",), "300"),
+        (emulator_outside(agent=False)[0], (), "300"),
+        (emulator_outside()[0], ("claude",), "1"),
+        (emulator_outside()[0], ("claude",), "0"),
+        (emulator_outside()[0], ("claude",), "-300"),
+        (emulator_outside()[0], ("claude",), "600"),
+    ],
+)
+def test_the_variable_names_no_agent_of_an_emulator_when_it_does_not_qualify(table, agents, value):
+    assert started_by(table, agents, table[600], {"CLAUDE_PID": value}) is None
+
+
+def test_a_process_that_started_in_the_same_second_as_the_emulator_is_not_a_later_one():
+    # ps gives whole seconds, so it may have started before the emulator.
+    second = "Thu Oct 15 10:09:25 2026"
+    table, emulator = emulator_outside(agent_program="/bin/zsh", agent_started=second)
+    emulator = replace(emulator, started=second)
+    table = {**table, 600: emulator}
+    assert started_by(table, ("claude",), emulator, {"CLAUDE_PID": "300"}) is None
 
 
 def test_the_owner_is_the_toplevel_of_the_repository(tmp_path):

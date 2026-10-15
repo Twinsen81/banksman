@@ -29,6 +29,7 @@ from banksman.discovery import (
 )
 from banksman.discovery import discover as discover_now
 from banksman.errors import BanksmanError
+from banksman.identity import StartedBy
 from banksman.inventory import Inventory
 from banksman.lease import SerialSeen
 
@@ -81,11 +82,24 @@ class Candidate:
     paid: bool = False
     # It runs, but banksman did not start it (see Instance).
     unmanaged: bool = False
+    # For an unmanaged instance, the agent process that started it, when banksman finds one.
+    started_by: StartedBy | None = None
 
     @property
     def cold(self) -> bool:
         """Whether the instance does not run now, so that its holder must start it."""
         return self.facts.get(RUNNING) is False
+
+    def unmanaged_for(self, agent_pid: int | None) -> bool:
+        """Whether the instance is unmanaged for a caller whose agent process is `agent_pid`.
+
+        An emulator that an agent started outside banksman, for example in a script that starts
+        it before it asks for a lease, is not unmanaged for that agent: nobody else uses it, and
+        without it the agent would start a second AVD.
+        """
+        started = self.started_by
+        own = started is not None and started.running and started.pid == agent_pid
+        return self.unmanaged and not own
 
 
 @dataclass(frozen=True)
@@ -138,12 +152,15 @@ def search(
     discover: Discover = discover_now,
     clock: Callable[[], float] = time.monotonic,
     preferred: Collection[str] = frozenset(),
+    agent_pid: int | None = None,
 ) -> Search:
     """Find, for each part, the permitted resources that are present now and match every clause
     of the part.
 
     `preferred` are the resources that the worktree of the caller used last. Each comes first
-    among the resources of its rank, for a kind with affinity.
+    among the resources of its rank, for a kind with affinity. `agent_pid` is the agent process
+    of the caller: an unmanaged instance that it started comes in the order of one that banksman
+    knows (see `Candidate.unmanaged_for`).
 
     Discovery runs once for each kind that the `kind` clauses of a part allow. An attribute that
     is neither known nor a fact that discovery found now for the kinds of its part is an error,
@@ -209,6 +226,7 @@ def search(
                     accounts,
                     kind.paid,
                     instance.unmanaged,
+                    instance.started_by,
                 )
             )
         present = {instance.name for instance in found.instances}
@@ -244,10 +262,10 @@ def search(
                 not (
                     candidate.resource in preferred
                     and config.kinds[candidate.kind].affinity
-                    and not candidate.unmanaged
+                    and not candidate.unmanaged_for(agent_pid)
                 ),
                 candidate.cold,
-                candidate.unmanaged,
+                candidate.unmanaged_for(agent_pid),
                 candidate.resource,
             )
         )

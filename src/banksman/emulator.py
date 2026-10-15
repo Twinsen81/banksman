@@ -8,8 +8,9 @@ is booting until the Android system has completed its boot.
 banksman records each emulator that it starts, and each emulator that runs when a lease of its
 AVD ends, by its pid and start time. Every other emulator of an allowed AVD is unmanaged: a
 person or a program outside banksman started it, and a request does not get it unless its kind
-says so. The reaper ends only an emulator that banksman started: when a lease of it becomes void,
-or, with the free timeout of its kind, when no lease of its AVD has existed for that time.
+says so, or unless the request comes from the agent process that started it. The reaper ends
+only an emulator that banksman started: when a lease of it becomes void, or, with the free
+timeout of its kind, when no lease of its AVD has existed for that time.
 """
 
 from __future__ import annotations
@@ -28,9 +29,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from banksman import android, hooks, records
+from banksman import android, hooks, identity, records
 from banksman.config import Android, Kind
 from banksman.errors import BanksmanError
+from banksman.identity import StartedBy
 from banksman.lease import RESOURCE_NAME
 from banksman.sanitize import clean
 from banksman.store import STATE_DIR_ENV, lasting_dir
@@ -153,9 +155,15 @@ def port_free(port: int) -> bool:
 
 
 def discover(
-    kind: Kind, settings: Android, *, accounts: bool = True, system: System | None = None
-) -> tuple[Document, set[str]]:
-    """Find the AVDs, as the preset does, and which of those that run are unmanaged.
+    kind: Kind,
+    settings: Android,
+    *,
+    agents: Sequence[str] = (),
+    accounts: bool = True,
+    system: System | None = None,
+) -> tuple[Document, dict[str, StartedBy | None]]:
+    """Find the AVDs, as the preset does, and which of those that run are unmanaged, each with
+    the agent process that started it when its environment or its parents show one.
 
     An AVD also runs when a process has its emulator command line: adb does not list an
     emulator in the first seconds of its start, or on a console port outside its range.
@@ -163,12 +171,13 @@ def discover(
     system = Machine() if system is None else system
     document = android.emulators(settings, accounts=accounts)
     notes = document.setdefault("notes", [])
-    processes: dict[str, list[Process]] | None
+    table: dict[int, Process] | None
     try:
-        processes = by_avd(system.commands())
+        table = system.commands()
     except BanksmanError as exc:
         notes.append(f"cannot read the command lines of the processes: {exc}")
-        processes = None
+        table = None
+    processes = None if table is None else by_avd(table)
     for instance in document["instances"]:
         running = (processes or {}).get(instance["name"], [])
         if running:
@@ -187,13 +196,35 @@ def discover(
         # to a request that it could take from somebody.
         notes.append(str(exc))
         known = {}
-    unmanaged = {
+    unmanaged = [
         instance["name"]
         for instance in document["instances"]
         if instance["facts"].get("running") is True
         and not _only_known(instance["name"], processes, known)
+    ]
+    return document, {
+        name: _started_by(table, (processes or {}).get(name, []), agents, system)
+        for name in unmanaged
     }
-    return document, unmanaged
+
+
+def _started_by(
+    table: Mapping[int, Process] | None,
+    running: Sequence[Process],
+    agents: Sequence[str],
+    system: System,
+) -> StartedBy | None:
+    """Return the agent process that started the only emulator of an AVD.
+
+    Only for an emulator that banksman does not know, so that a discovery reads no environment
+    of the emulators that it manages.
+    """
+    # With several emulators of the AVD, the one at the serial that adb gives can be any of them.
+    if table is None or len(running) != 1 or not agents:
+        return None
+    (process,) = running
+    env = system.environment(process.pid)
+    return identity.started_by(table, agents, process, env or {})
 
 
 def _only_known(

@@ -5,8 +5,9 @@ import pytest
 from banksman.config import ANDROID_DEVICE, ANDROID_EMULATOR, Config, Kind
 from banksman.discovery import discover, parse
 from banksman.errors import BanksmanError
+from banksman.identity import StartedBy
 from banksman.inventory import Decisions, Inventory
-from banksman.request import Clause, Part, matches, parse_clause, search
+from banksman.request import Candidate, Clause, Part, matches, parse_clause, search
 
 EMULATORS = [
     {"name": "qa_tablet", "facts": {"form": "tablet", "api": 33, "running": False}},
@@ -301,3 +302,23 @@ def test_each_part_is_checked_against_the_facts_of_its_own_kinds():
     ]
     with pytest.raises(BanksmanError, match="unknown attribute colour"):
         search(CONFIG, INVENTORY, parts, discover=discovery)
+
+
+@pytest.mark.parametrize(
+    ("started_by", "agent_pid", "unmanaged"),
+    [
+        (StartedBy("claude", 300), 300, False),
+        (StartedBy("claude", 300), 400, True),
+        (StartedBy("claude", 300), None, True),
+        # The agent process has ended, so the pid can name another process now.
+        (StartedBy("claude", 300, running=False), 300, True),
+        (None, 300, True),
+        (None, None, True),
+    ],
+)
+def test_an_unmanaged_instance_is_not_unmanaged_for_the_agent_that_started_it(
+    started_by, agent_pid, unmanaged
+):
+    candidate = Candidate("qa_phone", "emulator", 0, unmanaged=True, started_by=started_by)
+    assert candidate.unmanaged_for(agent_pid) is unmanaged
+    assert Candidate("qa_phone", "emulator", 0).unmanaged_for(agent_pid) is False
