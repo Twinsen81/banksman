@@ -1151,9 +1151,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     f" --holding {args.holding}"
                 )
             named = [(lease.resource, lease.lease_id) for lease in held]
-        leases = _with_serials_now(store, config, named)
-        command = _command_line(command, leases, config.kinds)
-        outcome = run_command(store, leases, command, _command_env(leases, config.kinds), _warn)
+        leases, unknown = _with_serials_now(store, config, named)
+        command = _command_line(command, leases, unknown)
+        env = _command_env(leases, config.kinds, unknown)
+        outcome = run_command(store, leases, command, env, _warn)
         return _run_status(outcome, command)
     if args.resource is not None:
         raise BanksmanError(
@@ -1173,11 +1174,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         start=args.start,
     )
     (lease,) = grant.leases
+    kind = grant.config.kinds.get(lease.kind)
+    unknown = [lease.resource] if lease.serial is None and _has_serial(lease, kind, ()) else []
     try:
-        command = _command_line(command, [lease], grant.config.kinds)
-        outcome = run_command(
-            grant.store, [lease], command, _command_env([lease], grant.config.kinds), _warn
-        )
+        command = _command_line(command, [lease], unknown)
+        env = _command_env([lease], grant.config.kinds, unknown)
+        outcome = run_command(grant.store, [lease], command, env, _warn)
     finally:
         _give_back_after_run(lease)
     return _run_status(outcome, command)
@@ -1185,9 +1187,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 def _with_serials_now(
     store: Store, config: Config, named: Sequence[tuple[str, str]]
-) -> list[Lease]:
+) -> tuple[list[Lease], list[str]]:
     """Check the leases, given by resource and lease id, and return them with the serials that
-    discovery confirms now."""
+    discovery confirms now, and the resources whose instance has a serial that it does not
+    confirm."""
     # A lease that is lost runs no discovery.
     leases = store.check_leases(named)
     kinds = [config.kinds.get(lease.kind) for lease in leases]
@@ -1214,11 +1217,25 @@ def _with_serials_now(
     # The command acts on the serials, so it gets only those that discovery confirms now: a
     # discovery that fails cannot tell whether another instance has the serial by now.
     confirmed = _found(each for each in seen if each.serial is not None)
-    return [each if each.resource in confirmed else replace(each, serial=None) for each in leases]
+    reported = _found(seen)
+    unknown = [
+        lease.resource
+        for lease, kind in zip(leases, kinds)
+        if lease.resource not in confirmed and _has_serial(lease, kind, reported)
+    ]
+    leases = [each if each.resource in confirmed else replace(each, serial=None) for each in leases]
+    return leases, unknown
 
 
 def _found(seen: Iterable[SerialSeen]) -> set[str]:
     return {each.resource for each in seen}
+
+
+def _has_serial(lease: Lease, kind: Kind | None, reported: Collection[str]) -> bool:
+    """Whether the instance of a lease has a serial while it runs: a device of an Android preset,
+    or an instance whose serial its discovery reports, also as not running. A discover hook can
+    also list resources without a serial, such as accounts."""
+    return hooks.is_android(kind) or lease.serial is not None or lease.resource in reported
 
 
 # The arguments of a command that run replaces. The shell of the caller cannot expand a variable
@@ -1231,16 +1248,15 @@ RESOURCES_PLACEHOLDER = "{resources}"
 
 
 def _command_line(
-    command: Sequence[str], leases: Sequence[Lease], kinds: Mapping[str, Kind]
+    command: Sequence[str], leases: Sequence[Lease], unknown: Sequence[str]
 ) -> list[str]:
-    """Replace each argument that is a placeholder, as a whole, with its value."""
+    """Replace each argument that is a placeholder, as a whole, with its value. `unknown` are
+    the resources whose serial is not known now, although their instance has one."""
     names = ", ".join(lease.resource for lease in leases)
     values = {RESOURCES_PLACEHOLDER: ",".join(lease.resource for lease in leases)}
     if SERIALS_PLACEHOLDER in command:
-        for lease in leases:
-            kind = kinds.get(lease.kind)
-            if lease.serial is None and kind is not None and kind.discovered:
-                raise BanksmanError(_unknown_serial(lease.resource, SERIALS_PLACEHOLDER))
+        if unknown:
+            raise BanksmanError(_unknown_serial(unknown[0], SERIALS_PLACEHOLDER))
         serials = _serials(leases)
         if not serials:
             raise BanksmanError(
@@ -1280,7 +1296,9 @@ def _serials(leases: Sequence[Lease]) -> str:
     return ",".join(lease.serial for lease in leases if lease.serial is not None)
 
 
-def _command_env(leases: Sequence[Lease], kinds: Mapping[str, Kind]) -> dict[str, str]:
+def _command_env(
+    leases: Sequence[Lease], kinds: Mapping[str, Kind], unknown: Sequence[str]
+) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key not in hooks.VARIABLES}
     env["BANKSMAN_RESOURCES"] = ",".join(lease.resource for lease in leases)
     if serials := _serials(leases):
@@ -1309,13 +1327,8 @@ def _command_env(leases: Sequence[Lease], kinds: Mapping[str, Kind]) -> dict[str
         # adb without -s must not choose one of several devices, which can also be the device
         # of another holder.
         env[hooks.ANDROID_SERIAL] = hooks.NO_SERIAL
-    for lease in leases:
-        kind = kinds.get(lease.kind)
-        if lease.serial is None and kind is not None and kind.discovered:
-            _warn(
-                f"the serial of {lease.resource} is not known, so BANKSMAN_SERIALS does not"
-                " list it"
-            )
+    for resource in unknown:
+        _warn(f"the serial of {resource} is not known, so BANKSMAN_SERIALS does not list it")
     return env
 
 

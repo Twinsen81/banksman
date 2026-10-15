@@ -205,18 +205,20 @@ def test_the_stub_runs_a_command_as_banksman_run_runs_it_for_a_device(with_stub)
 
 def test_the_stub_runs_a_command_of_a_holding_with_the_lists_of_the_run(with_stub):
     path, _ = with_stub
-    shown = 'printf "%s|" "$BANKSMAN_RESOURCES" "$BANKSMAN_SERIALS" "$@"'
+    shown = 'printf "%s|" "$BANKSMAN_LEASE" "$BANKSMAN_RESOURCES" "$BANKSMAN_SERIALS" "$@"'
+    environment = {key: value for key, value in os.environ.items() if key != "BANKSMAN_LEASE"}
     for shell in SHELLS:
         result = subprocess.run(
             [shell, "-c", 'banksman run --holding tests -- "$@"', "sh",
              "sh", "-c", shown, "sh", "{serials}", "{resources}"],
-            env={**os.environ, "PATH": path},
+            env={**environment, "PATH": path},
             capture_output=True,
             text=True,
             timeout=60,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stdout == "stub-0|stub-serial|stub-serial|stub-0|"
+        # A script that the command starts keeps the lease, as with banksman.
+        assert result.stdout == "stub-lease|stub-0|stub-serial|stub-serial|stub-0|"
 
 
 def test_the_stub_can_play_a_busy_machine(project_script, with_stub):

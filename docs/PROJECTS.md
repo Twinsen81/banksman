@@ -277,8 +277,9 @@ the tests of the project, and put it on `PATH` as `banksman`:
   with `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, and `BANKSMAN_LEASE`, with `stub-serial` in
   `BANKSMAN_SERIAL` and `ANDROID_SERIAL`, with the same values in `BANKSMAN_RESOURCES` and
   `BANKSMAN_SERIALS`, and with each argument `{serial}`, `{resource}`, `{serials}`, and
-  `{resources}` replaced. The resource is `stub-0` unless `--resource` names another. Every
-  other command does nothing.
+  `{resources}` replaced. The resource is `stub-0` unless `--resource` names another, and the
+  lease is `stub-lease` unless `--lease` names another, also with `--holding`, so that a script
+  that the command starts keeps the lease. Every other command does nothing.
 
 ```sh
 stub=$(mktemp -d)

@@ -12,7 +12,7 @@ import time
 from contextlib import suppress
 
 import pytest
-from helpers import SRC, FakeSdk, edit_lease, reap_in_child, write_config
+from helpers import SRC, FakeSdk, edit_lease, hook, reap_in_child, write_config
 
 from banksman import run as runs
 from banksman.cli import main
@@ -738,15 +738,31 @@ print(json.dumps({"argv": sys.argv[1:], "pgid": os.getpgrp(), "users": users,
 """
 
 
+PRINT_FILE = "import sys; print(open(sys.argv[1]).read())"
+
+
 @pytest.fixture
 def two_phones(tmp_path, config_path):
     sdk = FakeSdk(tmp_path, avds=("qa_phone", "qa_phone2"))
+    listed = tmp_path / "listed.json"
     write_config(
         config_path,
         f"[holder]\nagents = []\n{sdk.config()}[kinds.emulator]\npreset = \"android-emulator\"\n"
-        'unmanaged = "grant"\n[kinds.account]\ninstances = ["qa@example.test"]\n',
+        'unmanaged = "grant"\n[kinds.account]\ninstances = ["qa@example.test"]\n'
+        # Accounts that a discover hook lists, without a serial.
+        f"[kinds.listed]\ndiscover = {json.dumps(hook(PRINT_FILE, str(listed)))}\n",
     )
-    save_inventory(Inventory(kinds={"emulator": Decisions(allowed=("qa_phone", "qa_phone2"))}))
+    listed.write_text(
+        json.dumps({"schema": 1, "instances": [{"name": "qa+2@example.test", "facts": {}}]})
+    )
+    save_inventory(
+        Inventory(
+            kinds={
+                "emulator": Decisions(allowed=("qa_phone", "qa_phone2")),
+                "listed": Decisions(allowed=("qa+2@example.test",)),
+            }
+        )
+    )
     return sdk
 
 
@@ -812,23 +828,27 @@ def test_a_holding_of_two_devices_runs_one_command_under_both_leases(
         )
 
 
+@pytest.mark.parametrize(
+    "kind, account", [("account", "qa@example.test"), ("listed", "qa+2@example.test")]
+)
 def test_a_holding_of_a_device_and_an_account_gives_the_serial_of_the_device(
-    two_phones, capsys
+    two_phones, capsys, kind, account
 ):
     two_phones.running({"emulator-5554": "qa_phone"})
     grant(
         capsys, "--holding", "tests", *ME,
-        "--as", "phone", "--where", "avd=qa_phone", "--as", "account", "--where", "kind=account",
+        "--as", "phone", "--where", "avd=qa_phone", "--as", "account", "--where", f"kind={kind}",
     )
+    # An account has no serial, also when a discover hook lists it, so nothing is missing.
     status, shown, err = shown_in_run([], "{serials}", "{resources}")
     assert (status, err) == (0, "")
-    assert shown["argv"] == ["emulator-5554", "qa@example.test,qa_phone"]
+    assert shown["argv"] == ["emulator-5554", f"{account},qa_phone"]
     # The run has one device, so adb without -s and the connected tests of Gradle use it.
     assert (shown["env"]["BANKSMAN_SERIALS"], shown["env"]["ANDROID_SERIAL"]) == (
         "emulator-5554",
         "emulator-5554",
     )
-    assert shown["users"] == {"qa@example.test": [shown["pgid"]], "qa_phone": [shown["pgid"]]}
+    assert shown["users"] == {account: [shown["pgid"]], "qa_phone": [shown["pgid"]]}
 
 
 def test_a_device_whose_serial_is_not_known_is_named_and_left_out(two_phones, capsys, tmp_path):

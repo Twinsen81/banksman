@@ -7,7 +7,8 @@
 # machine whose devices are all in use. run runs the command after -- as banksman run --lease
 # runs it for a device: with the serial stub-serial in BANKSMAN_SERIAL, BANKSMAN_SERIALS, and
 # ANDROID_SERIAL, with the resource stub-0, or the one that --resource names, in
-# BANKSMAN_RESOURCE and BANKSMAN_RESOURCES, and with each argument {serial}, {resource},
+# BANKSMAN_RESOURCE and BANKSMAN_RESOURCES, with the lease stub-lease, or the one that --lease
+# names, in BANKSMAN_LEASE, also for --holding, and with each argument {serial}, {resource},
 # {serials}, and {resources} replaced. Every other command does nothing.
 
 if [ -n "${BANKSMAN_STUB_LOG:-}" ]; then
@@ -37,11 +38,11 @@ case $1 in
         shift
         unset BANKSMAN_ACCOUNTS
         export BANKSMAN_KIND=stub BANKSMAN_SERIAL=stub-serial ANDROID_SERIAL=stub-serial
-        export BANKSMAN_SERIALS=stub-serial BANKSMAN_RESOURCE=stub-0
+        export BANKSMAN_SERIALS=stub-serial BANKSMAN_RESOURCE=stub-0 BANKSMAN_LEASE=stub-lease
         while [ "$#" -gt 0 ]; do
             case $1 in
                 --resource) BANKSMAN_RESOURCE=$2 ;;
-                --lease) export BANKSMAN_LEASE="$2" ;;
+                --lease) BANKSMAN_LEASE=$2 ;;
                 --)
                     shift
                     break
