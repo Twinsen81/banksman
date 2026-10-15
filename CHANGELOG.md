@@ -345,6 +345,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skill with what this banksman prints, and gives the command that saves a file again. Each
   check is `ok`, `warn`, `fail`, or `skip`, the exit status is 1 when a check fails, and
   `--json` prints the checks.
+- `run --holding` without `--resource` runs the command under every held lease of the
+  holding, also the lease of a port or an account in it, and `--resource` can be repeated to
+  choose some of the leases. The run registers its group with each lease, checks each one, and
+  stops the command with status 3 when any of them is lost, so that a test runner that shards
+  a run over several devices is fenced by the lease of each device. Before, `run --holding`
+  needed one `--resource` for a holding of several resources. The command gets
+  `BANKSMAN_RESOURCES` and `BANKSMAN_SERIALS`, and the placeholders `{resources}` and
+  `{serials}` become one argument each: comma-separated lists in the order of the resource
+  names, or of the `--resource` options. The lists of serials have only the serials that are
+  known, and `{serials}` is an error while a device of the run has no known serial. Under
+  several leases, the variables of one lease are not set, `{serial}` and `{resource}` are an
+  error, `BANKSMAN_LEASE` is the id of one lease of the holding, and `ANDROID_SERIAL` names no
+  device when the run has several devices, or names the only device of the run. Under one
+  lease, nothing changes, and the lists have one value. The stub for tests sets the lists and
+  replaces the new placeholders. The lease schema and the output schema do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

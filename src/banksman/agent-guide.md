@@ -52,7 +52,9 @@ banksman run --holding login-tests -- ./scripts/ui-tests.sh --device {serial}
 - The command gets `ANDROID_SERIAL`, so `adb` without `-s` and the connected tests of Gradle use
   the leased device. It also gets `BANKSMAN_LEASE`, so a script of the project that uses
   banksman keeps your lease instead of taking another device.
-- When your holding has several devices, add `--resource <device>`.
+- When your holding has several devices, the command runs under all of them, and stops when
+  any lease is lost: pass `{serials}`, the serials with commas, to a tool that uses several
+  devices. `ANDROID_SERIAL` then names no device. For one device, add `--resource <device>`.
 - Outside `banksman run`, pass the serial to every tool, for example `adb -s <serial>`. A bare
   `adb` command acts on whatever device adb chooses.
 

@@ -12,7 +12,7 @@ import time
 from contextlib import suppress
 
 import pytest
-from helpers import SRC, FakeSdk, edit_lease, reap_in_child, write_config
+from helpers import SRC, FakeSdk, edit_lease, hook, reap_in_child, write_config
 
 from banksman import run as runs
 from banksman.cli import main
@@ -20,7 +20,7 @@ from banksman import hooks
 from banksman.history import History
 from banksman.inventory import Decisions, Inventory, save_inventory
 from banksman.lease import Holder, Timeouts
-from banksman.store import Store
+from banksman.store import Choice, Need, Store
 from banksman.system import Machine
 
 OWNER = "/work/tree-a"
@@ -224,9 +224,7 @@ def test_a_command_that_ignores_sigterm_gets_sigkill(state_dir, monkeypatch, cap
     lease = lease_on(state_dir, Timeouts(drain_timeout=2, hard_cap=1))
     deaf = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
     started = time.monotonic()
-    outcome = runs.run(
-        store, "phone-1", lease.lease_id, [sys.executable, "-c", deaf], os.environ, print
-    )
+    outcome = runs.run(store, [lease], [sys.executable, "-c", deaf], os.environ, print)
     assert outcome.lost is not None and outcome.running == ()
     assert time.monotonic() - started < 30
     assert lease_file(state_dir)["users"] == []
@@ -242,8 +240,7 @@ def test_run_waits_for_the_processes_that_the_command_left_in_its_group(state_di
     warnings = []
     started = time.monotonic()
     outcome = runs.run(
-        store, "phone-1", lease.lease_id, [sys.executable, "-c", leave_one], os.environ,
-        warnings.append,
+        store, [lease], [sys.executable, "-c", leave_one], os.environ, warnings.append
     )
     assert outcome.returncode == 0
     assert time.monotonic() - started >= 1.0
@@ -348,6 +345,10 @@ RUN_NEEDS = "run needs one of --lease and --resource, --holding, or --where, and
         (["--lease", "x", "--holding", "tests", "--", "true"], RUN_NEEDS),
         (["--holding", "tests", "--where", "kind=sdk", "--", "true"], RUN_NEEDS),
         (["--lease", "x", "--", "true"], "run --lease needs --resource, the leased resource"),
+        (
+            ["--lease", "x", "--resource", "a", "--resource", "b", "--", "true"],
+            "run --lease takes one --resource; for several resources of a holding, use --holding",
+        ),
         (
             ["--lease", "x", "--resource", "r", "--wait", "1m", "--", "true"],
             "run --wait needs --where",
@@ -716,3 +717,205 @@ def test_run_where_replaces_the_resource_and_refuses_an_unknown_serial(
     assert not (state_dir / "9101.json").exists()
     events, _ = History(log_path).read()
     assert [event.event for event in events] == ["acquire", "release"] * 2
+
+
+# A run under several leases of one holding, for a command that uses several devices at once.
+
+ME = ["--owner-pid", str(os.getpid())]
+# The command prints its arguments, its group, the variables of the run, and the groups that
+# the lease file of each resource of the run lists while it runs.
+SHOW_RUN = """
+import json, os, sys
+names = ("BANKSMAN_RESOURCES", "BANKSMAN_SERIALS", "BANKSMAN_LEASE", "BANKSMAN_RESOURCE",
+         "BANKSMAN_KIND", "BANKSMAN_SERIAL", "ANDROID_SERIAL")
+state = os.environ["BANKSMAN_STATE_DIR"]
+users = {}
+for resource in os.environ["BANKSMAN_RESOURCES"].split(","):
+    lease = json.load(open(os.path.join(state, resource + ".json")))
+    users[resource] = [user["pgid"] for user in lease["users"]]
+print(json.dumps({"argv": sys.argv[1:], "pgid": os.getpgrp(), "users": users,
+                  "env": {name: os.environ.get(name) for name in names}}))
+"""
+
+
+PRINT_FILE = "import sys; print(open(sys.argv[1]).read())"
+
+
+@pytest.fixture
+def two_phones(tmp_path, config_path):
+    sdk = FakeSdk(tmp_path, avds=("qa_phone", "qa_phone2"))
+    listed = tmp_path / "listed.json"
+    write_config(
+        config_path,
+        f"[holder]\nagents = []\n{sdk.config()}[kinds.emulator]\npreset = \"android-emulator\"\n"
+        'unmanaged = "grant"\n[kinds.account]\ninstances = ["qa@example.test"]\n'
+        # Accounts that a discover hook lists, without a serial.
+        f"[kinds.listed]\ndiscover = {json.dumps(hook(PRINT_FILE, str(listed)))}\n",
+    )
+    listed.write_text(
+        json.dumps({"schema": 1, "instances": [{"name": "qa+2@example.test", "facts": {}}]})
+    )
+    save_inventory(
+        Inventory(
+            kinds={
+                "emulator": Decisions(allowed=("qa_phone", "qa_phone2")),
+                "listed": Decisions(allowed=("qa+2@example.test",)),
+            }
+        )
+    )
+    return sdk
+
+
+def shown_in_run(options, *arguments):
+    process = banksman(
+        "run", "--holding", "tests", *ME, *options, "--",
+        sys.executable, "-c", SHOW_RUN, *arguments,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    status, out, err = finish(process)
+    return status, (json.loads(out) if out else None), err
+
+
+def test_a_holding_of_two_devices_runs_one_command_under_both_leases(
+    two_phones, capsys, state_dir
+):
+    two_phones.running({"emulator-5554": "qa_phone", "emulator-5556": "qa_phone2"})
+    values = grant(
+        capsys, "--holding", "tests", *ME,
+        "--as", "a", "--where", "avd=qa_phone", "--as", "b", "--where", "avd=qa_phone2",
+    )
+    status, shown, err = shown_in_run([], "{serials}", "--names", "{resources}")
+    assert (status, err) == (0, "")
+    assert shown["argv"] == ["emulator-5554,emulator-5556", "--names", "qa_phone,qa_phone2"]
+    # The variables of one lease are not set. ANDROID_SERIAL names no device, so that adb
+    # without -s does not choose one, and BANKSMAN_LEASE names the holding for the adb guard.
+    assert shown["env"] == {
+        "BANKSMAN_RESOURCES": "qa_phone,qa_phone2",
+        "BANKSMAN_SERIALS": "emulator-5554,emulator-5556",
+        "BANKSMAN_LEASE": values["A_LEASE"],
+        "BANKSMAN_RESOURCE": None,
+        "BANKSMAN_KIND": None,
+        "BANKSMAN_SERIAL": None,
+        "ANDROID_SERIAL": hooks.NO_SERIAL,
+    }
+    # The group of the command is registered with both leases, and leaves both.
+    assert shown["users"] == {"qa_phone": [shown["pgid"]], "qa_phone2": [shown["pgid"]]}
+    for resource in ("qa_phone", "qa_phone2"):
+        assert json.loads((state_dir / f"{resource}.json").read_text())["users"] == []
+    # --resource chooses some of the leases, in the order of the flags.
+    options = ["--resource", "qa_phone2", "--resource", "qa_phone"]
+    status, shown, _ = shown_in_run(options, "{serials}", "{resources}")
+    assert (status, shown["argv"]) == (0, ["emulator-5556,emulator-5554", "qa_phone2,qa_phone"])
+    assert shown["env"]["BANKSMAN_LEASE"] == values["B_LEASE"]
+    # Under one lease, the run is as before, and the lists have one value.
+    status, shown, _ = shown_in_run(["--resource", "qa_phone2"], "{serial}", "{serials}")
+    assert (status, shown["argv"]) == (0, ["emulator-5556", "emulator-5556"])
+    assert shown["env"] == {
+        "BANKSMAN_RESOURCES": "qa_phone2",
+        "BANKSMAN_SERIALS": "emulator-5556",
+        "BANKSMAN_LEASE": values["B_LEASE"],
+        "BANKSMAN_RESOURCE": "qa_phone2",
+        "BANKSMAN_KIND": "emulator",
+        "BANKSMAN_SERIAL": "emulator-5556",
+        "ANDROID_SERIAL": "emulator-5556",
+    }
+    for placeholder in ("{serial}", "{resource}"):
+        status, shown, err = shown_in_run([], placeholder)
+        assert (status, shown) == (1, None)
+        assert err.startswith(
+            f"banksman: the command runs under several leases: qa_phone, qa_phone2, so"
+            f" {placeholder} cannot be replaced. Use {placeholder[:-1]}s}}"
+        )
+
+
+@pytest.mark.parametrize(
+    "kind, account", [("account", "qa@example.test"), ("listed", "qa+2@example.test")]
+)
+def test_a_holding_of_a_device_and_an_account_gives_the_serial_of_the_device(
+    two_phones, capsys, kind, account
+):
+    two_phones.running({"emulator-5554": "qa_phone"})
+    grant(
+        capsys, "--holding", "tests", *ME,
+        "--as", "phone", "--where", "avd=qa_phone", "--as", "account", "--where", f"kind={kind}",
+    )
+    # An account has no serial, also when a discover hook lists it, so nothing is missing.
+    status, shown, err = shown_in_run([], "{serials}", "{resources}")
+    assert (status, err) == (0, "")
+    assert shown["argv"] == ["emulator-5554", f"{account},qa_phone"]
+    # The run has one device, so adb without -s and the connected tests of Gradle use it.
+    assert (shown["env"]["BANKSMAN_SERIALS"], shown["env"]["ANDROID_SERIAL"]) == (
+        "emulator-5554",
+        "emulator-5554",
+    )
+    assert shown["users"] == {account: [shown["pgid"]], "qa_phone": [shown["pgid"]]}
+
+
+def test_a_device_whose_serial_is_not_known_is_named_and_left_out(two_phones, capsys, tmp_path):
+    two_phones.running({"emulator-5554": "qa_phone"})
+    grant(
+        capsys, "--holding", "tests", *ME,
+        "--as", "a", "--where", "avd=qa_phone", "--as", "b", "--where", "avd=qa_phone2",
+    )
+    marker = tmp_path / "ran"
+    process = banksman(
+        "run", "--holding", "tests", *ME, "--",
+        sys.executable, "-c", f"open({str(marker)!r}, 'w')", "{serials}",
+        stderr=subprocess.PIPE,
+    )
+    status, _, err = finish(process)
+    assert status == 1
+    assert err.startswith(
+        "banksman: the serial of qa_phone2 is not known, so {serials} cannot be replaced: the"
+        " instance does not run"
+    )
+    assert not marker.exists()
+    # Without {serials}, the command runs with the serials that are known, and banksman says
+    # which device is left out.
+    status, shown, err = shown_in_run([])
+    assert status == 0
+    assert (shown["env"]["BANKSMAN_SERIALS"], shown["env"]["ANDROID_SERIAL"]) == (
+        "emulator-5554",
+        hooks.NO_SERIAL,
+    )
+    assert err == (
+        "banksman: the serial of qa_phone2 is not known, so BANKSMAN_SERIALS does not list it\n"
+    )
+
+
+def test_a_lost_second_lease_stops_the_command(state_dir):
+    needs = [Need((Choice(name, "device", timeouts=FAST),)) for name in ("phone-1", "phone-2")]
+    store = Store(state_dir, Machine())
+    store.grant(needs, Holder(OWNER, owner_pid=os.getpid()), label="tests")
+    process = banksman(
+        "run", "--holding", "tests", *ME, "--", sys.executable, "-c", SLOW_TO_STOP,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    command = None
+    try:
+        pid = int(process.stdout.readline())
+        command = (pid, Machine().running([pid])[pid])
+        with store._lock():
+            edit_lease(state_dir, "phone-2", lambda data: data["awake"].update(hard_deadline=0))
+        status, _, err = finish(process)
+        assert status == 3
+        assert err.startswith("banksman: the lease is lost: the lease on phone-2 is ")
+        assert err.endswith("; the command was stopped\n")
+        assert not runs_now(*command)
+        # The run has left both leases. The first one is still held.
+        first = json.loads((state_dir / "phone-1.json").read_text())
+        assert (first["state"], first["users"]) == ("ready", [])
+    finally:
+        _clean_up(process, command)
+
+
+def test_serials_of_a_run_without_a_serial_cannot_be_replaced(state_dir, config_path):
+    write_config(config_path, "[holder]\nagents = []\n[kinds.port]\ninstances = [\"9101\"]\n")
+    process = banksman(
+        "run", "--where", "kind=port", "--", "true", "{serials}", stderr=subprocess.PIPE
+    )
+    status, _, err = finish(process)
+    assert status == 1
+    assert err == (
+        "banksman: no resource of the run has a serial: 9101, so {serials} cannot be replaced\n"
+    )

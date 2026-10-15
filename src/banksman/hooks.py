@@ -32,6 +32,8 @@ VARIABLES = (
     "BANKSMAN_SERIAL",
     "BANKSMAN_HANDLE",
     "BANKSMAN_ACCOUNTS",
+    "BANKSMAN_RESOURCES",
+    "BANKSMAN_SERIALS",
 )
 # adb, and the connected tests of the Android Gradle plugin, act on the device that this variable
 # names when a command does not name one.

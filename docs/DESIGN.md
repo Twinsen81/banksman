@@ -238,7 +238,11 @@ minutes, and its lease can become void in the middle.
   adb server, runs outside it. With `--where` instead of a lease id, it
   acquires a lease for the command, with itself as the owner process, and releases it after
   the command, so a counted kind with `count = 1` is a mutex for one command at a time.
-  [PROJECTS.md](PROJECTS.md) has the details.
+  With `--holding`, it runs the command under every held lease of the holding, or under the
+  leases that `--resource` names: it registers the group with each lease, checks each one, and
+  stops the group when any of them is lost, as one `acquire` gets all its resources or none.
+  So a test runner that shards one run over several devices is fenced by the lease of each
+  device, not only by the lease of one of them. [PROJECTS.md](PROJECTS.md) has the details.
 - **The reaper's side: no signals by default.** For a void lease, the reaper first marks it
   `draining`, so that no further ownership check passes. By default it sends no signal to
   any script. The only process that it signals by default is an emulator that banksman
@@ -1006,8 +1010,8 @@ agent, through its own agent process.
   So the caller can give its holding a label: `acquire --holding <label>` keeps the holding of
   the caller's agent process that has this label, as `--lease` keeps the holding of a lease
   id, and otherwise starts a holding with the label. `run`, `touch`, and `release` take
-  `--holding` instead of `--lease`; `run --holding` needs `--resource` only when the holding
-  has several resources. `banksman held` lists the held leases of the agent process, with
+  `--holding` instead of `--lease`; `run --holding` runs the command under every lease of the
+  holding, or under those that `--resource` names (section 4). `banksman held` lists the held leases of the agent process, with
   their labels, lease ids, resources, and serials. The label is looked up under the lock of the
   lease store, so two requests of one agent process with the same label never start two
   holdings.
@@ -1410,7 +1414,7 @@ banksman enter   --resource <name> --lease <id> --pid <pid> [--pgid <pgid>]  # c
 banksman check   --resource <name> --lease <id>                    # touch; exit 0: yours, 3: lost
 banksman leave   --resource <name> --lease <id> --pid <pid>
 banksman run     --lease <id> --resource <name> -- <command> ...   # in a group of its own, fenced
-banksman run     --holding <label> [--resource <name>] [--owner-pid <pid>] -- <command> ...
+banksman run     --holding <label> [--resource <name> ...] [--owner-pid <pid>] -- <command> ...
 banksman run     --where <attr><op><value> ... [--accounts <n>] [--for <text>] [--expect <duration>]
                  [--wait <duration>] [--paid] [--start] [--issue <id>] [--owner-pid <pid>]
                  -- <command> ...
@@ -1452,6 +1456,10 @@ the command starts when the command has `{serial}` and the serial is not known. 
 gets `BANKSMAN_LEASE`, `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_SERIAL` and
 `BANKSMAN_HANDLE` when they are known, and `ANDROID_SERIAL` for a kind with an Android preset,
 so that a script can, for example, extend the reservation of a remote device by hand.
+`{resources}` and `{serials}` become the resources and the known serials of the run,
+comma-separated, also under one lease, and the command gets the same lists in
+`BANKSMAN_RESOURCES` and `BANKSMAN_SERIALS`. Under several leases, the variables and the
+placeholders of one lease are not set (section 15).
 
 Every command that only an operator may run is under `banksman admin`, so that an agent's
 permission rules can refuse all of them with one pattern, including ones added later.
@@ -1505,6 +1513,13 @@ this section names.
   acts on whatever device adb chooses. In the command of `banksman run`, the argument
   `{serial}` is the serial, and for a kind with an Android preset, `ANDROID_SERIAL` names the
   leased device, also for the connected tests of the Android Gradle plugin.
+- Run a command that uses several devices at once, such as a test runner that shards a run,
+  with `banksman run --holding <label>`: it runs under every lease of the holding, and stops
+  when any of them is lost. The argument `{serials}` becomes the serials, comma-separated, in
+  the order of the resource names. `ANDROID_SERIAL` names no device when the run has several
+  devices, so that a bare `adb` call fails instead of choosing one of them, or the device of
+  another holder. A run of one device and an account or a port keeps `ANDROID_SERIAL` for the
+  device.
 - Keep the lease id that `acquire` prints. Pass it to the scripts, and back to `acquire` with
   `--lease` to keep the same resource. An agent gives its holding a label with `--holding`
   instead, and names the holding with the label in later commands (section 9).
@@ -1638,6 +1653,9 @@ Done:
   started, or the reservation that it created, as a take-back after the scripts of the lease.
 - `banksman admin doctor`: a check of the install, the configuration, and the files that the
   operator saved from banksman, which changes nothing.
+- One command on several devices: `run --holding` runs under every lease of the holding, or
+  under those that `--resource` names, with `{serials}`, `{resources}`, `BANKSMAN_SERIALS`, and
+  `BANKSMAN_RESOURCES`, and stops when any of the leases is lost.
 
 Next:
 
