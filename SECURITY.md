@@ -199,5 +199,8 @@ the guard fails open, so a broken configuration or installation costs protection
 device. A refused call, and a call that warn mode lets run, adds an event to the log that
 names the caller and the device, with only the words that name the adb command: never the rest
 of the command line, which can carry tokens, and never the text of the refusal, which can carry
-the purpose of another holder.
+the purpose of another holder. A call that the guard lets run because the lease of the device
+belongs to the caller's holding touches that holding, without an owner process. It needs the
+same lease id or owner process as `touch`, so it gives no process a way to keep a lease that
+`touch` does not give it already.
 
