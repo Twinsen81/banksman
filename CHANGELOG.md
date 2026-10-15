@@ -364,8 +364,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a device command run because a held lease of the caller's holding has the device, through
   `BANKSMAN_LEASE` or through an owner process above the caller, it touches that lease and the
   other held leases of its holding, as `touch` does but without recording an owner process,
-  when the last touch is more than a minute old, or more than a quarter of a shorter idle
-  timeout. So an agent that uses its device with direct adb calls keeps its lease, and an
+  when the last touch of one of these leases is more than a minute old, or more than a quarter
+  of its idle timeout when that is shorter. So an agent that uses its device with direct adb calls keeps its lease, and an
   emulator that banksman started no longer ends under the agent after the idle timeout. A call
   within that time takes no lock. A touch that is due waits for the lock for half a second at
   most, never touches a lease that is void or that changed since the guard read it, and when

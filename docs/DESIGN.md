@@ -1326,11 +1326,12 @@ is a setup of the operator, and a project needs nothing for it.
   a held lease of the caller's holding has the device, through `BANKSMAN_LEASE` or through the
   owner process above the caller, touches that lease and the other held leases of its holding,
   as `touch` does (section 7). The idle timeout then counts the time without a banksman call
-  and without a device call of the holder. The guard touches a lease when its last touch is
-  more than a minute old, or more than a quarter of its idle timeout when that is shorter, so
-  that a lease with an idle timeout of a minute or less is kept too. The time of the last touch
-  comes from the lease files that the guard read without the lock, so a call within that time
-  takes no lock. A touch that is due takes the lock as an event of the log does: it waits for
+  and without a device call of the holder. The guard touches the holding when the last touch
+  of one of its held leases is more than a minute old, or more than a quarter of the idle
+  timeout of that lease when that is shorter. So a lease of the holding with an idle timeout of
+  a minute or less is kept too, also when it is not the lease of the device, for example the
+  lease of a port. The time of the last touch comes from the lease files that the guard read
+  without the lock, so a call within that time takes no lock. A touch that is due takes the lock as an event of the log does: it waits for
   half a second at most, and does not clean up or restore the quarantines. Under the lock, the
   guard reads the lease again, and touches the holding only while the lease is held with the
   same id, is not void, and no other process changed it since the guard read it. So a touch

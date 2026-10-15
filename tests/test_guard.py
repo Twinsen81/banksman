@@ -979,6 +979,24 @@ def test_a_short_idle_timeout_is_touched_after_a_quarter_of_it(
     assert phone["awake"]["touched"] == system.now
 
 
+def test_a_short_idle_timeout_of_another_lease_of_the_holding_counts(
+    machine, store, system, state_dir
+):
+    needs = [
+        Need((Choice("e2e_phone", "emulator"),)),
+        Need((Choice("port-8080", "port", Timeouts(idle_timeout=30)),)),
+    ]
+    store.grant(needs, mine())
+    store.observe([SerialSeen("e2e_phone", "emulator", "emulator-5554", system.now)])
+    # The calls go to the phone only, whose own idle timeout is 20 minutes.
+    for _ in range(14):
+        system.advance(5)
+        assert guarded("-s", "emulator-5554", "shell") == 0
+    (port,) = touched(state_dir, "port-8080")
+    assert system.now - port["awake"]["touched"] <= 10
+    assert store.holding(port["lease_id"]).keys() == {"e2e_phone", "port-8080"}
+
+
 def test_the_lease_id_of_banksman_run_touches_and_keeps_the_owner(
     machine, store, system, state_dir, monkeypatch
 ):

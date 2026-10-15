@@ -151,8 +151,8 @@ class Decision:
     runs."""
 
     verdict: Verdict | None = None
-    # The held leases of the caller's holding that let the call run on their device. The call is
-    # use of the device, so it touches them.
+    # The held leases of the holding whose lease of the device let the call run, also the leases
+    # of its other resources. The call is use of the holding, so it touches them.
     used: tuple[Lease, ...] = ()
 
 
@@ -229,9 +229,16 @@ def check(
         return android.transports(config.android, call.server)
 
     caller = Caller(env, snapshot.leases, system, config.holder)
-    return decide(
+    decision = decide(
         call, caller, _devices(snapshot, config), config.guard.strict, listing or adb_devices
     )
+    if not decision.used:
+        return decision
+    # The other leases of the holding, such as a port, are not leases of a device, and their
+    # idle timeout can be shorter than the one of the device.
+    holdings = {lease.holding for lease in decision.used}
+    held = [lease for lease in snapshot.leases if lease.state in HELD and lease.holding in holdings]
+    return Decision(used=tuple(held))
 
 
 def parse(arguments: Sequence[str]) -> Call:
@@ -408,8 +415,8 @@ def decide(
 
 
 def touch(used: Sequence[Lease], system: System) -> list[Lease]:
-    """Touch the holdings of the leases that a call uses, when a touch is due, and return the
-    leases that it touched.
+    """Touch the holdings of the leases that a call uses, when a touch is due for one of the
+    leases, and return the leases that it touched.
 
     A device call of the holder shows that the holder is alive and still uses the device, so
     the idle timeout counts the time without a banksman call and without a device call. The
@@ -418,8 +425,7 @@ def touch(used: Sequence[Lease], system: System) -> list[Lease]:
     another owner.
     """
     now = system.clock()
-    due = [lease for lease in used if now - lease.touched > touch_interval(lease)]
-    if not due:
+    if not any(now - lease.touched > touch_interval(lease) for lease in used):
         return []
     store = Store(
         default_state_dir(),
@@ -427,14 +433,14 @@ def touch(used: Sequence[Lease], system: System) -> list[Lease]:
         quarantine_dir=default_quarantine_dir(),
         lock_wait=LOG_LOCK_WAIT,
     )
-    return store.touch_seen(due)
+    return store.touch_seen(used)
 
 
 def touch_interval(lease: Lease) -> float:
     """Return how long after its last touch a call of the holder touches a lease again.
 
     A quarter of a short idle timeout, as `banksman run` checks, so that a holder that keeps
-    using the device also keeps a lease with an idle timeout of a minute or less.
+    using the device also keeps a lease of its holding with an idle timeout of a minute or less.
     """
     if lease.idle_timeout is None:
         return TOUCH_EVERY
