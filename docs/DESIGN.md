@@ -513,7 +513,8 @@ holdings apart (section 9).
 - **The grant.** `acquire` prints `KEY=value` lines: `RESOURCE`, `KIND`, `LEASE` (the lease
   id that the scripts pass back), `STATE`, `KEPT` (`true` for a lease of the caller's holding
   that `--lease` or `--holding` kept, otherwise `false`), `PREVIOUS` (`self` or `other`, see
-  below), `SERIAL` when the lease records it,
+  below), `STARTED` (`true` when this request started the instance, see below, otherwise
+  `false`), `SERIAL` when the lease records it,
   `HANDLE` when the lease records the id of a reservation (section 3), and `ACCOUNTS` when the
   request asks for accounts (section 7). A kept lease can have another id than the
   one that the caller passed, because each lease of a holding has its own id. Each value has only the characters of a
@@ -580,6 +581,14 @@ holdings apart (section 9).
   with `--lease` is not started again. The starts and the resets of one request run one after
   another, so the boot deadline of each new lease also counts the boot timeout of every other
   start of the request.
+- **`STARTED`** says whether this request started the instance: `true` for an emulator that
+  it started, and for the reservation of a remote device that it created. It is `false` for an
+  instance that ran already, for a reservation that the start adopted, also one that banksman
+  created for an earlier lease, for a kept lease, and without `--start`. `STATE` is `ready` in
+  both cases. A script can report it, and end only what its run started with `release --end`
+  (section 4), so that it leaves an instance that ran before to the other holders.
+  `release --end` itself ends every instance that banksman started, also for an earlier
+  lease. `run --where --start` prints no grant.
 - **Instances that banksman did not start.** An instance of the `android-emulator` or the
   `android-remote` preset that runs, but that banksman did not start and did not see run when
   a lease of it ended, is `unmanaged`: a person or a program outside banksman started it, for
@@ -642,6 +651,7 @@ holdings apart (section 9).
   PHONE_STATE=ready
   PHONE_KEPT=false
   PHONE_PREVIOUS=other
+  PHONE_STARTED=false
   PHONE_SERIAL=R5CR1234ABC
   PHONE_ACCOUNTS=qa@example.test
   TABLET_RESOURCE=qa_tablet
@@ -650,6 +660,7 @@ holdings apart (section 9).
   TABLET_STATE=ready
   TABLET_KEPT=false
   TABLET_PREVIOUS=self
+  TABLET_STARTED=false
   ```
 
   A part name has lowercase letters, digits, and `_`, and becomes the prefix of the keys of
@@ -948,7 +959,8 @@ holdings apart (section 9).
   emulator that a release leaves running. When the connection has ended meanwhile, the next
   `acquire --start` of the model adopts the reservation, and affinity makes the model the first
   choice of the worktree that used it (section 6), so that it does not pay for a second
-  reservation. A new handle means a new device, so `PREVIOUS` is then `other`. A holder that
+  reservation. A new handle means a new device, so `PREVIOUS` is then `other`. A start that
+  adopts a reservation prints `STARTED=false` (section 6). A holder that
   does not come back soon releases with `--end` (section 4): banksman then removes the
   reservation when it created it, and keeps a reservation that it adopted. The reaper ends
   only what banksman started: for a
@@ -1678,6 +1690,8 @@ Done:
   without a lease, under a lease of its own, so that no request gets it meanwhile.
 - Affinity: a request gets the free instance that its worktree used last first, and the grant
   says with `PREVIOUS` whether the instance is as the worktree left it.
+- `STARTED` in the grant: whether this request started the instance, so that a script ends
+  only what its run started.
 - `release --end`: a holder that does not come back soon also ends the emulator that banksman
   started, or the reservation that it created, as a take-back after the scripts of the lease.
 - `banksman admin doctor`: a check of the install, the configuration, and the files that the

@@ -27,7 +27,7 @@ SCRIPT = """
 . "$HELPER"
 banksman_acquire --where kind=sdk --for "a test" || exit
 echo "resource=${BANKSMAN_RESOURCE:-} serial=${BANKSMAN_SERIAL:-}"
-echo "previous=${BANKSMAN_PREVIOUS:-}"
+echo "previous=${BANKSMAN_PREVIOUS:-} started=${BANKSMAN_STARTED:-}"
 banksman_run sh -c 'echo "in: ${BANKSMAN_RESOURCE:-none}"; exit 5'
 status=$?
 banksman_release || exit
@@ -73,7 +73,7 @@ def test_with_banksman_the_script_runs_under_a_lease_and_gives_it_back(
 ):
     result = run_script(project_script, with_banksman)
     assert result.returncode == 5, result.stderr
-    assert result.stdout == "resource=sdk-0 serial=\nprevious=other\nin: sdk-0\n"
+    assert result.stdout == "resource=sdk-0 serial=\nprevious=other started=false\nin: sdk-0\n"
     assert result.stderr == "Released sdk-0: it is free.\n"
     assert not (state_dir / "sdk-0.json").exists()
 
@@ -84,7 +84,7 @@ def test_a_lease_that_the_caller_gives_stays_with_the_caller(
     lease = Store(state_dir, Machine()).acquire("sdk-0", "sdk", Holder("/work/tree-a"))
     result = run_script(project_script, with_banksman, BANKSMAN_LEASE=lease.lease_id)
     assert result.returncode == 5, result.stderr
-    assert result.stdout == "resource=sdk-0 serial=\nprevious=self\nin: sdk-0\n"
+    assert result.stdout == "resource=sdk-0 serial=\nprevious=self started=false\nin: sdk-0\n"
     assert (state_dir / "sdk-0.json").exists()
 
 
@@ -138,7 +138,7 @@ def test_without_banksman_the_script_works_as_before(project_script):
     result = run_script(project_script, SYSTEM_PATH)
     assert (result.returncode, result.stdout, result.stderr) == (
         5,
-        "resource= serial=\nprevious=\nin: none\n",
+        "resource= serial=\nprevious= started=\nin: none\n",
         "",
     )
 
@@ -155,7 +155,9 @@ def test_the_stub_records_the_calls_of_the_script(project_script, with_stub):
     path, calls = with_stub
     result = run_script(project_script, path, BANKSMAN_STUB_LOG=str(calls))
     assert result.returncode == 5, result.stderr
-    assert result.stdout == "resource=stub-0 serial=stub-serial\nprevious=other\nin: stub-0\n"
+    assert result.stdout == (
+        "resource=stub-0 serial=stub-serial\nprevious=other started=false\nin: stub-0\n"
+    )
     assert calls.read_text().splitlines() == [
         "acquire --where kind=sdk --for a test",
         "run --lease stub-lease --resource stub-0 -- sh -c echo"
@@ -184,7 +186,16 @@ def test_the_stub_can_play_an_instance_that_the_worktree_left_as_it_is(project_s
         project_script, path, BANKSMAN_STUB_LOG=str(calls), BANKSMAN_STUB_PREVIOUS="self"
     )
     assert result.returncode == 5, result.stderr
-    assert "previous=self\n" in result.stdout
+    assert "previous=self started=false\n" in result.stdout
+
+
+def test_the_stub_can_play_an_instance_that_the_request_started(project_script, with_stub):
+    path, calls = with_stub
+    result = run_script(
+        project_script, path, BANKSMAN_STUB_LOG=str(calls), BANKSMAN_STUB_STARTED="true"
+    )
+    assert result.returncode == 5, result.stderr
+    assert "previous=other started=true\n" in result.stdout
 
 
 def test_the_stub_runs_a_command_as_banksman_run_runs_it_for_a_device(with_stub):

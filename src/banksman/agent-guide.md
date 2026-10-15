@@ -21,12 +21,16 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
 - Run the same command again to keep the same device, for example after you lost the output:
   banksman then prints `KEPT=true`. You do not need to remember the lease id.
 - banksman prints `KEY=value` lines: `RESOURCE` (the device), `SERIAL` (its serial, when it
-  runs), `LEASE` (the lease id), and `PREVIOUS`.
+  runs), `LEASE` (the lease id), `PREVIOUS`, and `STARTED`.
 - `PREVIOUS=self` says that your worktree used the device last, gave it back with a release,
   and banksman knows of nothing that changed it since. What you installed or signed in can
   still be there: check it quickly, and skip only the setup that is still done. `self` is not a
   proof, because a person can have used the device. `PREVIOUS=other` says that another holder,
   a restart, or a take-back came between: set the device up again.
+- `STARTED=true` says that this request started the device with `--start`: banksman started
+  the emulator, or reserved the remote device. `STARTED=false` says that the device ran
+  already, that you kept it, or that you did not use `--start`. When you started the device and
+  will not need it again soon, release it with `--end`, as "Give it back" says.
 - banksman gives your worktree the free device that it used last first. To get a specific
   device, ask for it with `--where`, for example `avd=<name>`.
 - Ask for properties with `--where`, such as `form=tablet`, `'api>=33'`, or `avd=<name>`.

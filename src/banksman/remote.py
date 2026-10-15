@@ -154,6 +154,8 @@ class Started:
     handle: str
     serial: str
     ends: float | None
+    # Whether this start created the reservation. One that it adopted is not, also one that
+    # banksman created at an earlier start.
     created: bool
 
 
@@ -737,7 +739,7 @@ def start(
                     " so it ends by itself, at the latest 3 hours after its creation"
                 ) from None
         raise
-    return Started(session.handle, serial, ends, session.created)
+    return Started(session.handle, serial, ends, session.handle not in before)
 
 
 def connect(

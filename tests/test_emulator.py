@@ -293,10 +293,11 @@ def test_start_boots_the_avd_on_a_console_port_that_banksman_chose(
     ports.add(5554)
     status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
     assert status == 0, err
-    assert (values["RESOURCE"], values["STATE"], values["SERIAL"]) == (
+    assert (values["RESOURCE"], values["STATE"], values["SERIAL"], values["STARTED"]) == (
         "qa_phone",
         "ready",
         "emulator-5556",
+        "true",
     )
     assert sdk.emulator_calls() == ["-avd qa_phone -port 5556 -no-window -no-snapshot-save"]
     # The emulator finds the SDK and the AVDs of banksman, and no variable of the caller.
@@ -326,6 +327,7 @@ def test_without_start_banksman_starts_nothing(capsys, config_path, sdk):
     configure(config_path, sdk)
     status, values, err = acquire(capsys, "--where", "avd=qa_phone")
     assert (status, values["STATE"], "SERIAL" in values) == (0, "ready", False), err
+    assert values["STARTED"] == "false"
     assert sdk.emulator_calls() == []
 
 
@@ -602,7 +604,7 @@ def test_a_release_records_the_emulator_that_the_holder_started(capsys, config_p
     assert (record.pid, record.created) == (holder.pid, False)
     assert states(capsys)["qa_phone"] == "free"
     status, again, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
-    assert (status, again["SERIAL"]) == (0, "emulator-5556"), err
+    assert (status, again["SERIAL"], again["STARTED"]) == (0, "emulator-5556", "false"), err
     assert len(sdk.emulator_calls()) == 1
 
 
@@ -616,9 +618,35 @@ def test_a_release_keeps_the_emulator_that_banksman_started(capsys, config_path,
     assert (record.created, runs(record.pid)) == (True, True)
     status, again, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
     assert (status, again["SERIAL"], again["STATE"]) == (0, values["SERIAL"], "ready"), err
+    # The emulator ran before this request, so another holder can still need it.
+    assert (values["STARTED"], again["STARTED"]) == ("true", "false")
     assert len(sdk.emulator_calls()) == 1
 
 
+def test_a_kept_lease_did_not_start_its_emulator_in_this_request(capsys, config_path, sdk):
+    configure(config_path, sdk)
+    label = ["--holding", "ui-tests", "--where", "avd=qa_phone", "--start", *ME]
+    assert main(["acquire", *label, "--json"]) == 0
+    (part,) = json.loads(capsys.readouterr().out)["parts"]
+    assert (part["kept"], part["started"]) == (False, True)
+    status, again, err = acquire(capsys, *label)
+    assert (status, again["KEPT"], again["STARTED"]) == (0, "true", "false"), err
+
+
+def test_each_part_says_whether_this_request_started_its_emulator(capsys, config_path, sdk):
+    configure(config_path, sdk)
+    status, tablet, err = acquire(capsys, "--where", "avd=qa_tablet", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", tablet["LEASE"]]) == 0
+    status, values, err = acquire(
+        capsys,
+        *["--as", "phone", "--where", "avd=qa_phone"],
+        *["--as", "tablet", "--where", "avd=qa_tablet"],
+        "--start",
+    )
+    assert status == 0, err
+    assert (values["PHONE_STARTED"], values["TABLET_STARTED"]) == ("true", "false")
+    assert len(sdk.emulator_calls()) == 2
 @pytest.mark.parametrize("on_void", [False, True])
 def test_release_with_end_ends_the_emulator_that_banksman_started(
     capsys, config_path, sdk, on_void

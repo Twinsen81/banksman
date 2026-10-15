@@ -80,6 +80,7 @@ def test_acquire_prints_the_lease_as_key_value_lines(capsys, config_path):
         "STATE": "ready",
         "KEPT": "false",
         "PREVIOUS": "other",
+        "STARTED": "false",
         "SERIAL": "emulator-5554",
     }
     assert (lease.purpose, lease.owner_pid) == ("verify the layout", None)
@@ -105,6 +106,7 @@ def test_acquire_prints_json(capsys, config_path):
                 "accounts": [],
                 "kept": False,
                 "previous": "other",
+                "started": False,
             }
         ],
     }
@@ -576,6 +578,7 @@ def test_an_account_is_leased_with_its_device(capsys, config_path):
         "STATE": "ready",
         "KEPT": "false",
         "PREVIOUS": "other",
+        "STARTED": "false",
         "SERIAL": "R5CR0001",
         "ACCOUNTS": "qa@example.test",
     }
@@ -643,6 +646,7 @@ def test_a_joint_acquire_prints_each_part_under_its_name(capsys, config_path):
         "PHONE_STATE": "ready",
         "PHONE_KEPT": "false",
         "PHONE_PREVIOUS": "other",
+        "PHONE_STARTED": "false",
         "PHONE_SERIAL": "emulator-5554",
         "TABLET_RESOURCE": "qa_tablet",
         "TABLET_KIND": "emulator",
@@ -650,12 +654,14 @@ def test_a_joint_acquire_prints_each_part_under_its_name(capsys, config_path):
         "TABLET_STATE": "ready",
         "TABLET_KEPT": "false",
         "TABLET_PREVIOUS": "other",
+        "TABLET_STARTED": "false",
         "BUILD_RESOURCE": "build-0",
         "BUILD_KIND": "build",
         "BUILD_LEASE": held["build-0"].lease_id,
         "BUILD_STATE": "ready",
         "BUILD_KEPT": "false",
         "BUILD_PREVIOUS": "other",
+        "BUILD_STARTED": "false",
     }
     # Each lease has its own token for its scripts, and the three form one holding.
     assert len({lease.lease_id for lease in held.values()}) == 3

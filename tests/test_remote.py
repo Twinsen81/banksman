@@ -555,7 +555,7 @@ def test_start_reserves_connects_and_extends_the_model(capsys, config_path, sdk,
     assert status == 0, err
     assert values["SERIAL"] == "localhost:49522"
     assert values["HANDLE"] == FIRST
-    assert (values["RESOURCE"], values["STATE"]) == ("tokay:34", "ready")
+    assert (values["RESOURCE"], values["STATE"], values["STARTED"]) == ("tokay:34", "ready", "true")
     lease = leases()["tokay:34"]
     assert (lease.serial, lease.handle, lease.boot_deadline) == ("localhost:49522", FIRST, None)
     calls = cli.calls()
@@ -575,7 +575,7 @@ def test_start_adopts_a_reservation_that_the_account_already_has(capsys, config_
     adb_lists(sdk, [49522])
     lifecycle(cli, listed=LIST)
     status, values, err = acquire(capsys, "--where", "codename=tokay", "--paid", "--start")
-    assert (status, values["HANDLE"]) == (0, FIRST), err
+    assert (status, values["HANDLE"], values["STARTED"]) == (0, FIRST, "false"), err
     assert sessions()[FIRST].created is False
 
 
@@ -739,6 +739,7 @@ def test_acquire_with_lease_connects_a_kept_device_again(capsys, config_path, sd
     status, kept, err = acquire(capsys, "--where", "codename=tokay", "--lease", values["LEASE"])
     assert status == 0, err
     assert (kept["KEPT"], kept["SERIAL"], kept["HANDLE"]) == ("true", "localhost:49920", FIRST)
+    assert kept["STARTED"] == "false"
 
 
 def test_a_kept_device_that_cannot_be_connected_gives_the_new_leases_back(
@@ -781,6 +782,8 @@ def test_a_later_start_keeps_a_reservation_that_banksman_created(
     lifecycle(cli, listed=LIST)
     status, again, err = acquire(capsys, "--where", "codename=tokay", "--paid", "--start")
     assert (status, again["HANDLE"]) == (0, FIRST), err
+    # banksman created the reservation, but not for this request, which only adopted it.
+    assert (values["STARTED"], again["STARTED"]) == ("true", "false")
     assert sessions()[FIRST].created is True
     edit_lease(state_dir, "tokay:34", lambda data: data["awake"].update(hard_deadline=0))
     assert main(["reap"]) == 0
@@ -896,11 +899,12 @@ def test_a_release_keeps_the_reservation_for_the_next_request(capsys, config_pat
     assert not any("remove" in call for call in cli.calls())
     # The model runs and is free now, so the next request gets it without a start.
     status, again, _ = acquire(capsys, "--where", "codename=tokay", "--paid", "--start")
-    assert (status, again["RESOURCE"], again["SERIAL"], again["HANDLE"]) == (
+    assert (status, again["RESOURCE"], again["SERIAL"], again["HANDLE"], again["STARTED"]) == (
         0,
         "tokay:34",
         "localhost:49522",
         FIRST,
+        "false",
     )
     assert cli.calls().count("device remote create tokay/34 --connect") == 1
 
@@ -1043,6 +1047,7 @@ def test_a_new_reservation_of_the_model_is_another_device(
     status, again, err = acquire(capsys, "--where", "kind=remote", "--paid", "--start")
     assert status == 0, err
     assert (again["RESOURCE"], again["HANDLE"], again["PREVIOUS"]) == ("tokay:34", SECOND, "other")
+    assert again["STARTED"] == "true"
 
 
 # Devices that banksman did not start.

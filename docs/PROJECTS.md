@@ -155,7 +155,7 @@ project, and source it from the scripts that use a device. It is POSIX `sh`.
 
 | Function | With banksman | Without banksman |
 |---|---|---|
-| `banksman_acquire [OPTION ...]` | Runs `banksman acquire` with the options, and sets `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_LEASE`, `BANKSMAN_PREVIOUS`, and `BANKSMAN_SERIAL`, `BANKSMAN_HANDLE`, and `BANKSMAN_ACCOUNTS` when the grant has them. Returns the status of `acquire`, for example 4 when every matching resource is in use. | Returns 0, and sets nothing. |
+| `banksman_acquire [OPTION ...]` | Runs `banksman acquire` with the options, and sets `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_LEASE`, `BANKSMAN_PREVIOUS`, `BANKSMAN_STARTED`, and `BANKSMAN_SERIAL`, `BANKSMAN_HANDLE`, and `BANKSMAN_ACCOUNTS` when the grant has them. Returns the status of `acquire`, for example 4 when every matching resource is in use. | Returns 0, and sets nothing. |
 | `banksman_run COMMAND [ARGUMENT ...]` | Runs the command with `banksman run` under the lease. Returns the status of the command, or 3 when the lease was lost. | Runs the command as it is. |
 | `banksman_release [OPTION ...]` | Gives back the new lease that `banksman_acquire` got in this script, with `banksman release` and the options, such as `--end`. A lease that `acquire` kept stays with the caller. | Does nothing. |
 
@@ -253,6 +253,19 @@ banksman acquire --holding ui-tests --where form=phone --start --for "UI tests" 
   and the disk of the AVD keeps the setup for the next `--start` of the worktree. An emulator
   that banksman did not start keeps running. For a remote device, `--end` removes the
   reservation that banksman created, so that it costs nothing more.
+- The grant says `STARTED=true` when this request started the instance: the emulator that it
+  started, or the reservation of a remote device that it created. It says `STARTED=false`
+  for an instance that ran already, for a reservation that the start adopted, for a kept
+  lease, and without `--start`. A script that ends only what its run started, and leaves an
+  instance that ran before to the other holders, uses `--end` only when `STARTED` is `true`:
+
+  ```sh
+  if [ "${BANKSMAN_STARTED:-}" = true ]; then
+      banksman_release --end
+  else
+      banksman_release
+  fi
+  ```
 - A preparation of the device that is not an app setup, such as a setting of the system, stays
   in an `on_acquire` hook of the kind. App setup stays in the scripts of the project.
 
@@ -270,8 +283,9 @@ the tests of the project, and put it on `PATH` as `banksman`:
 
 - It appends each call to the file that `BANKSMAN_STUB_LOG` names, one line for each call.
 - `acquire` grants the resource `stub-0` with the lease `stub-lease` and the serial
-  `stub-serial`, and prints `PREVIOUS=other`, or the value of `BANKSMAN_STUB_PREVIOUS`. With
-  `--lease`, it keeps that lease (`KEPT=true`, `PREVIOUS=self`). With `BANKSMAN_STUB_STATUS`
+  `stub-serial`, and prints `PREVIOUS=other`, or the value of `BANKSMAN_STUB_PREVIOUS`, and
+  `STARTED=false`, or the value of `BANKSMAN_STUB_STARTED`. With `--lease`, it keeps that lease
+  (`KEPT=true`, `PREVIOUS=self`, `STARTED=false`). With `BANKSMAN_STUB_STATUS`
   set, for example to 4 for a busy machine, it prints nothing and exits with that status.
 - `run` runs the command after `--` as `banksman run --lease` runs it for a device:
   with `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, and `BANKSMAN_LEASE`, with `stub-serial` in

@@ -1430,6 +1430,9 @@ class _Grant:
     # For each part, whether the instance is as the caller's worktree left it, as far as
     # banksman knows.
     previous: list[bool]
+    # For each part, whether this request started the instance: an emulator that it started, or
+    # a reservation that it created, not one that it adopted.
+    started: list[bool]
 
 
 def _acquire(
@@ -1572,7 +1575,7 @@ def _acquire(
     # A kept remote device that is not connected now is connected again first, so that a
     # request that cannot get it spends no start.
     granted = _reconnect_kept(store, config, granted, found.serials)
-    leases = _prepare(store, config, granted, starts)
+    leases, created = _prepare(store, config, granted, starts)
     reset = [
         lease
         for grant, lease in zip(granted, leases)
@@ -1609,7 +1612,7 @@ def _acquire(
         _left_as_is(grant, lease, holder.owner, config.kinds[lease.kind], boot_id, unmanaged)
         for grant, lease in zip(granted, leases)
     ]
-    return _Grant(store, config, granted, leases, previous)
+    return _Grant(store, config, granted, leases, previous, created)
 
 
 def _left_as_is(
@@ -1794,23 +1797,26 @@ def _choice(candidate: Candidate, config: Config, start: bool) -> Choice:
 
 def _prepare(
     store: Store, config: Config, granted: Sequence[Granted], starts: Collection[str] = ()
-) -> list[Lease]:
+) -> tuple[list[Lease], list[bool]]:
     """Start the instances of the new leases that `starts` names, reset the instances of the
     new leases with the on_acquire hooks of their kinds, and then mark every new lease ready.
+    Return the leases, and for each whether the request started its instance.
 
     A request gets all its parts or none: if a start or a reset fails, or a new lease is lost
     meanwhile, every new lease of the request is given back.
     """
     leases = [grant.lease for grant in granted]
+    started = [False] * len(granted)
     new = [index for index, grant in enumerate(granted) if not grant.kept]
     if all(leases[index].state == READY for index in new):
-        return leases
+        return leases, started
     given_back = "the lease is" if len(granted) == 1 else "the new leases are"
     try:
         for index in new:
             lease = leases[index]
             if lease.resource in starts:
-                leases[index] = lease = _start(store, config, lease, given_back)
+                lease, started[index] = _start(store, config, lease, given_back)
+                leases[index] = lease
             if config.kinds[lease.kind].on_acquire is None:
                 continue
             failure = hooks.reset(config.kinds, lease)
@@ -1838,11 +1844,13 @@ def _prepare(
             if not grant.kept:
                 _give_back(store, grant.lease)
         raise
-    return leases
+    return leases, started
 
 
-def _start(store: Store, config: Config, lease: Lease, given_back: str) -> Lease:
-    """Start the instance of a new booting lease, and return the lease with its serial."""
+def _start(store: Store, config: Config, lease: Lease, given_back: str) -> tuple[Lease, bool]:
+    """Start the instance of a new booting lease. Return the lease with its serial, and whether
+    the start created the instance: a remote device can have a reservation already, which the
+    start adopts."""
     kind = config.kinds[lease.kind]
     assert lease.boot_deadline is not None
     # The on_acquire hook needs its time before the boot deadline too.
@@ -1865,7 +1873,7 @@ def _start(store: Store, config: Config, lease: Lease, given_back: str) -> Lease
             raise BanksmanError(
                 f"cannot start {lease.resource}: {exc}; {given_back} given back"
             ) from None
-        return store.started(lease.resource, lease.lease_id, serial=serial)
+        return store.started(lease.resource, lease.lease_id, serial=serial), True
     clock = console.Clock(store.system.clock(), store.system.wall_clock())
     try:
         started = remote.start(
@@ -1882,9 +1890,10 @@ def _start(store: Store, config: Config, lease: Lease, given_back: str) -> Lease
         raise BanksmanError(
             f"cannot start {lease.resource}: {exc}; {given_back} given back"
         ) from None
-    return store.started(
+    lease = store.started(
         lease.resource, lease.lease_id, handle=started.handle, serial=started.serial
     )
+    return lease, started.created
 
 
 def _claim(store: Store, lease: Lease, serials: Sequence[str]) -> str:
@@ -1963,9 +1972,10 @@ def _print_grant(parts: Sequence[Part], grant: _Grant, as_json: bool) -> None:
                         "accounts": list(each.accounts),
                         "kept": each.kept,
                         "previous": each_previous,
+                        "started": each_started,
                     }
-                    for part, each, lease, serial, each_paid, each_previous in zip(
-                        parts, granted, leases, serials, paid, previous
+                    for part, each, lease, serial, each_paid, each_previous, each_started in zip(
+                        parts, granted, leases, serials, paid, previous, grant.started
                     )
                 ],
             }
@@ -1979,14 +1989,15 @@ def _print_grant(parts: Sequence[Part], grant: _Grant, as_json: bool) -> None:
             ("STATE", leases[0].state),
             ("KEPT", _flag(granted[0].kept)),
             ("PREVIOUS", previous[0]),
+            ("STARTED", _flag(grant.started[0])),
         ]
         lines += [("SERIAL", serials[0])] if serials[0] is not None else []
         lines += [("HANDLE", leases[0].handle)] if leases[0].handle is not None else []
         lines += [("ACCOUNTS", ",".join(granted[0].accounts))] if parts[0].accounts else []
     else:
         lines = []
-        for part, each, lease, serial, each_previous in zip(
-            parts, granted, leases, serials, previous
+        for part, each, lease, serial, each_previous, each_started in zip(
+            parts, granted, leases, serials, previous, grant.started
         ):
             prefix = f"{part.name.upper()}_"  # type: ignore[union-attr]
             lines += [
@@ -1996,6 +2007,7 @@ def _print_grant(parts: Sequence[Part], grant: _Grant, as_json: bool) -> None:
                 (f"{prefix}STATE", lease.state),
                 (f"{prefix}KEPT", _flag(each.kept)),
                 (f"{prefix}PREVIOUS", each_previous),
+                (f"{prefix}STARTED", _flag(each_started)),
             ]
             lines += [(f"{prefix}SERIAL", serial)] if serial is not None else []
             lines += [(f"{prefix}HANDLE", lease.handle)] if lease.handle is not None else []
