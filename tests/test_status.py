@@ -99,6 +99,7 @@ def test_status_shows_every_permitted_resource_also_when_it_is_free(capsys, conf
         "ends": None,
         "facts": {"form": "tablet", "api": 33},
         "lease": None,
+        "started_by": None,
     }
     assert (shown["qa_gone"]["state"], shown["qa_gone"]["present"]) == ("absent", False)
 

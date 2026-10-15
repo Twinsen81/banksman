@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from banksman import fencing
@@ -30,6 +31,16 @@ PID_VARIABLES = {"claude": "CLAUDE_PID"}
 _MAX_PID_DIGITS = 10
 _MAX_GIT_FILE = 4096
 _HEAD_BRANCH = "ref: refs/heads/"
+
+
+@dataclass(frozen=True)
+class StartedBy:
+    """The agent process that started a process outside banksman, such as an emulator."""
+
+    agent: str
+    pid: int
+    # False when the pid variable names an agent process that has ended since.
+    running: bool = True
 
 
 def find_holder(
@@ -156,10 +167,10 @@ def named_agent(
     outer one, and the nearest one runs the command.
     """
     for agent, variable in PID_VARIABLES.items():
-        value = env.get(variable, "")
-        if not (value.isascii() and value.isdigit() and len(value) <= _MAX_PID_DIGITS):
+        pid = _pid_value(env.get(variable, ""))
+        if pid is None:
             continue
-        process = table.get(int(value))
+        process = table.get(pid)
         if (
             process is not None
             and process.pid != caller.pid
@@ -171,6 +182,38 @@ def named_agent(
         ):
             return process.pid, agent
     return None, None
+
+
+def started_by(
+    table: Mapping[int, Process], agents: Sequence[str], process: Process, env: Mapping[str, str]
+) -> StartedBy | None:
+    """Return the agent process that started a process, found as for a caller (see
+    `find_agent`) from `env`, the environment of the process.
+
+    When the pid variable names a known agent whose process no longer runs, the result says that
+    it has ended: the agent ran when it started the process, so a process that has its pid now
+    and started after the process got the pid after the agent ended.
+    """
+    pid, agent = find_agent(table, agents, process.pid, env)
+    if pid is not None and agent is not None:
+        return StartedBy(agent, pid)
+    for agent, variable in PID_VARIABLES.items():
+        named = _pid_value(env.get(variable, ""))
+        if named is None or named <= 1 or agent not in agents:
+            continue
+        now = table.get(named)
+        if now is None or (
+            started_no_later(process.started, now.started)
+            and not started_no_later(now.started, process.started)
+        ):
+            return StartedBy(agent, named, running=False)
+    return None
+
+
+def _pid_value(value: str) -> int | None:
+    if not (value.isascii() and value.isdigit() and len(value) <= _MAX_PID_DIGITS):
+        return None
+    return int(value)
 
 
 def caller_branch(

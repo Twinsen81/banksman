@@ -40,6 +40,12 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
   emulator may not run yet: start it yourself when it does not run. banksman can end an
   emulator that nobody has leased for some time, so use `--start` also for a device that ran
   before.
+- An emulator that you or a script of the project started before you asked for a lease is
+  `unmanaged` in `banksman status`. When status shows it as started by your agent process
+  (`banksman whoami` shows its pid), acquire it, for example with `--where avd=<name>`, and do
+  not start a second one: banksman gives it to your agent process and to no other holder.
+  banksman never ends an emulator that it did not start, also when your session ends, so
+  prefer `--start`.
 - `banksman held` lists the holdings of your agent process, with their labels, lease ids,
   devices, and serials, and the `adb` calls that banksman refused or warned about in the last
   15 minutes. It also lists the holdings and the calls of the other subagents of your session:

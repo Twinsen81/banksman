@@ -1525,13 +1525,17 @@ def _acquire(
     config = load_config()
     check_kinds([clause for part in parts for clause in part.clauses], config)
     machine = Machine()
+    table = machine.process_table()
     holder = find_holder(
-        machine.process_table(),
+        table,
         config.holder,
         issue=issue,
         owner_pid=owner_pid,
         purpose=purpose,
     )
+    # Also when the owner process is another one, such as the process of banksman run: an
+    # unmanaged emulator that the agent process started is not unmanaged for its requests.
+    agent_pid = find_agent(table, config.holder.agents, os.getpid(), os.environ)[0]
     if label is not None and holder.owner_pid is None:
         raise BanksmanError(_no_agent("--holding"))
     give_up = machine.clock() + wait
@@ -1551,10 +1555,17 @@ def _acquire(
             if end.last_use is not None and end.last_use.owner == holder.owner
         }
         looked = machine.clock()
-        found = search(config, load_inventory(), parts, clock=machine.clock, preferred=mine)
+        found = search(
+            config,
+            load_inventory(),
+            parts,
+            clock=machine.clock,
+            preferred=mine,
+            agent_pid=agent_pid,
+        )
         needs = [
             Need(
-                tuple(_choice(candidate, config, start) for candidate in candidates),
+                tuple(_choice(candidate, config, start, agent_pid) for candidate in candidates),
                 part.accounts,
             )
             for part, candidates in zip(parts, found.candidates)
@@ -1850,13 +1861,16 @@ def _some(candidates: Sequence[Candidate], shown: int = 10) -> str:
     return f"{names}, and {more} more" if more > 0 else names
 
 
-def _choice(candidate: Candidate, config: Config, start: bool) -> Choice:
+def _choice(
+    candidate: Candidate, config: Config, start: bool, agent_pid: int | None = None
+) -> Choice:
     kind = config.kinds[candidate.kind]
     # The holder starts an instance that does not run, unless the caller asks banksman with
     # --start and banksman can start the kind. A lease is booting only while banksman starts its
     # instance or the on_acquire hook resets it, so that a caller that dies in the middle loses
     # the lease as soon as it has ended. An instance that banksman did not start can be the
-    # emulator of a person, so a request gets it only when its kind says so.
+    # emulator of a person, so a request gets it only when its kind says so, or when the agent
+    # process of the caller started it.
     return Choice(
         candidate.resource,
         candidate.kind,
@@ -1865,7 +1879,7 @@ def _choice(candidate: Candidate, config: Config, start: bool) -> Choice:
         accounts=candidate.accounts or (),
         start=start and candidate.cold and kind.preset in STARTED,
         paid=candidate.paid,
-        in_use=candidate.unmanaged and kind.unmanaged == SKIP,
+        in_use=candidate.unmanaged_for(agent_pid) and kind.unmanaged == SKIP,
     )
 
 

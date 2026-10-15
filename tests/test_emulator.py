@@ -20,10 +20,11 @@ from helpers import (
     write_config,
 )
 
-from banksman import cli, emulator
+from banksman import android, cli, emulator
 from banksman.cli import main
-from banksman.config import Kind
+from banksman.config import Android, Kind
 from banksman.errors import BanksmanError
+from banksman.identity import StartedBy
 from banksman.inventory import Decisions, Inventory, save_inventory
 from banksman.lease import Holder
 from banksman.store import NotHeld, Store, default_state_dir
@@ -48,11 +49,11 @@ def ports(monkeypatch):
     return taken
 
 
-def configure(config_path, sdk, keys=""):
+def configure(config_path, sdk, keys="", agents=()):
     write_config(
         config_path,
-        f"[holder]\nagents = []\n{sdk.config()}[kinds.emulator]\npreset = \"android-emulator\"\n"
-        f"{keys}",
+        f"[holder]\nagents = {json.dumps(list(agents))}\n{sdk.config()}[kinds.emulator]\n"
+        f'preset = "android-emulator"\n{keys}',
     )
     save_inventory(Inventory(kinds={"emulator": Decisions(allowed=AVDS)}))
     # adb runs, and lists no emulator yet.
@@ -1137,9 +1138,169 @@ def test_an_unmanaged_instance_never_counts_as_the_worktrees_own(capsys, config_
     )
 
 
-def _android(sdk):
-    from banksman.config import Android
+# Emulators that an agent started outside banksman.
 
+# Runs banksman as a command that has left the process tree of its agent, so that only the pid
+# variable names the agent: the init process adopts it when the process between them has ended.
+AS_AGENT = """
+import os, subprocess, sys, time
+# Before the fork: the parent can end before the child runs.
+parent = os.getpid()
+if os.fork():
+    os._exit(0)
+deadline = time.monotonic() + 10
+while os.getppid() == parent:
+    if time.monotonic() > deadline:
+        sys.exit("the process between them did not end")
+    time.sleep(0.01)
+status = subprocess.run([sys.executable, "-m", "banksman", *sys.argv[1:]]).returncode
+print(f"EXIT={status}", flush=True)
+"""
+
+
+@pytest.fixture
+def agent(tmp_path):
+    """A process whose program is named like the agent claude, started before the emulators."""
+    if not os.path.exists("/bin/sleep"):
+        pytest.skip("needs /bin/sleep")
+    program = tmp_path / "bin" / "claude"
+    program.parent.mkdir()
+    program.symlink_to("/bin/sleep")
+    process = subprocess.Popen([str(program), "120"])
+    yield process
+    process.kill()
+    process.wait()
+
+
+def as_agent(agent, *arguments):
+    """Run banksman for the agent process, and return its exit status, the KEY=value lines that
+    it printed, and its standard error."""
+    result = subprocess.run(
+        [sys.executable, "-c", AS_AGENT, *arguments],
+        env={**os.environ, "PYTHONPATH": SRC, "CLAUDE_PID": str(agent.pid)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    *lines, last = result.stdout.splitlines()
+    values = dict(line.split("=", 1) for line in lines if "=" in line)
+    return int(last.removeprefix("EXIT=")), values, result.stderr
+
+
+def start_for(sdk, agent, avd="qa_phone", port=5556):
+    pid = sdk.start_emulator_outside(avd, port, {**os.environ, "CLAUDE_PID": str(agent.pid)})
+    wait_for(lambda: listed(sdk, f"emulator-{port}"))
+    return pid
+
+
+def test_the_agent_that_started_an_unmanaged_emulator_gets_it(capsys, config_path, sdk, agent):
+    configure(config_path, sdk, agents=["claude"])
+    pid = start_for(sdk, agent)
+    # Any other caller waits for it, as for the emulator of a person.
+    status, _, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 4
+    assert "qa_phone runs, but banksman did not start it" in err
+    status, values, err = as_agent(agent, "acquire", "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert (values["SERIAL"], values["STATE"], values["STARTED"]) == (
+        "emulator-5556",
+        "ready",
+        "false",
+    )
+    # A person or another program could have used it before.
+    assert values["PREVIOUS"] == "other"
+    assert leases()["qa_phone"].owner_pid == agent.pid
+    assert len(sdk.emulator_calls()) == 1
+    # At the end of the lease, banksman records it as an emulator that ran under a lease, so
+    # every request can get it, and the reaper never ends it.
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    record = known()["qa_phone"]
+    assert (record.pid, record.created) == (pid, False)
+    assert states(capsys)["qa_phone"] == "free"
+    status, again, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert (status, again["SERIAL"], again["STARTED"]) == (0, "emulator-5556", "false"), err
+    assert len(sdk.emulator_calls()) == 1
+
+
+def test_a_run_of_the_agent_gets_the_emulator_that_the_agent_started(config_path, sdk, agent):
+    # The owner process of the lease is the run, and the run's agent started the emulator.
+    configure(config_path, sdk, agents=["claude"])
+    pid = start_for(sdk, agent)
+    command = [sys.executable, "-c", "import os; print('GOT=' + os.environ['ANDROID_SERIAL'])"]
+    status, values, err = as_agent(agent, "run", "--where", "avd=qa_phone", "--", *command)
+    assert (status, values["GOT"]) == (0, "emulator-5556"), err
+    assert known()["qa_phone"].pid == pid
+
+
+def test_status_shows_the_agent_that_started_an_unmanaged_emulator(
+    capsys, config_path, sdk, agent
+):
+    configure(config_path, sdk, agents=["claude"])
+    pid = start_for(sdk, agent)
+    capsys.readouterr()
+    assert main(["status", "--json"]) == 0
+    shown = {each["resource"]: each for each in json.loads(capsys.readouterr().out)["resources"]}
+    assert shown["qa_phone"]["state"] == "unmanaged"
+    assert shown["qa_phone"]["started_by"] == {"agent": "claude", "pid": agent.pid, "running": True}
+    assert shown["qa_tablet"]["started_by"] is None
+    assert main(["status"]) == 0
+    rows = {row["RESOURCE"]: row for row in table_rows(capsys.readouterr().out)}
+    assert rows["qa_phone"]["HOLDER"] == f"started by claude (pid {agent.pid})"
+    agent.kill()
+    agent.wait()
+    assert main(["status"]) == 0
+    rows = {row["RESOURCE"]: row for row in table_rows(capsys.readouterr().out)}
+    assert (rows["qa_phone"]["STATE"], rows["qa_phone"]["HOLDER"]) == (
+        "unmanaged",
+        f"started by claude (pid {agent.pid}), which has ended",
+    )
+    # Nobody gets it now, and banksman does not end an emulator that it did not start.
+    status, _, err = acquire(capsys, "--where", "avd=qa_phone")
+    assert status == 4, err
+    assert main(["reap"]) == 0
+    assert runs(pid)
+
+
+def test_an_agent_without_the_pid_variable_leaves_its_emulator_unmanaged(
+    capsys, config_path, sdk, agent
+):
+    configure(config_path, sdk, agents=["claude"])
+    sdk.start_emulator_outside("qa_phone", 5556, dict(os.environ))
+    wait_for(lambda: listed(sdk, "emulator-5556"))
+    assert states(capsys)["qa_phone"] == "unmanaged"
+    status, _, err = as_agent(agent, "acquire", "--where", "avd=qa_phone")
+    assert status == 4, err
+
+
+def test_discovery_reads_the_environment_only_of_an_emulator_that_banksman_does_not_know(
+    monkeypatch, system
+):
+    avds = ("qa_phone", "qa_tablet", "qa_watch")
+
+    def emulators(settings, accounts):
+        return {"schema": 1, "instances": [{"name": name, "facts": {}} for name in avds]}
+
+    monkeypatch.setattr(android, "emulators", emulators)
+    system.spawn(300, program="/usr/local/bin/claude")
+    emulators = {600: "qa_phone", 700: "qa_tablet", 800: "qa_watch", 801: "qa_watch"}
+    for pid, avd in emulators.items():
+        system.spawn(pid)
+        system.arguments[pid] = ("/sdk/emulator/emulator", "-avd", avd)
+        system.environments[pid] = {"CLAUDE_PID": "300"}
+    system.processes.update({300: "1000", **dict.fromkeys(emulators, "2000")})
+    with emulator.changing(kind(), system) as record:
+        record["qa_tablet"] = emulator.Known("qa_tablet", 700, "2000", system.boot, False, 0.0)
+    _, unmanaged = emulator.discover(kind(), Android(), agents=("claude",), system=system)
+    # With two emulators of qa_watch, banksman cannot tell which one adb gives.
+    assert unmanaged == {"qa_phone": StartedBy("claude", 300), "qa_watch": None}
+    assert system.environments_read == [600]
+    system.environments_read.clear()
+    _, unmanaged = emulator.discover(kind(), Android(), system=system)
+    assert (unmanaged, system.environments_read) == ({"qa_phone": None, "qa_watch": None}, [])
+
+
+def _android(sdk):
     return Android(sdk=sdk.sdk, avd_home=sdk.avd_home)
 
 

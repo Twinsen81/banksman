@@ -33,6 +33,9 @@ class FakeSystem:
         self.groups: dict[int, int] = {}
         self.programs: dict[int, str] = {}
         self.arguments: dict[int, tuple[str, ...]] = {}
+        self.environments: dict[int, dict[str, str]] = {}
+        # The processes whose environment banksman read, in order.
+        self.environments_read: list[int] = []
         self.ignores: dict[int, set[int]] = {}
         self.signals: list[tuple[str, int, int]] = []
 
@@ -68,6 +71,12 @@ class FakeSystem:
             pid: replace(process, arguments=self.arguments.get(pid, ()))
             for pid, process in self.process_table().items()
         }
+
+    def environment(self, pid):
+        self.environments_read.append(pid)
+        if pid not in self.processes:
+            return None
+        return dict(self.environments.get(pid, {}))
 
     def signal(self, pid: int, signum: int) -> None:
         self.signals.append(("pid", pid, signum))
@@ -346,6 +355,26 @@ class FakeSdk:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+
+    def start_emulator_outside(self, avd: str, port: int, env) -> int:
+        """Start a fake emulator with this environment as an agent does in the background, and
+        return its pid: the process between them ends, so the init process adopts it."""
+        launcher = (
+            "import subprocess, sys\n"
+            "process = subprocess.Popen(sys.argv[1:], stdout=subprocess.DEVNULL,"
+            " stderr=subprocess.DEVNULL, start_new_session=True)\n"
+            "print(process.pid)\n"
+        )
+        command = [str(self.sdk / "emulator" / "emulator"), "-avd", avd, "-port", str(port)]
+        result = subprocess.run(
+            [sys.executable, "-c", launcher, *command],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        return int(result.stdout)
 
     def stop_emulators(self) -> None:
         """End the fake emulators of this SDK that still run: the test started them, also

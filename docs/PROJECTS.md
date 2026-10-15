@@ -273,7 +273,12 @@ A script that starts the emulator itself, as without `--start`, keeps working: w
 ends, banksman records the emulator that runs, so the next request can get it. But an emulator
 that a person or a script starts outside a lease is `unmanaged`, and a request does not get it
 (DESIGN.md, section 6). `banksman status` shows it. An operator who shares such emulators on
-purpose sets `unmanaged = "grant"` for the kind.
+purpose sets `unmanaged = "grant"` for the kind. One request gets such an emulator: a request
+of the agent process that started it, when banksman finds that agent, as it finds the agent of
+a caller (DESIGN.md, section 9). So a script that starts the emulator first and asks for a
+lease after that gets its own emulator, and banksman does not start a second AVD. `status`
+shows the agent in the HOLDER column. Move such a script to `--start` all the same: banksman
+does not end the emulator when the agent ends without a lease.
 
 ## Testing the scripts both ways
 

@@ -24,6 +24,7 @@ from typing import Any
 from banksman import android, emulator, hooks, remote
 from banksman.config import ANDROID_DEVICE, ANDROID_EMULATOR, ANDROID_REMOTE, Config, Kind
 from banksman.errors import BanksmanError
+from banksman.identity import StartedBy
 from banksman.lease import RESOURCE_NAME, SerialSeen
 from banksman.sanitize import clean
 
@@ -67,6 +68,8 @@ class Instance:
     # a person or a program outside banksman uses it. Only the presets that start their
     # instances know it.
     unmanaged: bool = False
+    # For an unmanaged emulator, the agent process that started it, when banksman finds one.
+    started_by: StartedBy | None = None
 
 
 @dataclass(frozen=True)
@@ -91,7 +94,9 @@ def discover(kind: Kind, config: Config, *, accounts: bool = True) -> Found:
     """
     try:
         if kind.preset == ANDROID_EMULATOR:
-            document, unmanaged = emulator.discover(kind, config.android, accounts=accounts)
+            document, unmanaged = emulator.discover(
+                kind, config.android, agents=config.holder.agents, accounts=accounts
+            )
             return _unmanaged(parse(kind.name, document, paid=kind.paid), unmanaged)
         if kind.preset == ANDROID_DEVICE:
             document = android.devices(config.android, accounts=accounts)
@@ -99,7 +104,8 @@ def discover(kind: Kind, config: Config, *, accounts: bool = True) -> Found:
         if kind.preset == ANDROID_REMOTE:
             document, shown = remote.discover(kind, config.android, accounts=accounts)
             found = _unmanaged(
-                parse(kind.name, document, paid=kind.paid), remote.unmanaged(kind, document)
+                parse(kind.name, document, paid=kind.paid),
+                dict.fromkeys(remote.unmanaged(kind, document)),
             )
             shown_notes = tuple(note_text(note) for note in shown)
             return replace(found, notes=(*shown_notes, *found.notes), shown=shown_notes)
@@ -115,9 +121,11 @@ def discover(kind: Kind, config: Config, *, accounts: bool = True) -> Found:
     return parse(kind.name, document, paid=kind.paid)
 
 
-def _unmanaged(found: Found, names: set[str]) -> Found:
+def _unmanaged(found: Found, unmanaged: Mapping[str, StartedBy | None]) -> Found:
     instances = tuple(
-        replace(instance, unmanaged=True) if instance.name in names else instance
+        replace(instance, unmanaged=True, started_by=unmanaged[instance.name])
+        if instance.name in unmanaged
+        else instance
         for instance in found.instances
     )
     return replace(found, instances=instances)

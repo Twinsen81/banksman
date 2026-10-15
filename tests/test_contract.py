@@ -25,6 +25,7 @@ FREE = {
     "ends": None,
     "facts": {},
     "lease": None,
+    "started_by": None,
 }
 
 
@@ -52,6 +53,9 @@ def test_the_check_looks_into_arrays_and_objects():
 def test_the_check_allows_null_and_optional_fields_where_the_shape_does():
     shapes.check("status", {"schema": 6, "resources": [FREE], "notes": []})
     shapes.check("status", {"schema": 6, "resources": [{**FREE, "error": "bad"}], "notes": []})
+    started_by = {"agent": "claude", "pid": 4242, "running": False}
+    unmanaged = {**FREE, "state": "unmanaged", "started_by": started_by}
+    shapes.check("status", {"schema": 6, "resources": [unmanaged], "notes": []})
 
 
 def test_every_json_document_that_a_command_prints_is_checked(monkeypatch):

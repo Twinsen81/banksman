@@ -65,6 +65,10 @@ class System(Protocol):
     def commands(self) -> dict[int, Process]:
         """Map every process that runs now, zombies excluded, to its process and command line."""
 
+    def environment(self, pid: int) -> dict[str, str] | None:
+        """Return the environment of a process, or None when it cannot be read, for example for
+        a process of another user."""
+
     def signal(self, pid: int, signum: int) -> None:
         """Send a signal to one process."""
 
@@ -113,6 +117,19 @@ class Machine:
         table = _commands_from_proc() if _LINUX else _commands_from_ps()
         _check_visible(table)
         return table
+
+    def environment(self, pid: int) -> dict[str, str] | None:
+        if _LINUX:
+            try:
+                raw = Path(f"/proc/{pid}/environ").read_bytes()
+            except OSError:
+                return None
+            return _variables(raw.split(b"\0"))
+        try:
+            data = _darwin_procargs()(pid)
+        except MachineError:
+            return None
+        return None if data is None else _procenv(data)
 
     def signal(self, pid: int, signum: int) -> None:
         _check_target(pid)
@@ -298,16 +315,17 @@ def _commands_from_ps() -> dict[int, Process]:
     # ps joins the arguments of a command line with spaces, so a shell command such as
     # zsh -c "emulator -avd x" would look like the emulator itself. The kernel gives each
     # argument as it is.
-    arguments_of = _darwin_arguments()
+    procargs = _darwin_procargs()
     table = {}
     for pid, process in _table_from_ps().items():
-        table[pid] = replace(process, arguments=arguments_of(pid))
+        data = procargs(pid)
+        table[pid] = replace(process, arguments=() if data is None else _procargs(data))
     return table
 
 
-def _darwin_arguments() -> Callable[[int], tuple[str, ...]]:
-    """Return a function that reads the arguments of a process with sysctl KERN_PROCARGS2, or
-    an empty tuple when it cannot, for example for a process of another user."""
+def _darwin_procargs() -> Callable[[int], bytes | None]:
+    """Return a function that reads the value of sysctl KERN_PROCARGS2 for a process, or None
+    when it cannot, for example for a process of another user."""
     import ctypes  # Not at the top: the adb guard imports this module for every adb call.
 
     libc = ctypes.CDLL(None, use_errno=True)
@@ -328,29 +346,61 @@ def _darwin_arguments() -> Callable[[int], tuple[str, ...]]:
         raise MachineError(f"cannot read the arguments of processes. {OUTSIDE_SANDBOX}")
     buffer = ctypes.create_string_buffer(largest.value)
 
-    def arguments_of(pid: int) -> tuple[str, ...]:
+    def procargs(pid: int) -> bytes | None:
         name = (ctypes.c_int * 3)(_CTL_KERN, _KERN_PROCARGS2, pid)
         size = ctypes.c_size_t(largest.value)
         if sysctl(name, 3, buffer, ctypes.byref(size), None, 0) != 0 or size.value < 4:
-            return ()
-        return _procargs(ctypes.string_at(buffer, size.value))
+            return None
+        return ctypes.string_at(buffer, size.value)
 
-    return arguments_of
+    return procargs
 
 
 def _procargs(data: bytes) -> tuple[str, ...]:
     """Return the arguments in the value of KERN_PROCARGS2: the number of arguments, the path of
     the executable and its padding, then each argument ended by a NUL, then the environment."""
+    split = _procargs_split(data)
+    if split is None:
+        return ()
+    count, parts = split
+    return tuple(part.decode(errors="replace") for part in parts[:count])
+
+
+def _procenv(data: bytes) -> dict[str, str]:
+    """Return the environment in the value of KERN_PROCARGS2: the strings after the arguments, up
+    to the first empty one. Strings of the system for the loader, such as executable_path, come
+    after it. macOS gives a platform binary, such as /bin/zsh, no environment here."""
+    split = _procargs_split(data)
+    if split is None:
+        return {}
+    count, parts = split
+    rest = parts[count:]
+    end = rest.index(b"") if b"" in rest else len(rest)
+    return _variables(rest[:end])
+
+
+def _procargs_split(data: bytes) -> tuple[int, list[bytes]] | None:
     count = int.from_bytes(data[:4], sys.byteorder)
     rest = data[4:]
     end = rest.find(b"\0")
     if end < 0:
-        return ()
+        return None
     rest = rest[end:].lstrip(b"\0")
     parts = rest.split(b"\0")
+    # A value that has fewer arguments than it says is not trusted.
     if count > len(parts):
-        return ()
-    return tuple(part.decode(errors="replace") for part in parts[:count])
+        return None
+    return count, parts
+
+
+def _variables(parts: Iterable[bytes]) -> dict[str, str]:
+    # As getenv, the first value of a name counts.
+    found: dict[str, str] = {}
+    for part in parts:
+        name, equals, value = part.partition(b"=")
+        if name and equals:
+            found.setdefault(name.decode(errors="replace"), value.decode(errors="replace"))
+    return found
 
 
 def _ps(arguments: list[str]) -> str:
