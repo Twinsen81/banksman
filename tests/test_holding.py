@@ -6,14 +6,16 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 
 import pytest
 from helpers import SRC, age_lease, edit_lease, hook, table_rows, write_config
 
-from banksman import __version__, cli
+from banksman import __version__, cli, console
 from banksman.cli import main
 from banksman.config import parse_duration
 from banksman.errors import BanksmanError
+from banksman.history import GUARD, NOT_LEASED, OTHER_HOLDER, REFUSED, WARNED, Event, History
 from banksman.inventory import Decisions, Inventory, save_inventory
 from banksman.lease import Holder
 from banksman.store import Choice, Need, Store
@@ -285,14 +287,15 @@ def test_held_lists_the_holdings_of_the_agent_process(capsys, config_path, other
     _, unlabelled, _ = acquire(capsys, "--where", "form=phone", *ME)
     acquire(capsys, "--holding", "tests", "--where", "form=phone", "--owner-pid", str(other_agent))
     held = leases()
-    assert main(["held", *ME]) == 0
-    rows = table_rows(capsys.readouterr().out)
+    shown, calls = held_text(capsys, *ME)
+    rows = table_rows(shown)
     assert [(row["LABEL"], row["RESOURCE"], row["SERIAL"]) for row in rows] == [
         ("tests", "build-0", "-"),
         ("tests", "qa_tablet", "-"),
         ("-", "qa_phone", "emulator-5554"),
     ]
     assert rows[2]["LEASE"] == unlabelled["LEASE"]
+    assert calls == NO_CALLS
     assert main(["held", "--json", *ME]) == 0
     shown = json.loads(capsys.readouterr().out)
     assert shown["owner_pid"] == os.getpid()
@@ -305,16 +308,161 @@ def test_held_lists_the_holdings_of_the_agent_process(capsys, config_path, other
         "serial": None,
         "handle": None,
     }
+    assert shown["guard"] == []
     assert main(["release", "--all", *ME]) == 0
     capsys.readouterr()
-    assert main(["held", *ME]) == 0
-    assert capsys.readouterr().out == f"Process {os.getpid()} holds no lease.\n"
+    assert held_text(capsys, *ME) == (f"Process {os.getpid()} holds no lease.", NO_CALLS)
 
 
 def test_held_without_an_agent_process_is_an_error(capsys, config_path):
     configure(config_path)
     assert main(["held"]) == 1
     assert "held needs the agent process" in capsys.readouterr().err
+
+
+# The adb calls that the adb guard refused or warned about.
+
+NO_CALLS = f"No refused or warned adb calls of process {os.getpid()} in the last 15 minutes.\n"
+
+
+def held_text(capsys, *arguments):
+    """Return what held printed: the leases, and the adb calls that the adb guard refused."""
+    assert main(["held", *arguments]) == 0
+    shown, calls = capsys.readouterr().out.split("\n\n")
+    return shown, calls
+
+
+def guard_call(log_path, ago, resource, *, owner_pid=None, **fields):
+    """Add a guard event of this process as the agent process to the log, `ago` seconds ago."""
+    event = Event(
+        time.time() - ago,
+        GUARD,
+        resource,
+        owner=OWNER,
+        owner_pid=os.getpid() if owner_pid is None else owner_pid,
+        agent="claude",
+        **{"action": REFUSED, "reason": OTHER_HOLDER, "command": "shell", **fields},
+    )
+    History(log_path).append(event)
+
+
+def test_held_shows_the_adb_calls_of_its_agent_process_that_the_guard_refused(
+    capsys, config_path, log_path, other_agent
+):
+    configure(config_path)
+    them = ["--owner-pid", str(other_agent)]
+    _, theirs, _ = acquire(capsys, "--where", "form=phone", "--for", "verify the layout", *them)
+    device = {"serial": "emulator-5554", "kind": "emulator", "state": "ready"}
+    guard_call(log_path, 120, "qa_phone", lease_id=theirs["LEASE"], **device)
+    guard_call(log_path, 60, "qa_phone", lease_id=theirs["LEASE"], command="install", **device)
+    guard_call(
+        log_path, 30, "emulator-5556", serial="emulator-5556", action=WARNED, reason=NOT_LEASED
+    )
+    guard_call(log_path, 20, "qa_tablet", lease_id="0123456789abcdef", state="ready")
+    # A call before the window, and a call of another agent process.
+    guard_call(log_path, 16 * 60, "qa_phone2", serial="emulator-5556", reason=NOT_LEASED)
+    guard_call(log_path, 10, "qa_phone2", owner_pid=other_agent, reason=NOT_LEASED)
+    shown, calls = held_text(capsys, *ME)
+    assert shown == f"Process {os.getpid()} holds no lease."
+    note, table = calls.split("\n", 1)
+    assert note.startswith("The adb guard refused or warned about these adb calls of process")
+    assert "do not run it again" in note
+    rows = table_rows(table)
+    shown = [(row["COUNT"], row["RESOURCE"], row["DETAILS"], row["OTHER HOLDER"]) for row in rows]
+    assert shown == [
+        (
+            "2",
+            "qa_phone",
+            "refused adb install, shell on emulator-5554: another holder leases the device, and"
+            " the lease is ready",
+            # The holder as status shows it, with the purpose, which is untrusted text.
+            console.holder_label(leases()["qa_phone"]),
+        ),
+        (
+            "1",
+            "emulator-5556",
+            "warned adb shell on emulator-5556: no lease of the caller has the device; a strict"
+            " adb guard refuses the call",
+            "-",
+        ),
+        (
+            "1",
+            "qa_tablet",
+            "refused adb shell: another holder leases the device, and the lease is ready",
+            "its lease has ended",
+        ),
+    ]
+    assert "verify the layout" in rows[0]["OTHER HOLDER"]
+    assert re.fullmatch(r"[0-9]{2}:[0-9]{2}:[0-9]{2}", rows[0]["LAST"])
+    assert main(["held", "--json", *ME]) == 0
+    printed = capsys.readouterr().out
+    assert "verify the layout" not in printed
+    groups = json.loads(printed)["guard"]
+    shown = [(each["count"], each["action"], each["resource"], each["commands"]) for each in groups]
+    assert shown == [
+        (2, REFUSED, "qa_phone", ["install", "shell"]),
+        (1, WARNED, "emulator-5556", ["shell"]),
+        (1, REFUSED, "qa_tablet", ["shell"]),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("agent", "arguments", "shown"),
+    [
+        # The session of the caller's agent process.
+        ("claude", [], ["emulator-5556", "emulator-5558"]),
+        # An agent without a session.
+        ("codex", [], ["emulator-5558"]),
+        # A process that the caller names: banksman does not know its session.
+        ("claude", ME, ["emulator-5554", "emulator-5556", "emulator-5558"]),
+    ],
+)
+def test_held_leaves_out_the_calls_of_an_earlier_agent_process_with_the_same_pid(
+    capsys, config_path, log_path, monkeypatch, agent, arguments, shown
+):
+    configure(config_path)
+    monkeypatch.setattr(cli, "find_agent", lambda table, agents, pid: (os.getpid(), agent))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "session-2")
+    # The system gave the pid of an earlier agent process, of session-1, to this one.
+    guard_call(log_path, 300, "emulator-5554", session="session-1", reason=NOT_LEASED)
+    guard_call(log_path, 200, "emulator-5556", session="session-2", reason=NOT_LEASED)
+    guard_call(log_path, 100, "emulator-5558", reason=NOT_LEASED)
+    _, calls = held_text(capsys, *arguments)
+    assert [row["RESOURCE"] for row in table_rows(calls.split("\n", 1)[1])] == shown
+
+
+def test_held_lists_the_leases_also_when_the_log_cannot_be_read(capsys, config_path, log_path):
+    configure(config_path)
+    acquire(capsys, "--where", "form=phone", *ME)
+    guard_call(log_path, 10, "qa_phone2", reason=NOT_LEASED)
+    log_path.chmod(0o666)
+    shown, calls = held_text(capsys, *ME)
+    assert [row["RESOURCE"] for row in table_rows(shown)] == ["qa_phone"]
+    assert calls.startswith("note: the log cannot be read, so the guard events are not shown: ")
+    assert main(["held", "--json", *ME]) == 0
+    assert json.loads(capsys.readouterr().out)["guard"] is None
+
+
+def test_status_of_an_agent_points_to_held_for_its_refused_calls(
+    capsys, config_path, log_path, monkeypatch
+):
+    configure(config_path)
+    agent = (os.getpid(), "codex")
+    monkeypatch.setattr(cli, "find_agent", lambda table, agents, pid: agent)
+    assert main(["status"]) == 0
+    assert "adb guard" not in capsys.readouterr().out
+    guard_call(log_path, 10, "qa_phone2", reason=NOT_LEASED)
+    assert main(["status"]) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        "note: the adb guard refused or warned about adb calls of your agent process in the last"
+        " 15 minutes: banksman held shows them"
+    )
+    assert main(["status", "--json"]) == 0
+    assert "adb guard" not in capsys.readouterr().out
+    # A person: no agent process is above the caller.
+    agent = (None, None)
+    assert main(["status"]) == 0
+    assert "adb guard" not in capsys.readouterr().out
 
 
 def test_status_shows_the_label_only_with_verbose(capsys, config_path):
@@ -394,6 +542,8 @@ def test_agent_guide_prints_a_skill_for_the_installed_version(capsys):
     assert "`PREVIOUS=self` says that your worktree used the device last" in guide
     # It says when the agent ends what it started.
     assert "`STARTED=true` says that this request started the device" in guide
+    # It says where the agent finds a refusal of the adb guard that a script hid.
+    assert "run `banksman held` first" in guide
 
 
 def test_the_guide_waits_less_than_the_time_limit_of_an_agent(capsys):

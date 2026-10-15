@@ -54,16 +54,21 @@ def find_holder(
         )
     if issue is None:
         issue = issue_of(rules, branch(owner), owner.name)
-    variable = SESSION_VARIABLES.get(agent or "")
-    session = (os.environ if env is None else env).get(variable) if variable else None
     return Holder(
         owner=str(owner),
         owner_pid=agent_pid if owner_pid is None else owner_pid,
         issue=issue,
         agent=agent,
-        session=session if session and SESSION.fullmatch(session) else None,
+        session=agent_session(agent, os.environ if env is None else env),
         purpose=None if purpose is None else purpose_text(purpose),
     )
+
+
+def agent_session(agent: str | None, env: Mapping[str, str]) -> str | None:
+    """Return the id of the session that the environment gives for an agent, when it is valid."""
+    variable = SESSION_VARIABLES.get(agent or "")
+    session = env.get(variable) if variable else None
+    return session if session and SESSION.fullmatch(session) else None
 
 
 def worktree(directory: Path) -> Path:

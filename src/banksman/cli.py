@@ -48,8 +48,8 @@ from banksman.discovery import (
     serials_seen,
 )
 from banksman.errors import BanksmanError
-from banksman.history import EVENTS, Event, History
-from banksman.identity import find_agent, find_holder
+from banksman.history import EVENTS, GUARD, Event, History, LogError
+from banksman.identity import agent_session, find_agent, find_holder
 from banksman.inventory import (
     Decisions,
     Inventory,
@@ -191,7 +191,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     held = commands.add_parser(
         "held",
-        help="list the held leases of this agent process, with their labels and lease ids",
+        help="list the held leases of this agent process, with their labels and lease ids, and"
+        " its adb calls that the adb guard refused or warned about in the last 15 minutes",
         allow_abbrev=False,
     )
     held.add_argument(
@@ -900,14 +901,26 @@ def _status_text(status: _Status) -> str:
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
-    status = _status(load_config())
+    config = load_config()
+    status = _status(config)
     if args.json:
         shown = console.status_json(
             status.resources, status.notes, status.clock, status.running, verbose=args.verbose
         )
         _print_json({"schema": OUTPUT_SCHEMA, **shown})
-    else:
-        print(_status_text(status))
+        return 0
+    print(_status_text(status))
+    # An agent often runs status when a script failed. The calls are its own, so held shows
+    # them, and status only points there; the JSON stays the same for every caller.
+    with contextlib.suppress(BanksmanError, OSError):
+        owner, agent = find_agent(Machine().process_table(), config.holder.agents, os.getpid())
+        if owner is not None and _guard_calls(
+            owner, status.clock.wall, agent_session(agent, os.environ)
+        ):
+            print(
+                "note: the adb guard refused or warned about adb calls of your agent process in"
+                f" the last {GUARD_WINDOW // 60} minutes: banksman held shows them"
+            )
     return 0
 
 
@@ -1004,7 +1017,12 @@ def _cmd_whoami(args: argparse.Namespace) -> int:
 def _cmd_held(args: argparse.Namespace) -> int:
     config = load_config()
     store, _ = _reaped_store(config)
-    owner = _owner_process(config, args.owner_pid)
+    session = None
+    if args.owner_pid is None:
+        owner, agent = find_agent(Machine().process_table(), config.holder.agents, os.getpid())
+        session = agent_session(agent, os.environ)
+    else:
+        owner = args.owner_pid
     if owner is None:
         raise BanksmanError("held needs the agent process, and none was found: pass --owner-pid")
     # The leases of one holding are next to each other, and the holdings with a label first.
@@ -1012,6 +1030,15 @@ def _cmd_held(args: argparse.Namespace) -> int:
         store.held_by(owner),
         key=lambda lease: (lease.label is None, lease.label or "", lease.holding, lease.resource),
     )
+    calls: list[list[Event]] | None = None
+    problem = None
+    try:
+        # banksman does not know the session of a process that the caller names.
+        calls = _guard_calls(
+            owner, store.system.wall_clock(), session, by_session=args.owner_pid is None
+        )
+    except (LogError, OSError) as exc:
+        problem = exc
     if args.json:
         _print_json(
             {
@@ -1029,25 +1056,68 @@ def _cmd_held(args: argparse.Namespace) -> int:
                     }
                     for lease in leases
                 ],
+                # Null when the log cannot be read.
+                "guard": None if calls is None else [console.count_json(group) for group in calls],
             }
         )
         return 0
     if not leases:
         print(f"Process {owner} holds no lease.")
-        return 0
-    rows = [
-        [
-            lease.label or console.NONE,
-            lease.lease_id,
-            lease.resource,
-            lease.kind,
-            lease.state,
-            lease.serial or console.NONE,
+    else:
+        rows = [
+            [
+                lease.label or console.NONE,
+                lease.lease_id,
+                lease.resource,
+                lease.kind,
+                lease.state,
+                lease.serial or console.NONE,
+            ]
+            for lease in leases
         ]
-        for lease in leases
-    ]
-    _print_table(["LABEL", "LEASE", "RESOURCE", "KIND", "STATE", "SERIAL"], rows)
+        _print_table(["LABEL", "LEASE", "RESOURCE", "KIND", "STATE", "SERIAL"], rows)
+    window = f"{GUARD_WINDOW // 60} minutes"
+    print()
+    if calls is None:
+        print(clean(f"note: the log cannot be read, so the guard events are not shown: {problem}"))
+    elif not calls:
+        print(f"No refused or warned adb calls of process {owner} in the last {window}.")
+    else:
+        print(
+            f"The adb guard refused or warned about these adb calls of process {owner} in the last"
+            f" {window}. A refused call did not run: do not run it again, and use a device of your"
+            " own holding."
+        )
+        by_id = {lease.lease_id: lease for lease in store.snapshot().leases}
+        _print_table(console.GUARD_HEADER, console.guard_rows(calls, by_id))
     return 0
+
+
+# `held` shows the adb calls of this time that the adb guard refused or warned about. The events
+# carry wall-clock time, and the start of a process has another form of time, so a window is
+# simpler than the events since the start of the agent process.
+GUARD_WINDOW = 15 * 60
+
+
+def _guard_calls(
+    owner: int, now: float, session: str | None, *, by_session: bool = True
+) -> list[list[Event]]:
+    """Return the guard events of an agent process from the last GUARD_WINDOW, in groups.
+
+    The events count by the pid of the agent process. A pid that the system gave to a new agent
+    process must not show the calls of the earlier one, so with `by_session`, an event with a
+    session counts only when it is `session`, the session of the agent process.
+    """
+    since = now - GUARD_WINDOW
+    return console.groups(
+        [
+            event
+            for event in History(default_log_path()).tail(GUARD)
+            if event.at >= since
+            and event.owner_pid == owner
+            and (not by_session or event.session is None or event.session == session)
+        ]
+    )
 
 
 def _cmd_agent_guide(args: argparse.Namespace) -> int:

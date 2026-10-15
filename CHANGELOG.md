@@ -381,6 +381,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   started with `release --end`. The helper of a project sets `BANKSMAN_STARTED`, and the stub
   prints `STARTED=false`, or the value of `BANKSMAN_STUB_STARTED`. The guide for agents names
   the key. The lease schema and the output schema do not change.
+- `banksman held` now also shows the adb calls of the agent process from the last 15 minutes
+  that the adb guard refused or warned about, so that an agent finds a refusal that a script
+  hid, for example a script that drops the standard error of adb. It groups them as
+  `log --count` does: how many, the time of the last one, the resource, the details as `log`
+  shows them, and, for the device of another holder, that holder as `status` shows it, or that
+  its lease has ended. It finds them by the pid of the agent process and, for an event with a
+  session, by the session too, so that a pid that the system gave to a new agent process does
+  not show the calls of the earlier one; with `--owner-pid`, the pid alone counts. It reads
+  only the last megabyte of the log. `held --json` has the groups in the new field `guard`, with
+  the fields of `log --count --json`, or `null` when the log cannot be read. A guard event now
+  records the lease id of the lease of the device. When an agent process has such calls,
+  `status` shows a note that points to `held`. The guide for agents tells an agent to run
+  `banksman held` first when a device command or a script fails for a reason that it does not
+  explain. The lease schema and the output schema do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

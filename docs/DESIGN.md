@@ -1025,9 +1025,10 @@ agent, through its own agent process.
   id, and otherwise starts a holding with the label. `run`, `touch`, and `release` take
   `--holding` instead of `--lease`; `run --holding` runs the command under every lease of the
   holding, or under those that `--resource` names (section 4). `banksman held` lists the held leases of the agent process, with
-  their labels, lease ids, resources, and serials. The label is looked up under the lock of the
-  lease store, so two requests of one agent process with the same label never start two
-  holdings.
+  their labels, lease ids, resources, and serials, and the adb calls of the agent process that
+  the adb guard refused or warned about in the last 15 minutes (section 12). The label is looked
+  up under the lock of the lease store, so two requests of one agent process with the same label
+  never start two holdings.
 - The caller chooses the label, and banksman does not derive it. banksman cannot tell the
   subagents of one session apart: in Claude Code and in Codex, they run their commands in one
   agent process (section 17). So two subagents that give the same label share one holding,
@@ -1388,8 +1389,8 @@ is a setup of the operator, and a project needs nothing for it.
   `guard` event to the log (section 10). Its `action` is `refused` or `warned`, and its `reason`
   is `not_leased`, `other_holder`, `lost`, `unreadable`, or `every_device`. Its holder is the
   caller: its worktree, its agent and the pid of the agent, its issue, and its session, as
-  `acquire` would record them. Its resource, kind, and state are those of the lease of the
-  device; without a lease, the resource is the serial. Its `command` has only the words that
+  `acquire` would record them. Its resource, kind, state, and lease id are those of the lease of
+  the device; without a lease, the resource is the serial. Its `command` has only the words that
   name the adb command, such as `shell` or `forward --remove-all`, and only when adb knows the
   command; it never has the rest of the command line, because the arguments are untrusted
   text, and an `adb shell` line can carry tokens. A word in the place of the command can carry
@@ -1400,6 +1401,31 @@ is a setup of the operator, and a project needs nothing for it.
   caller can type it, and adb finds no device by it. The log keeps every event, and its size
   limit of 10 MB holds: an event is about 500 bytes, so a test run with 500 calls in warn mode
   adds about 250 KB, and many such runs make the history of the leases shorter.
+- **Refusals that a script hides.** A script of a project often reads only the exit status of
+  adb and drops its standard error, for example a wait for the boot that runs
+  `adb shell getprop sys.boot_completed 2>/dev/null`, or a helper that turns every failed adb
+  call into "device not ready". The agent then sees a failed script with a wrong reason, and
+  runs the command again, or starts another emulator. So `banksman held` also shows the guard
+  events of the caller's agent process from the last 15 minutes, the refused and the warned
+  calls, in groups as `log --count` makes them: how many, the time of the last one, the
+  resource, the adb commands, the device, and the reason as `log` shows them, and for the device
+  of another holder, the holder of the lease that the event names, as `status` shows it, or that
+  this lease has ended. It finds the events by the pid of the agent process. A pid that the
+  system gave to a new agent process must not show the calls of the earlier one, so an event
+  with a session counts only in the session of the caller's agent process. With `--owner-pid`,
+  banksman does not know the session of the process, and the pid alone counts. The events carry
+  wall-clock time, and the start time of a process has another form of time, so a window of 15
+  minutes is simpler than the events since the start of the agent process. `held` reads only
+  the last megabyte of the log, and the end of the earlier file when the current one is
+  shorter, so that it stays fast with a full log. `held --json` has the same groups in `guard`,
+  with the fields of `log --count --json`, or `null` when the log cannot be read. The JSON names
+  no other holder, and the text shows the purpose of the other holder, which is untrusted text,
+  as `status` does. The subagents of a session share its agent process, so each one also sees
+  the calls of the others; the resource and the holder tell them apart. The guide for agents
+  says to run `banksman held` when a device command or a script fails for a reason that it does
+  not explain (section 15). When an agent process has such calls, `status` shows one note under
+  its table that points to `held`, and its JSON stays the same: `held` is the caller's own view,
+  and `status` is the view of the pool for every reader.
 - **Commands for every device.** `adb kill-server` stops the adb server, which disconnects
   every device; `adb reconnect offline` resets the connection of every offline device, such as
   an emulator that boots; `adb disconnect` without an address ends every connection over
@@ -1464,7 +1490,8 @@ banksman touch   (--lease <id> | --holding <label>) [--resource <name>] [--expec
 banksman release (--lease <id> | --holding <label>) [--resource <name>]
                  [--owner-pid <pid>] [--end]                       # the holding, or one resource
 banksman release --all [--owner-pid <pid>] [--end]                 # the leases of this agent
-banksman held    [--owner-pid <pid>] [--json]                      # the holdings of this agent
+banksman held    [--owner-pid <pid>] [--json]                      # the holdings of this agent,
+                                                                   # and its refused adb calls
 banksman status  [--json] [--verbose]
 banksman whoami  [--json]
 banksman agent-guide                                               # the guide for agents

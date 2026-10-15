@@ -249,6 +249,57 @@ def test_a_line_that_is_not_a_valid_event_is_left_out(tmp_path, change):
     assert ([event.resource for event in events], skipped) == (["phone-1"], 2)
 
 
+def guard_event(index):
+    return Event(1_790_000_000.0 + index, GUARD, f"emulator-{5554 + 2 * index}", owner_pid=101)
+
+
+def test_the_tail_reads_only_the_whole_lines_at_the_end_of_the_log(tmp_path):
+    history = History(tmp_path / "log.jsonl")
+    events = [guard_event(index) for index in range(4)]
+    for event in events:
+        history.append(event)
+    sizes = [len(line) + 1 for line in history.path.read_bytes().splitlines()]
+    # A bound at the start of a line keeps that line.
+    assert history.tail(GUARD, max_bytes=sizes[2] + sizes[3]) == events[2:]
+    # A bound inside a line leaves out the rest of that line.
+    assert history.tail(GUARD, max_bytes=sizes[2] + sizes[3] - 1) == events[3:]
+    assert history.tail(GUARD, max_bytes=sizes[3] - 1) == []
+    assert history.tail(GUARD) == events
+
+
+def test_the_tail_reads_the_end_of_the_earlier_file_when_the_log_started_again(tmp_path):
+    history = History(tmp_path / "log.jsonl", max_bytes=1000)
+    events = [guard_event(index) for index in range(5)]
+    for event in events:
+        history.append(event)
+    assert history.earlier.exists()
+    assert history.tail(GUARD) == events[-len(history.read()[0]) :]
+    current = history.path.stat().st_size
+    # The budget that the current file leaves is the end of the earlier file.
+    assert history.tail(GUARD, max_bytes=current) == history.tail(GUARD)[-1:]
+    assert len(history.tail(GUARD, max_bytes=current + 600)) == 2
+
+
+def test_the_tail_has_only_the_valid_events_of_its_kind(tmp_path):
+    history = History(tmp_path / "log.jsonl")
+    assert history.tail(GUARD) == []
+    history.append(Event(1_790_000_000.0, ACQUIRE, "phone-1", purpose='"guard"'))
+    history.append(guard_event(1))
+    with history.path.open("a") as file:
+        file.write(json.dumps({**guard_event(2).to_json(), "command": "shell s3cr3t"}) + "\n")
+        file.write('not json "guard"\n')
+    assert history.tail(GUARD) == [guard_event(1)]
+    assert [event.resource for event in history.tail(ACQUIRE)] == ["phone-1"]
+
+
+def test_the_tail_refuses_a_log_that_others_can_write_to(tmp_path):
+    history = History(tmp_path / "log.jsonl")
+    history.append(guard_event(0))
+    history.path.chmod(0o666)
+    with pytest.raises(LogError, match="can write"):
+        history.tail(GUARD)
+
+
 def test_a_guard_event_has_a_reason_of_the_guard_and_no_other_event_has_one(tmp_path):
     history = History(tmp_path / "log.jsonl")
     warned = Event(

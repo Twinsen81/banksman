@@ -783,7 +783,7 @@ def test_a_refused_call_is_in_the_log_in_every_mode(
 ):
     if mode is not None:
         write_config(config_path, f"[guard]\nstrict = {mode}\n")
-    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    theirs = lease(store, system, "e2e_phone", other(), serial="emulator-5554")
     assert guarded("-s", "emulator-5554", "install", "app.apk") == guard.EXIT_REFUSED
     (event,) = logged(log_path)
     assert (event.action, event.reason, event.command, event.serial) == (
@@ -792,14 +792,15 @@ def test_a_refused_call_is_in_the_log_in_every_mode(
         "install",
         "emulator-5554",
     )
-    assert (event.resource, event.kind, event.state) == ("e2e_phone", "emulator", "ready")
-    # The event names the caller, not the holder of the lease, whose purpose is untrusted text.
-    assert (event.owner, event.agent, event.lease_id, event.purpose) == (
-        worktree,
-        "claude",
-        None,
-        None,
+    # The lease of the device, so that `held` can name its holder.
+    assert (event.resource, event.kind, event.state, event.lease_id) == (
+        "e2e_phone",
+        "emulator",
+        "ready",
+        theirs.lease_id,
     )
+    # The event names the caller, not the holder of the lease, whose purpose is untrusted text.
+    assert (event.owner, event.agent, event.purpose) == (worktree, "claude", None)
 
 
 def test_a_strict_refusal_is_in_the_log(machine, system, strict, worktree, log_path):

@@ -463,6 +463,34 @@ def count_json(group: Sequence[Event]) -> dict[str, object]:
     }
 
 
+GUARD_HEADER = ("COUNT", "LAST", "RESOURCE", "DETAILS", "OTHER HOLDER")
+
+
+def guard_rows(grouped: Sequence[Sequence[Event]], leases: Mapping[str, Lease]) -> list[list[str]]:
+    """Return the rows that `held` shows for groups of guard events of the caller.
+
+    `leases` has the leases that exist now, by their ids. The holder of a device that another
+    holder leases is that of the lease that the event names, as `status` shows it.
+    """
+    rows = []
+    for group in grouped:
+        last = group[-1]
+        holder = NONE
+        if last.reason in (OTHER_HOLDER, EVERY_DEVICE) and last.lease_id is not None:
+            lease = leases.get(last.lease_id)
+            holder = "its lease has ended" if lease is None else holder_label(lease)
+        rows.append(
+            [
+                str(len(group)),
+                time.strftime("%H:%M:%S", time.localtime(max(event.at for event in group))),
+                last.resource,
+                _guard_details(last, _commands(group)),
+                holder,
+            ]
+        )
+    return rows
+
+
 def event_json(event: Event, *, verbose: bool) -> dict[str, object]:
     shown = event.to_json()
     del shown["schema"]

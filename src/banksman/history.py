@@ -20,7 +20,7 @@ import stat
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from banksman import OUTPUT_SCHEMA
 from banksman.errors import BanksmanError
@@ -121,6 +121,9 @@ COMMAND = re.compile(
 # The file starts again at this size, and the earlier file is kept next to it, so that the log
 # never fills the disk.
 MAX_LOG_BYTES = 10 * 1024 * 1024
+# A command that reads only the recent events reads this much of the end of the log, so that it
+# stays fast with a full log. An event has about 500 bytes, so it is about 2000 events.
+TAIL_BYTES = 1024 * 1024
 MAX_PROBLEM_LENGTH = 300
 # The schemas of the lines that this banksman reads. The log started with schema 5, and its
 # lines have not changed since, so the history of an earlier banksman stays readable after an
@@ -174,7 +177,8 @@ class Event:
     stopping: bool | None = None
     problem: str | None = None
     # For a guard event: what the guard did, the words of the adb command, and the serial of the
-    # device. The holder fields name the caller, and kind and state the lease of the device.
+    # device. The holder fields name the caller, and kind, lease id, and state the lease of the
+    # device.
     action: str | None = None
     command: str | None = None
     serial: str | None = None
@@ -333,6 +337,39 @@ class History:
                     skipped += 1
         return events, skipped
 
+    def tail(self, event: str, max_bytes: int = TAIL_BYTES) -> list[Event]:
+        """Return the valid events of one kind in the last `max_bytes` of the log, in the order
+        in which they happened.
+
+        The end of the earlier file counts when the current file is shorter, so that a file
+        that started again just now does not hide the events before it.
+        """
+        chunks: list[bytes] = []
+        budget = max_bytes
+        for path in (self.path, self.earlier):
+            try:
+                chunk, whole = _read_end(path, budget)
+            except FileNotFoundError:
+                continue
+            chunks.insert(0, chunk)
+            budget -= len(chunk)
+            if not whole or budget <= 0:
+                break
+        # A cheap test before the parse: the log of a busy machine has many other events.
+        needle = json.dumps(event).encode()
+        events = []
+        for chunk in chunks:
+            for line in chunk.splitlines():
+                if needle not in line:
+                    continue
+                try:
+                    found = Event.from_json(json.loads(line))
+                except ValueError:
+                    continue
+                if found.event == event:
+                    events.append(found)
+        return events
+
     def _ensure_directory(self) -> None:
         directory = self.path.parent
         with contextlib.suppress(FileExistsError):
@@ -344,15 +381,38 @@ class History:
 
 
 def _read_file(path: Path) -> bytes:
+    with _open(path) as file:
+        return file.read()
+
+
+def _read_end(path: Path, max_bytes: int) -> tuple[bytes, bool]:
+    """Return the whole lines in the last `max_bytes` of a file, and whether they are the whole
+    file."""
+    with _open(path) as file:
+        start = max(0, os.fstat(file.fileno()).st_size - max_bytes)
+        if start == 0:
+            return file.read(max_bytes), True
+        # One byte more, to see whether the first line starts at the bound or before it.
+        file.seek(start - 1)
+        data = file.read(max_bytes + 1)
+        cut = data.find(b"\n")
+        return (b"" if cut < 0 else data[cut + 1 :]), False
+
+
+def _open(path: Path) -> BinaryIO:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except FileNotFoundError:
         raise
     except OSError as exc:
         raise LogError(f"cannot open {path}: {exc.strerror}") from exc
-    with os.fdopen(fd, "rb") as file:
+    file = os.fdopen(fd, "rb")
+    try:
         _check_file(path, os.fstat(file.fileno()))
-        return file.read()
+    except BaseException:
+        file.close()
+        raise
+    return file
 
 
 def _check_file(path: Path, info: os.stat_result) -> None:
