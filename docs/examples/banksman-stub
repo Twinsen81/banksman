@@ -4,12 +4,13 @@
 # It appends each call to the file that BANKSMAN_STUB_LOG names, one line for each call. acquire
 # prints a grant of the resource stub-0 with the lease stub-lease and the serial stub-serial, or
 # keeps the lease that --lease names, or exits with BANKSMAN_STUB_STATUS, for example 4 for a
-# machine whose devices are all in use. run runs the command after -- as banksman run --lease
-# runs it for a device: with the serial stub-serial in BANKSMAN_SERIAL, BANKSMAN_SERIALS, and
-# ANDROID_SERIAL, with the resource stub-0, or the one that --resource names, in
-# BANKSMAN_RESOURCE and BANKSMAN_RESOURCES, with the lease stub-lease, or the one that --lease
-# names, in BANKSMAN_LEASE, also for --holding, and with each argument {serial}, {resource},
-# {serials}, and {resources} replaced. Every other command does nothing.
+# machine whose devices are all in use. The grant has PREVIOUS=other and STARTED=false, or the
+# values of BANKSMAN_STUB_PREVIOUS and BANKSMAN_STUB_STARTED. run runs the command after -- as
+# banksman run --lease runs it for a device: with the serial stub-serial in BANKSMAN_SERIAL,
+# BANKSMAN_SERIALS, and ANDROID_SERIAL, with the resource stub-0, or the one that --resource
+# names, in BANKSMAN_RESOURCE and BANKSMAN_RESOURCES, with the lease stub-lease, or the one that
+# --lease names, in BANKSMAN_LEASE, also for --holding, and with each argument {serial},
+# {resource}, {serials}, and {resources} replaced. Every other command does nothing.
 
 if [ -n "${BANKSMAN_STUB_LOG:-}" ]; then
     printf '%s\n' "$*" >>"$BANKSMAN_STUB_LOG"
@@ -22,16 +23,18 @@ case $1 in
         lease=stub-lease
         kept=false
         previous=${BANKSMAN_STUB_PREVIOUS:-other}
+        started=${BANKSMAN_STUB_STARTED:-false}
         while [ "$#" -gt 0 ]; do
             if [ "$1" = --lease ]; then
                 lease=$2
                 kept=true
                 previous=self
+                started=false
             fi
             shift
         done
         printf 'RESOURCE=stub-0\nKIND=stub\nLEASE=%s\nSTATE=ready\nKEPT=%s\n' "$lease" "$kept"
-        printf 'PREVIOUS=%s\n' "$previous"
+        printf 'PREVIOUS=%s\nSTARTED=%s\n' "$previous" "$started"
         printf 'SERIAL=stub-serial\n'
         ;;
     run)

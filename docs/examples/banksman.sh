@@ -15,8 +15,9 @@
 # shellcheck disable=SC2034
 
 # Lease a resource: banksman acquire with these options, for a request with one part. Sets
-# BANKSMAN_RESOURCE, BANKSMAN_KIND, BANKSMAN_LEASE, and BANKSMAN_PREVIOUS (self when the
-# instance is as this worktree left it, as far as banksman knows, otherwise other), and
+# BANKSMAN_RESOURCE, BANKSMAN_KIND, BANKSMAN_LEASE, BANKSMAN_PREVIOUS (self when the instance is
+# as this worktree left it, as far as banksman knows, otherwise other), and BANKSMAN_STARTED
+# (true when this request started the instance with --start, otherwise false), and
 # BANKSMAN_SERIAL, BANKSMAN_HANDLE, and BANKSMAN_ACCOUNTS when the grant has them. When
 # BANKSMAN_LEASE is set already, for example by the caller of the script, acquire keeps a lease
 # of that holding that matches. Returns the status of acquire: 4 when every matching resource is
@@ -31,6 +32,7 @@ banksman_acquire() {
     BANKSMAN_HANDLE=
     BANKSMAN_ACCOUNTS=
     BANKSMAN_PREVIOUS=
+    BANKSMAN_STARTED=
     _banksman_kept=
     # Every value has only the characters of a resource name, so it needs no quotes.
     while IFS='=' read -r _banksman_key _banksman_value; do
@@ -43,6 +45,7 @@ banksman_acquire() {
             ACCOUNTS) BANKSMAN_ACCOUNTS=$_banksman_value ;;
             KEPT) _banksman_kept=$_banksman_value ;;
             PREVIOUS) BANKSMAN_PREVIOUS=$_banksman_value ;;
+            STARTED) BANKSMAN_STARTED=$_banksman_value ;;
         esac
     done <<EOF
 $_banksman_grant

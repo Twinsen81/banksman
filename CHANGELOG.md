@@ -360,6 +360,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   device when the run has several devices, or names the only device of the run. Under one
   lease, nothing changes, and the lists have one value. The stub for tests sets the lists and
   replaces the new placeholders. The lease schema and the output schema do not change.
+- The grant prints the new line `STARTED`, and its JSON the new field `started`: `true` for a
+  part whose instance this `acquire` started with `--start`, an emulator that it started or
+  the reservation of a remote device that it created, and `false` for an instance that ran
+  already, a reservation that the start adopted, a kept lease, and a request without
+  `--start`. A script can report whether its run started the instance, and end only what it
+  started with `release --end`. The helper of a project sets `BANKSMAN_STARTED`, and the stub
+  prints `STARTED=false`, or the value of `BANKSMAN_STUB_STARTED`. The guide for agents names
+  the key. The lease schema and the output schema do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

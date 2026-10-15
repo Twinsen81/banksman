@@ -174,6 +174,7 @@ SHAPES: dict[str, Any] = {
                 "accounts": [str],
                 "kept": bool,
                 "previous": str,
+                "started": bool,
             }
         ],
     },
