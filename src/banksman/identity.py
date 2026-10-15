@@ -150,11 +150,10 @@ def named_agent(
 ) -> tuple[int | None, str | None]:
     """Return the agent process that the environment of a process names, and the name of its
     program, when that process runs, is the known agent that sets the variable, and started no
-    later than the process.
+    later than each process of the branch of the caller (see `caller_branch`).
 
     The walk up the process tree comes first: when one agent runs another, the variable names the
-    outer one, and the nearest one runs the command. The start time keeps a pid that the system
-    gave to a later process from counting.
+    outer one, and the nearest one runs the command.
     """
     for agent, variable in PID_VARIABLES.items():
         value = env.get(variable, "")
@@ -165,10 +164,35 @@ def named_agent(
             process is not None
             and process.pid != caller.pid
             and agent_name(process, agents) == agent
-            and started_no_later(process.started, caller.started)
+            and all(
+                started_no_later(process.started, each.started)
+                for each in caller_branch(table, caller, process)
+            )
         ):
             return process.pid, agent
     return None, None
+
+
+def caller_branch(
+    table: Mapping[int, Process], caller: Process, agent: Process
+) -> list[Process]:
+    """Return the caller and its ancestors below the nearest ancestor that it shares with the
+    process that its environment names as the agent process.
+
+    When that process is the agent that set the variable, every process of the branch descends
+    from it, so each started after it. The init process, or the nearest ancestor that adopts
+    orphans, adopted the top of the branch, and it is an ancestor of the agent too. A pid that
+    the system gave to a new process after the agent ended started after the top of the branch,
+    unless the whole branch started after the agent ended.
+    """
+    shared = set(fencing.ancestors(table, agent.pid))
+    found = [caller]
+    for pid in fencing.ancestors(table, caller.pid):
+        process = table.get(pid)
+        if pid in shared or process is None:
+            break
+        found.append(process)
+    return found
 
 
 def agent_name(process: Process, agents: Sequence[str]) -> str | None:

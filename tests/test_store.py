@@ -219,6 +219,23 @@ def test_a_lease_keeps_an_owner_process_that_started_the_caller(store, system):
     assert lease.owner_pid == 200
 
 
+def test_a_script_that_left_the_tree_of_the_run_keeps_the_owner_by_the_lease_id(
+    store, system, monkeypatch
+):
+    # The init process adopted a script of banksman run (100), and its agent (200) comes from
+    # the pid variable of the agent. The script still has the lease id that the run gave it.
+    system.processes = {100: "start-100", 200: "start-200"}
+    system.parents[100] = 200
+    first = store.acquire("phone-1", "device", Holder(OWNER, owner_pid=100))
+    monkeypatch.setenv("BANKSMAN_LEASE", first.lease_id)
+    lease = store.touch("phone-1", first.lease_id, owner_pid=200)
+    assert lease.owner_pid == 100
+    # A lease id of another holding proves nothing.
+    other = store.acquire("phone-2", "device", Holder(OWNER, owner_pid=100))
+    monkeypatch.setenv("BANKSMAN_LEASE", other.lease_id)
+    assert store.touch("phone-1", first.lease_id, owner_pid=200).owner_pid == 200
+
+
 def test_a_lease_records_its_holder_and_the_expected_hold_time(store, system, state_dir):
     system.processes = {100: "start-100"}
     holder = Holder(

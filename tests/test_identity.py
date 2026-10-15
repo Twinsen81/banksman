@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import replace
 
 import pytest
 from helpers import SRC, FakeSystem
@@ -71,16 +72,22 @@ def test_the_process_itself_is_not_its_own_agent():
     assert find_agent(table, ("codex",), 500, {}) == (None, None)
 
 
-def detached(agent_program=CLAUDE_IN_AN_APP, agent_started="1000", caller_started="2000"):
+def detached(
+    agent_program=CLAUDE_IN_AN_APP, agent_started="1000", top_started="1500", reaper=1
+):
     """Return a process table in which a command runs outside the process tree of its agent: the
-    init process adopted the shell that runs banksman when the shell's parent ended."""
+    init process, or another reaper, adopted the shell that runs banksman when the shell's parent
+    ended."""
     system = FakeSystem()
-    system.spawn(100, program="/Applications/Agent App.app/Contents/MacOS/agent-app")
+    if reaper != 1:
+        system.spawn(reaper, program="/usr/lib/systemd/systemd")
+    system.spawn(100, parent=reaper, program="/Applications/Agent.app/Contents/MacOS/agent-app")
     system.spawn(300, parent=100, program=agent_program)
-    system.spawn(400, program="/bin/zsh")
+    system.spawn(400, parent=reaper, program="/bin/zsh")
     system.spawn(500, parent=400, program="/opt/python/bin/python3")
     # Clock ticks after boot, as the process list on Linux gives a start time.
-    system.processes.update({100: "10", 300: agent_started, 400: "1500", 500: caller_started})
+    starts = {reaper: "5", 100: "10", 300: agent_started, 400: top_started, 500: "2000"}
+    system.processes.update({pid: started for pid, started in starts.items() if pid != 1})
     return system.process_table()
 
 
@@ -102,6 +109,9 @@ def test_a_command_outside_the_tree_of_its_agent_finds_the_agent_by_the_variable
         (detached(agent_program="/usr/local/bin/codex"), "300"),
         # The process started after the caller, so the system gave the pid to a new process.
         (detached(agent_started="2001"), "300"),
+        # The agent ended after it started the shell, and the system gave its pid to a new agent
+        # process before the caller started.
+        (detached(agent_started="1600"), "300"),
         # The caller itself, and the init process.
         (detached(), "500"),
         (detached(), "1"),
@@ -114,8 +124,32 @@ def test_the_variable_names_the_agent_only_when_its_process_qualifies(table, val
 def test_an_agent_that_started_in_the_same_second_as_the_caller_counts():
     # ps gives whole seconds, so the order inside one second is not known.
     second = "Thu Oct 15 10:09:25 2026"
-    table = detached(agent_started=second, caller_started=second)
+    table = detached(agent_started=second, top_started=second)
+    table[500] = replace(table[500], started=second)
     assert find_agent(table, ("claude",), 500, {"CLAUDE_PID": "300"}) == (300, "claude")
+
+
+def test_the_agent_counts_when_a_reaper_other_than_init_adopted_the_command():
+    # On Linux, a process such as systemd --user adopts the orphans below it. It started before
+    # the agent, and it is an ancestor of the agent too.
+    table = detached(reaper=50)
+    assert find_agent(table, ("claude",), 500, {"CLAUDE_PID": "300"}) == (300, "claude")
+
+
+def test_a_shell_that_started_before_the_agent_did_not_get_the_variable_from_it():
+    # A person's terminal that has the variable from elsewhere: its login shell is older than
+    # the agent process that the variable names.
+    table = processes(
+        (500, "/opt/python/bin/python3"), (400, "/bin/zsh"), (350, "login"), (340, "Terminal")
+    )
+    agent = processes((300, "/usr/local/bin/claude"))
+    starts = {500: "2000", 400: "1900", 350: "20", 340: "10", 300: "1000"}
+    table = {
+        pid: replace(process, started=starts[pid])
+        for pid, process in {**table, 300: agent[300]}.items()
+        if pid in starts
+    }
+    assert find_agent(table, ("claude",), 500, {"CLAUDE_PID": "300"}) == (None, None)
 
 
 @pytest.mark.parametrize(

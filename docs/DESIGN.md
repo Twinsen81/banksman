@@ -1004,19 +1004,24 @@ adopts it, and no agent is in its ancestry. But it keeps the environment that it
 agent, and an agent can give the pid of its agent process there. So when no known agent is in
 the ancestry, banksman reads the pid variable of the agent from its own environment, and takes
 the process that it names as the agent process when that process runs, its program is the agent
-that sets the variable and is in `agents`, and it started no later than the caller. The walk
-comes first: when one agent runs another, the variable names the outer one, and the nearest
-agent runs the command. Acquire, `touch`, `release --all`, `held`, `whoami`, and the adb guard
-(section 12) find the agent process in the same way. The map of variables is built in, as for
-the session: only `claude` sets one, and Codex does not.
+that sets the variable and is in `agents`, and it started no later than the caller and each of
+its ancestors below the nearest ancestor that they share. The walk comes first: when one agent
+runs another, the variable names the outer one, and the nearest agent runs the command. Acquire,
+`touch`, `release --all`, `held`, `whoami`, and the adb guard (section 12) find the agent
+process in the same way. The map of variables is built in, as for the session: only `claude`
+sets one, and Codex does not.
 
 - The process list that banksman reads already has the process, so the variable costs no more
   reads, and a person at a terminal, who has no such variable, gets the same result as before.
 - The checks keep a value that is invented or stale from naming a process that is not that
-  agent, and the start time keeps a pid that the system gave to a process after the caller
-  started from counting. They cannot tell an ended agent from another agent process that got its
-  pid before the caller started. A caller can set the variable itself, as it can pass
-  `--owner-pid`.
+  agent. The processes from the caller up to the nearest ancestor that it shares with the agent
+  got the variable from the agent, so the agent started before each of them. The init process,
+  or on Linux a nearer process that adopts orphans such as `systemd --user`, adopted the top of
+  that branch, and it is an ancestor of the agent too. A pid that the system gave to another
+  agent process after the agent ended counts only when the whole branch started after the agent
+  ended, and a person's shell that has the variable from
+  elsewhere does not count when it is older than the process that the variable names. A caller
+  can set the variable itself, as it can pass `--owner-pid`.
 - A long-lived process, such as a daemon that a command of an agent started, keeps the variable
   of that agent, so its commands act for that agent while that agent runs.
 
@@ -1032,7 +1037,9 @@ agent, through its own agent process.
   holding, so a lease survives a restart of the agent. A lease whose owner process still runs
   and started the caller keeps that owner, also for `acquire --lease`: the caller works within
   the life of that process. So a script that `banksman run --where` runs cannot move the lease
-  of the run to the agent, and the lease still ends with the run.
+  of the run to the agent, and the lease still ends with the run. A script that has left the
+  process tree of the run counts as started by it when its `BANKSMAN_LEASE` names a lease of the
+  holding.
 - `release --all` gives back only the leases whose owner process is the caller's agent
   process, so it acts for one agent. After a restart of the agent, it finds a lease only
   after a touch has recorded the new agent process; until then, the lease ends by its

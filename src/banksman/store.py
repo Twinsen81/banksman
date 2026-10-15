@@ -39,6 +39,7 @@ from banksman.lease import (
     FREE_TIMEOUT,
     HELD,
     ISSUE,
+    LEASE_VARIABLE,
     QUARANTINED,
     READY,
     REBOOTED,
@@ -1402,19 +1403,37 @@ class Store:
         return replace(touched, owner_pid=owner_pid, owner_started=self._start_time(owner_pid))
 
     def _owner_started_me(self, lease: Lease) -> bool:
-        """Whether the owner process of the lease runs and is an ancestor of this process.
+        """Whether the owner process of the lease runs and started this process: it is an
+        ancestor, or this process has the lease id that `banksman run` gives its command, of a
+        lease of the same holding.
 
         The caller then works within the life of that owner, for example a script that banksman
-        run runs with the lease that it took for its command, so the lease keeps its owner.
+        run runs with the lease that it took for its command, so the lease keeps its owner. A
+        script that has left the process tree of the run still has the lease id, and its agent
+        process can come from the pid variable of the agent.
         """
         if lease.owner_pid is None:
             return False
         table = self.system.process_table()
         owner = table.get(lease.owner_pid)
+        if owner is None or owner.started != lease.owner_started:
+            return False
         return (
-            owner is not None
-            and owner.started == lease.owner_started
-            and lease.owner_pid in fencing.ancestors(table, os.getpid())
+            lease.owner_pid in fencing.ancestors(table, os.getpid())
+            or self._given_holding() == lease.holding
+        )
+
+    def _given_holding(self) -> str | None:
+        token = os.environ.get(LEASE_VARIABLE)
+        if not token:
+            return None
+        return next(
+            (
+                entry.holding
+                for entry in self._scan()
+                if isinstance(entry, Lease) and entry.lease_id == token
+            ),
+            None,
         )
 
     def _start_time(self, pid: int | None) -> str | None:

@@ -399,11 +399,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script started with `nohup` or in a session of its own, now finds its agent process through
   the pid variable of the agent, `CLAUDE_PID` for `claude`, when no known agent is above it.
   banksman takes the process that the variable names when it runs, its program is that agent
-  and is in `agents`, and it started no later than the caller; the walk up the process tree
-  still comes first. Acquire, `touch`, `release --all`, `held`, `whoami`, `status`, and the adb
-  guard use the same rule, so the guard refuses such a command on the device of another holding,
-  and lets it use and touch the devices of its agent. The lease schema and the output schema do
-  not change.
+  and is in `agents`, and it started no later than the caller and each of its ancestors below
+  the nearest ancestor that they share, so that a pid that the system gave to another agent
+  process after the agent ended does not count; the walk up the process tree still comes first.
+  Acquire, `touch`, `release --all`, `held`, `whoami`, `status`, and the adb guard use the same
+  rule, so the guard refuses such a command on the device of another holding, and lets it use and
+  touch the devices of its agent. A script that has left the process tree of `banksman run
+  --where` keeps the run as the owner process of its lease when its `BANKSMAN_LEASE` names a
+  lease of the holding, so the lease still ends with the run. The lease schema and the output
+  schema do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

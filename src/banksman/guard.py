@@ -44,7 +44,7 @@ from banksman.history import (
     History,
 )
 from banksman.identity import find_agent, find_holder
-from banksman.lease import HELD, RESOURCE_NAME, Holder, Lease
+from banksman.lease import HELD, LEASE_VARIABLE, RESOURCE_NAME, Holder, Lease
 from banksman.sanitize import clean
 from banksman.store import (
     Snapshot,
@@ -60,7 +60,6 @@ from banksman.system import Machine, Process, System
 
 # The status of `check` for a lost lease: the caller must not use the device.
 EXIT_REFUSED = 3
-LEASE_VARIABLE = "BANKSMAN_LEASE"
 USAGE = "usage: banksman guard adb [--fallback-adb PATH] -- [ADB ARGUMENT ...]"
 # The adb that the wrapper saved, for a configuration that names no SDK or cannot be read.
 FALLBACK_OPTION = "--fallback-adb"
