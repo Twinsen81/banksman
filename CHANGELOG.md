@@ -419,7 +419,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so from then on every request can get it. banksman still ends no emulator that it did not
   start, also when its agent has ended. `status` shows the agent of an unmanaged emulator in the
   HOLDER column, also when that agent has ended, and `status --json` has it in the new field
-  `started_by` of each resource. The lease schema and the output schema do not change.
+  `started_by` of each resource. The guide for agents tells an agent to acquire such an
+  emulator of its own and not to start a second AVD, and to prefer `--start`. The lease
+  schema and the output schema do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex
