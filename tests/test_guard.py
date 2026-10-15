@@ -6,6 +6,7 @@ a process of their own use a configuration without agents, so the process tree o
 runs the tests does not change what the guard decides.
 """
 
+import contextlib
 import json
 import os
 import shlex
@@ -20,6 +21,7 @@ import pytest
 from helpers import SRC, FakeSystem, drain, edit_lease, write_config
 
 from banksman import android, cli, guard
+from banksman import store as store_module
 from banksman.android import Transport
 from banksman.config import load_config
 from banksman.guard import ALL, DEVICE, HOST, Call, parse
@@ -36,9 +38,9 @@ from banksman.history import (
     Event,
     History,
 )
-from banksman.lease import Holder, SerialSeen
+from banksman.lease import Holder, SerialSeen, Timeouts
 from banksman.printed import ADB_SHIM_PATH, ADB_SHIM_SCRIPT
-from banksman.store import Choice, Need, Store, log_lock
+from banksman.store import Choice, Need, Store, log_lock, peek
 from banksman.system import MachineError
 
 ME = os.getpid()
@@ -114,7 +116,7 @@ def lease(store, system, resource, holder, serial=None, kind="emulator"):
 
 
 def verdict(system, *arguments, env=None, adb=no_adb):
-    return guard.check(list(arguments), load_config(), env or {}, system, adb)
+    return guard.check(list(arguments), load_config(), env or {}, system, adb).verdict
 
 
 def check(system, *arguments, env=None, adb=no_adb):
@@ -915,6 +917,155 @@ def test_the_guard_waits_only_shortly_for_the_lock(
         assert time.monotonic() - start < 1
     assert "this adb call is not in the log: another banksman process" in capsys.readouterr().err
     assert not log_path.exists()
+
+
+# The touch of a lease that the holder uses.
+
+
+def touched(state_dir, *resources):
+    return [json.loads((state_dir / f"{name}.json").read_text()) for name in resources]
+
+
+def count_locks(monkeypatch):
+    """Record each take of the lock of the lease store from now on."""
+    taken = []
+    original = store_module._take_lock
+    monkeypatch.setattr(
+        store_module, "_take_lock", lambda *arguments: taken.append(1) or original(*arguments)
+    )
+    return taken
+
+
+def test_a_call_of_the_holder_touches_its_holding_a_minute_after_the_last_touch(
+    machine, store, system, state_dir, capsys
+):
+    needs = [Need((Choice(name, "emulator"),)) for name in ("e2e_phone", "e2e_tablet")]
+    store.grant(needs, mine())
+    store.observe([SerialSeen("e2e_phone", "emulator", "emulator-5554", system.now)])
+    granted = system.now
+    system.advance(61)
+    assert guarded("-s", "emulator-5554", "shell", "ls", fallback="/opt/adb") == 0
+    assert capsys.readouterr() == ("/opt/adb\n", "")
+    phone, tablet = touched(state_dir, "e2e_phone", "e2e_tablet")
+    assert phone["awake"]["touched"] == tablet["awake"]["touched"] == system.now
+    assert phone["touched_at"] == system.wall
+    assert phone["longest_quiet"] == system.now - granted
+    assert phone["owner_pid"] == AGENT
+
+
+def test_a_call_within_the_minute_takes_no_lock(machine, store, system, state_dir, monkeypatch):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    system.advance(60)
+    taken = count_locks(monkeypatch)
+    assert guarded("-s", "emulator-5554", "shell") == 0
+    assert taken == []
+    system.advance(1)
+    assert guarded("-s", "emulator-5554", "shell") == 0
+    assert taken == [1]
+    assert guarded("-s", "emulator-5554", "shell") == 0
+    assert taken == [1]
+    (phone,) = touched(state_dir, "e2e_phone")
+    assert phone["awake"]["touched"] == system.now
+
+
+def test_a_short_idle_timeout_is_touched_after_a_quarter_of_it(
+    machine, store, system, state_dir
+):
+    store.acquire("e2e_phone", "emulator", mine(), timeouts=Timeouts(idle_timeout=60))
+    store.observe([SerialSeen("e2e_phone", "emulator", "emulator-5554", system.now)])
+    system.advance(16)
+    assert guarded("-s", "emulator-5554", "shell") == 0
+    (phone,) = touched(state_dir, "e2e_phone")
+    assert phone["awake"]["touched"] == system.now
+
+
+def test_the_lease_id_of_banksman_run_touches_and_keeps_the_owner(
+    machine, store, system, state_dir, monkeypatch
+):
+    # A script with the lease id of a holding of another agent process, which is not above it.
+    granted = lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    monkeypatch.setenv("BANKSMAN_LEASE", granted.lease_id)
+    system.advance(61)
+    assert guarded("-s", "emulator-5554", "shell") == 0
+    (phone,) = touched(state_dir, "e2e_phone")
+    assert phone["awake"]["touched"] == system.now
+    assert phone["owner_pid"] == OTHER_AGENT
+
+
+def test_a_call_of_a_person_touches_nothing(machine, store, system, monkeypatch):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    system.parents[ME] = 1
+    system.advance(61)
+    taken = count_locks(monkeypatch)
+    assert guarded("-s", "emulator-5554", "shell") == 0
+    assert taken == []
+
+
+@pytest.mark.parametrize("mode", [None, "true", '"warn"'])
+def test_a_refused_or_warned_call_touches_nothing(
+    machine, store, system, state_dir, config_path, monkeypatch, mode
+):
+    if mode is not None:
+        write_config(config_path, f"[guard]\nstrict = {mode}\n")
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    lease(store, system, "e2e_tablet", other(), serial="emulator-5556")
+    before = touched(state_dir, "e2e_phone", "e2e_tablet")
+    system.advance(61)
+    assert guarded("-s", "emulator-5556", "shell") == guard.EXIT_REFUSED
+    # A device without a lease: strict mode refuses the call, and warn mode lets it run.
+    guarded("-s", "emulator-5558", "shell")
+    assert guarded("kill-server") == guard.EXIT_REFUSED
+    assert touched(state_dir, "e2e_phone", "e2e_tablet") == before
+
+
+def test_a_void_lease_is_not_touched_again(machine, store, system, state_dir):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    system.advance(20 * 60)
+    before = touched(state_dir, "e2e_phone")
+    assert guarded("-s", "emulator-5554", "shell") == 0
+    assert touched(state_dir, "e2e_phone") == before
+
+
+@pytest.mark.parametrize("failure", ["lock", "write"])
+def test_a_touch_that_fails_leaves_the_call_as_it_is(
+    machine, store, system, state_dir, monkeypatch, capsys, failure
+):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    before = touched(state_dir, "e2e_phone")
+    system.advance(61)
+    if failure == "lock":
+        monkeypatch.setattr(guard, "LOG_LOCK_WAIT", 0.05)
+        held = log_lock(state_dir, 1)
+    else:
+
+        def unwritable(directory, name, data):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(store_module, "_replace_file", unwritable)
+        held = contextlib.nullcontext()
+    with held:
+        start = time.monotonic()
+        assert guarded("-s", "emulator-5554", "shell", fallback="/opt/adb") == 0
+        assert time.monotonic() - start < 1
+    assert capsys.readouterr() == ("/opt/adb\n", "")
+    assert touched(state_dir, "e2e_phone") == before
+
+
+def test_a_touch_leaves_a_lease_that_changed_since_the_guard_read_it(
+    store, system, state_dir, quarantine_dir
+):
+    first = lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    lease(store, system, "e2e_tablet", mine(), serial="emulator-5556")
+    seen = {each.resource: each for each in peek(state_dir, quarantine_dir).leases}
+    system.advance(61)
+    # Another call touched the phone, and the tablet has a new lease since.
+    store.touch("e2e_phone", first.lease_id)
+    store.release("e2e_tablet", seen["e2e_tablet"].lease_id)
+    lease(store, system, "e2e_tablet", mine(), serial="emulator-5556")
+    before = touched(state_dir, "e2e_phone", "e2e_tablet")
+    system.advance(61)
+    assert store.touch_seen(list(seen.values())) == []
+    assert touched(state_dir, "e2e_phone", "e2e_tablet") == before
 
 
 # The wrapper: banksman admin adb-shim.

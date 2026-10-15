@@ -360,6 +360,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   device when the run has several devices, or names the only device of the run. Under one
   lease, nothing changes, and the lists have one value. The stub for tests sets the lists and
   replaces the new placeholders. The lease schema and the output schema do not change.
+- A device call of the holder through the adb guard now touches its lease. When the guard lets
+  a device command run because a held lease of the caller's holding has the device, through
+  `BANKSMAN_LEASE` or through an owner process above the caller, it touches that lease and the
+  other held leases of its holding, as `touch` does but without recording an owner process,
+  when the last touch is more than a minute old, or more than a quarter of a shorter idle
+  timeout. So an agent that uses its device with direct adb calls keeps its lease, and an
+  emulator that banksman started no longer ends under the agent after the idle timeout. A call
+  within that time takes no lock. A touch that is due waits for the lock for half a second at
+  most, never touches a lease that is void or that changed since the guard read it, and when
+  it fails, the call runs as before and the guard says nothing. A refused or warned call, a
+  call of a person, and a command for every device touch nothing. For a holder behind the
+  guard, `longest_quiet` now counts the time without a banksman call and without a device
+  call. The lease schema and the output schema do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex
