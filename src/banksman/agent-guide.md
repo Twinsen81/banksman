@@ -41,8 +41,9 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
   emulator that nobody has leased for some time, so use `--start` also for a device that ran
   before.
 - `banksman held` lists the holdings of your agent process, with their labels, lease ids,
-  devices, and serials. It also lists the holdings of the other subagents of your session: use
-  only your own label.
+  devices, and serials, and the `adb` calls that banksman refused or warned about in the last
+  15 minutes. It also lists the holdings and the calls of the other subagents of your session:
+  use only your own label.
 - Never choose a serial from `adb devices` yourself.
 
 ## Use the device
@@ -92,6 +93,10 @@ banksman release --holding login-tests
   the command again: use a device of your own holding.
 - When banksman warns that a strict adb guard would refuse an `adb` call, the call ran on a
   device that is not in your holding. Get a device as this guide says, and use only that one.
+- When a device command or a script fails for a reason that it does not explain, for example
+  "device not ready", run `banksman held` first. Many scripts hide what banksman says about a
+  refused `adb` call, and `held` shows the calls that banksman refused or warned about. Act on
+  what it shows, and do not run the command again.
 
 ## Time limits
 

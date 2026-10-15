@@ -652,6 +652,7 @@ def events(verdict: Verdict, caller: Holder, at: float) -> list[Event]:
             GUARD,
             resource,
             kind=None if lease is None else lease.kind,
+            lease_id=None if lease is None else lease.lease_id,
             state=None if lease is None else lease.state,
             owner=caller.owner,
             owner_pid=caller.owner_pid,

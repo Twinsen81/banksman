@@ -78,6 +78,20 @@ EVENT = {
 # `log --json` shows the time as text, and the purpose only with --verbose.
 SHOWN_EVENT = {**EVENT, "at": str, "purpose?": TEXT}
 del SHOWN_EVENT["purpose"]
+# A group of events of `log --count --json`, and of the guard events in `held --json`.
+COUNT = {
+    "count": int,
+    "first": str,
+    "last": str,
+    "event": str,
+    "action": TEXT,
+    "reason": TEXT,
+    "resource": str,
+    "serial": TEXT,
+    "owner": TEXT,
+    "agent": TEXT,
+    "commands": [str],
+}
 NAMES = {"kind": str, "name": str}
 DECISIONS = {"allowed": [str], "refused": [str]}
 
@@ -106,21 +120,7 @@ SHAPES: dict[str, Any] = {
     "log": {
         "schema": int,
         "events?": [SHOWN_EVENT],
-        "counts?": [
-            {
-                "count": int,
-                "first": str,
-                "last": str,
-                "event": str,
-                "action": TEXT,
-                "reason": TEXT,
-                "resource": str,
-                "serial": TEXT,
-                "owner": TEXT,
-                "agent": TEXT,
-                "commands": [str],
-            }
-        ],
+        "counts?": [COUNT],
         "skipped": int,
     },
     "whoami": {
@@ -145,6 +145,7 @@ SHAPES: dict[str, Any] = {
                 "handle": TEXT,
             }
         ],
+        "guard": ([COUNT], None),
     },
     "reap": {
         "schema": int,
