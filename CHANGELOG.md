@@ -471,3 +471,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([DECISIONS.md](DECISIONS.md)), security policy and threat model
   ([SECURITY.md](SECURITY.md)), and contribution guide.
 
+### Fixed
+
+- `banksman run` now reliably stops the command on Ctrl-C after the command was stopped with
+  Ctrl-Z and continued with `fg`. The terminal sends the signal to the whole foreground
+  process group, but a group member can miss a group signal that the group leader receives, so
+  under CPU load on macOS the leader got the next Ctrl-C and the command did not. The leader
+  program now forwards each terminal signal (SIGHUP, SIGINT, SIGQUIT, SIGTERM) that it receives
+  to the command, so the signal always reaches it.
+
