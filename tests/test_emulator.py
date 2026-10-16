@@ -1286,6 +1286,221 @@ def test_a_free_timeout_that_is_off_keeps_free_emulators(capsys, config_path, sd
     assert runs(known()["qa_phone"].pid)
 
 
+# The end of emulators without input.
+
+UNUSED_LINE = (
+    "qa_phone: released, because the instance had no lease, and no input for the unused timeout"
+    " of its kind\n"
+)
+
+
+def reaps(capsys):
+    """Run banksman reap, and return what it printed."""
+    capsys.readouterr()
+    assert main(["reap"]) == 0
+    return capsys.readouterr().out
+
+
+def last_log(capsys):
+    assert main(["log", "--json"]) == 0
+    return json.loads(capsys.readouterr().out)["events"][-1]
+
+
+def test_an_emulator_that_banksman_started_ends_after_the_unused_timeout(
+    capsys, config_path, sdk
+):
+    configure(config_path, sdk, 'unused_timeout = "3h"\n')
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    pid = known()["qa_phone"].pid
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    sdk.last_input(values["SERIAL"], 3 * 60 * 60 - 60)
+    assert reaps(capsys) == "Nothing to reap.\n"
+    assert runs(pid)
+    sdk.last_input(values["SERIAL"], 3 * 60 * 60)
+    assert reaps(capsys) == UNUSED_LINE
+    assert not runs(pid)
+    assert (leases(), known()) == ({}, {})
+    last = last_log(capsys)
+    assert (last["event"], last["resource"], last["reason"], last["owner"]) == (
+        "reap",
+        "qa_phone",
+        "unused",
+        "banksman",
+    )
+    # The next request starts the AVD again.
+    status, _, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert len(sdk.emulator_calls()) == 2
+
+
+def test_only_banksman_reap_ends_an_emulator_without_input(capsys, config_path, sdk):
+    configure(config_path, sdk, 'unused_timeout = "3h"\n')
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    sdk.last_input(values["SERIAL"], 24 * 60 * 60)
+    # Every command reaps first, but only banksman reap asks the emulators for their input.
+    assert states(capsys)["qa_phone"] == "free"
+    status, again, err = acquire(capsys, "--where", "avd=qa_tablet")
+    assert status == 0, err
+    assert main(["release", "--lease", again["LEASE"]]) == 0
+    assert runs(known()["qa_phone"].pid)
+    assert reaps(capsys) == UNUSED_LINE
+
+
+def test_an_emulator_with_a_lease_or_an_unknown_input_age_does_not_end(capsys, config_path, sdk):
+    configure(config_path, sdk, 'unused_timeout = "3h"\n')
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    pid = known()["qa_phone"].pid
+    sdk.last_input(values["SERIAL"], 24 * 60 * 60)
+    assert reaps(capsys) == "Nothing to reap.\n"
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    # An emulator that cannot say when its last input was is never idle.
+    sdk.last_input(values["SERIAL"], None)
+    assert reaps(capsys) == "Nothing to reap.\n"
+    assert runs(pid)
+
+
+def test_an_unused_timeout_that_is_off_keeps_emulators_without_input(capsys, config_path, sdk):
+    configure(config_path, sdk)
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    sdk.last_input(values["SERIAL"], 24 * 60 * 60)
+    assert reaps(capsys) == "Nothing to reap.\n"
+    assert runs(known()["qa_phone"].pid)
+
+
+def test_the_reap_asks_adb_nothing_while_no_emulator_of_an_allowed_avd_runs(
+    capsys, config_path, sdk
+):
+    configure(config_path, sdk, 'unused_timeout = "3h"\n')
+    # adb would start its server, also for a job on a machine where nobody uses adb.
+    assert reaps(capsys) == "Nothing to reap.\n"
+    assert sdk.calls() == []
+
+
+def test_an_emulator_that_a_person_started_never_ends(capsys, config_path, sdk):
+    configure(config_path, sdk, 'unused_timeout = "3h"\n', agents=["claude"])
+    person = sdk.start_emulator("qa_phone", 5556)
+    wait_for(lambda: listed(sdk, "emulator-5556"))
+    sdk.last_input("emulator-5556", 24 * 60 * 60)
+    assert reaps(capsys) == "Nothing to reap.\n"
+    assert runs(person.pid)
+    assert states(capsys)["qa_phone"] == "unmanaged"
+
+
+def test_an_emulator_without_input_whose_agent_has_ended_ends(capsys, config_path, sdk, agent):
+    configure(config_path, sdk, 'unused_timeout = "3h"\n', agents=["claude"])
+    pid = start_for(sdk, agent)
+    sdk.last_input("emulator-5556", 4 * 60 * 60)
+    # The agent that started it still runs, and can still use it.
+    assert reaps(capsys) == "Nothing to reap.\n"
+    assert runs(pid)
+    agent.kill()
+    agent.wait()
+    assert reaps(capsys) == UNUSED_LINE
+    assert not runs(pid)
+    assert (leases(), known()) == ({}, {})
+    assert last_log(capsys)["reason"] == "unused"
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert (status, values["STARTED"]) == (0, "true"), err
+
+
+def test_an_emulator_that_ran_under_a_lease_of_an_agent_that_has_ended_ends(
+    capsys, config_path, sdk, agent
+):
+    configure(config_path, sdk, 'unused_timeout = "3h"\n', agents=["claude"])
+    pid = start_for(sdk, agent)
+    status, values, err = as_agent(agent, "acquire", "--where", "avd=qa_phone")
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    assert (known()["qa_phone"].pid, known()["qa_phone"].created) == (pid, False)
+    sdk.last_input("emulator-5556", 4 * 60 * 60)
+    assert reaps(capsys) == "Nothing to reap.\n"
+    agent.kill()
+    agent.wait()
+    assert reaps(capsys) == UNUSED_LINE
+    assert not runs(pid)
+
+
+def test_an_emulator_of_an_avd_that_is_not_allowed_never_ends(capsys, config_path, sdk, agent):
+    configure(config_path, sdk, 'unused_timeout = "3h"\n', agents=["claude"])
+    save_inventory(Inventory(kinds={"emulator": Decisions(allowed=("qa_tablet",))}))
+    pid = start_for(sdk, agent)
+    sdk.last_input("emulator-5556", 24 * 60 * 60)
+    agent.kill()
+    agent.wait()
+    assert reaps(capsys) == "Nothing to reap.\n"
+    assert runs(pid)
+    assert sdk.calls() == []
+
+
+def test_an_emulator_that_gets_a_lease_after_the_look_does_not_end(
+    capsys, config_path, sdk, monkeypatch
+):
+    configure(config_path, sdk, 'unused_timeout = "3h"\n')
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    sdk.last_input(values["SERIAL"], 24 * 60 * 60)
+    look = cli._idle_emulators
+
+    def leased_meanwhile(config):
+        found = look(config)
+        assert [each.resource for _, each in found] == ["qa_phone"]
+        # Another process gets the AVD after the look, and before the reaper takes the lock.
+        result = subprocess.run(
+            [sys.executable, "-m", "banksman", "acquire", "--where", "avd=qa_phone"],
+            env={**os.environ, "PYTHONPATH": SRC},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        return found
+
+    monkeypatch.setattr(cli, "_idle_emulators", leased_meanwhile)
+    assert reaps(capsys) == "Nothing to reap.\n"
+    assert runs(known()["qa_phone"].pid)
+    assert leases()["qa_phone"].state == "ready"
+
+
+def test_the_reaper_ends_only_the_emulator_that_it_looked_at(system):
+    system.spawn(600)
+    found = emulator.Idle("qa_phone", 600, "start-600", "emulator-5556")
+    assert emulator.ending(kind(), found, system) is True
+    record = emulator.load(kind(), system)["qa_phone"]
+    assert (record.pid, record.created, record.serial) == (600, False, "emulator-5556")
+    # Another emulator of the AVD runs now, or the emulator has ended.
+    other = emulator.Idle("qa_phone", 700, "start-700", "emulator-5558")
+    assert emulator.ending(kind(), other, system) is False
+    system.end(600)
+    assert emulator.ending(kind(), found, system) is False
+
+
+def test_a_request_can_ask_for_the_input_age(capsys, config_path, sdk):
+    configure(config_path, sdk)
+    # Without a running emulator, the attribute is known all the same: nothing matches now.
+    status, _, err = acquire(capsys, "--where", "input_age>=3600")
+    assert status == 1
+    assert "no permitted resource that is present now matches input_age>=3600" in err
+    status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
+    assert status == 0, err
+    assert main(["release", "--lease", values["LEASE"]]) == 0
+    sdk.last_input(values["SERIAL"], 2 * 60 * 60)
+    status, again, err = acquire(capsys, "--where", "input_age>=3600")
+    assert (status, again["RESOURCE"]) == (0, "qa_phone"), err
+    assert main(["release", "--lease", again["LEASE"]]) == 0
+    capsys.readouterr()
+    assert main(["status", "--json"]) == 0
+    shown = {each["resource"]: each for each in json.loads(capsys.readouterr().out)["resources"]}
+    assert shown["qa_phone"]["facts"]["input_age"] == 2 * 60 * 60
+    assert "input_age" not in shown["qa_tablet"]["facts"]
+
+
 # The AVD that the worktree used last.
 
 
@@ -1477,7 +1692,7 @@ def test_discovery_reads_the_environment_only_of_an_emulator_that_banksman_does_
 ):
     avds = ("qa_phone", "qa_tablet", "qa_watch")
 
-    def emulators(settings, accounts):
+    def emulators(settings, accounts, input_age):
         return {"schema": 1, "instances": [{"name": name, "facts": {}} for name in avds]}
 
     monkeypatch.setattr(android, "emulators", emulators)

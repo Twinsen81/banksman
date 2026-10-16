@@ -50,6 +50,7 @@ _KIND_KEYS = (
     "start_args",
     "unmanaged",
     "free_timeout",
+    "unused_timeout",
     "paid",
     "rank",
     "affinity",
@@ -121,6 +122,10 @@ class Kind:
     # After how many seconds of awake time without a lease the reaper ends an emulator that
     # banksman started, for the android-emulator preset. None keeps it running.
     free_timeout: int | None = None
+    # After how many seconds without input the reaper ends a running emulator of the
+    # android-emulator preset that has no lease, when banksman started it, or when an agent
+    # started it and that agent has ended. None keeps it running.
+    unused_timeout: int | None = None
 
     @property
     def discovered(self) -> bool:
@@ -406,8 +411,9 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
         raise _Invalid(
             f"{where}.unmanaged", f"applies only to the {' and '.join(STARTED)} presets"
         )
-    if "free_timeout" in table and preset != ANDROID_EMULATOR:
-        raise _Invalid(f"{where}.free_timeout", f"applies only to the {ANDROID_EMULATOR} preset")
+    for key in ("free_timeout", "unused_timeout"):
+        if key in table and preset != ANDROID_EMULATOR:
+            raise _Invalid(f"{where}.{key}", f"applies only to the {ANDROID_EMULATOR} preset")
     if unmanaged not in UNMANAGED:
         raise _Invalid(
             f"{where}.unmanaged",
@@ -437,6 +443,9 @@ def _kind(name: str, value: object, defaults: Timeouts) -> Kind:
         unmanaged=unmanaged,  # type: ignore[arg-type]
         free_timeout=_duration(
             table.get("free_timeout", _OFF), "free_timeout", f"{where}.free_timeout"
+        ),
+        unused_timeout=_duration(
+            table.get("unused_timeout", _OFF), "unused_timeout", f"{where}.unused_timeout"
         ),
     )
 
@@ -483,9 +492,9 @@ def _timeouts(table: dict[str, object], where: str, base: Timeouts) -> Timeouts:
 
 
 def _duration(value: object, key: str, where: str) -> int | None:
-    # Only the idle timeout and the free timeout can be off: every lease must end at its hard
-    # cap, and a booting lease at its boot deadline.
-    can_be_off = key in ("idle_timeout", "free_timeout")
+    # Only the idle timeout, the free timeout, and the unused timeout can be off: every lease
+    # must end at its hard cap, and a booting lease at its boot deadline.
+    can_be_off = key in ("idle_timeout", "free_timeout", "unused_timeout")
     if can_be_off and value == _OFF:
         return None
     expected = 'a duration such as "20m"' + (', or "off"' if can_be_off else "")

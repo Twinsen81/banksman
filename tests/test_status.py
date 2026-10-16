@@ -528,6 +528,41 @@ def test_the_log_text_says_that_banksman_ended_a_free_instance():
     ]
 
 
+def test_the_log_text_says_that_banksman_ended_an_instance_without_input():
+    reaped = Event(1_790_000_000.0, "reap", "qa_phone", owner="banksman", reason="unused")
+    (row,) = console.log_rows([reaped])
+    assert row[4] == (
+        "banksman ended the instance, which had no lease, and no input for the unused timeout of"
+        " its kind"
+    )
+
+
+def test_the_last_use_of_a_resource_without_a_lease_is_its_last_input():
+    clock = console.Clock(awake=50_000.0, wall=1_790_000_000.0)
+    free = console.Resource("qa_phone", "emulator", "free", True, {"api": 35, "input_age": 7200})
+    unknown = console.Resource("qa_tablet", "emulator", "free", True, {"api": 33})
+    rows = console.status_rows([free, unknown], clock, {})
+    header = list(console.STATUS_HEADER)
+    shown = [dict(zip(header, row)) for row in rows]
+    assert shown[0]["LAST USE"] == console._time(clock.wall - 7200, clock)
+    assert (shown[0]["API"], shown[0]["SINCE"], shown[1]["LAST USE"]) == ("35", "-", "-")
+    assert all(len(row) == len(header) for row in rows)
+
+
+def test_status_json_has_the_input_age_in_the_facts(capsys, config_path):
+    found = {
+        "schema": 1,
+        "instances": [{"name": "qa_phone", "facts": {"api": 35, "input_age": 7200}}],
+    }
+    write_config(
+        config_path,
+        "[holder]\nagents = []\n"
+        f"[kinds.emulator]\ndiscover = {json.dumps(hook(PRINT_ARGUMENT, json.dumps(found)))}\n",
+    )
+    save_inventory(Inventory(kinds={"emulator": Decisions(allowed=("qa_phone",))}))
+    assert status_json(capsys)["qa_phone"]["facts"] == {"api": 35, "input_age": 7200}
+
+
 def test_the_log_text_says_that_the_acquire_of_a_start_ended():
     void = Event(1_790_000_000.0, "void", "qa_phone", owner="/work/a", reason="acquire_gone")
     (row,) = console.log_rows([void])

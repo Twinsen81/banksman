@@ -1,12 +1,13 @@
 """banksman admin doctor, with a temporary home directory, a fake SDK, and a PATH of the test."""
 
 import json
+import os
 import sys
 
 import pytest
 from helpers import FakeAndroidCli, drain, edit_lease, hook, write_config
 
-from banksman import doctor, printed
+from banksman import doctor, job, printed
 from banksman.cli import main
 from banksman.inventory import Decisions, Inventory, save_inventory
 from banksman.lease import Holder
@@ -41,6 +42,30 @@ def home(tmp_path, monkeypatch):
     path.mkdir()
     monkeypatch.setattr(doctor, "home_directory", lambda: path)
     return path
+
+
+class FakeJobs:
+    """launchctl and crontab, as the test sets them: no job is loaded, and no crontab exists."""
+
+    def __init__(self) -> None:
+        self.loaded = False
+        self.crontab: str | None = None
+        self.calls: list[list[str]] = []
+
+    def __call__(self, command):
+        self.calls.append(list(command))
+        if command[0] == "crontab":
+            return (1, "") if self.crontab is None else (0, self.crontab)
+        return (0 if self.loaded else 113, "")
+
+
+@pytest.fixture(autouse=True)
+def jobs(monkeypatch):
+    # No test may read the jobs of the real user. The tests run as on macOS unless they say so.
+    fake = FakeJobs()
+    monkeypatch.setattr(job, "run_program", fake)
+    monkeypatch.setattr(job, "LAUNCHD", True)
+    return fake
 
 
 @pytest.fixture(autouse=True)
@@ -130,6 +155,7 @@ def test_a_complete_setup_passes(
         "quarantine-dir": "ok",
         "log": "ok",
         "lease-ends": "ok",
+        "reap-job": "skip",
         "quarantine": "ok",
         "holder": "ok",
     }
@@ -438,3 +464,123 @@ def test_a_changed_wrapper_gives_no_adb():
     assert printed.saved_adb(text + "echo more\n") is None
     assert printed.saved_adb("") is None
 
+
+
+# The reap job.
+
+TIMED = (
+    '[kinds.emulator]\npreset = "android-emulator"\nunused_timeout = "3h"\n'
+    '[kinds.spare]\npreset = "android-emulator"\nfree_timeout = "30m"\n'
+)
+
+
+def reap_job(capsys):
+    # The other checks fail without an inventory and an emulator, and do not matter here.
+    main(["admin", "doctor", "--json"])
+    found = json.loads(capsys.readouterr().out)["checks"]
+    return next(check for check in found if check["check"] == "reap-job")
+
+
+def this_banksman():
+    # Under pytest, the program is not named banksman, so the job runs this Python.
+    return job.program(sys.argv[0])
+
+
+def test_without_a_reap_job_the_timeouts_of_the_kinds_end_less(capsys, config_path, sdk, home):
+    configure(config_path, TIMED, sdk=sdk)
+    check = reap_job(capsys)
+    path = home / job.LAUNCH_AGENT
+    assert check["status"] == "warn"
+    assert check["detail"] == (
+        f"{path} does not exist, so the unused timeout of the kinds emulator ends no emulator,"
+        " and the free timeout of the kinds spare ends an emulator only when a banksman command"
+        " runs"
+    )
+    assert check["fix"] == (
+        f"banksman admin reap-agent > {path} && launchctl bootstrap gui/{os.getuid()} {path}"
+    )
+
+
+def test_a_saved_reap_job_that_launchd_has_loaded_passes(capsys, config_path, sdk, home, jobs):
+    configure(config_path, TIMED, sdk=sdk)
+    path = save(home / job.LAUNCH_AGENT, job.launchd(this_banksman()))
+    jobs.loaded = True
+    check = reap_job(capsys)
+    assert (check["status"], check["detail"]) == (
+        "ok",
+        f"{path} runs {sys.executable} -m banksman reap every 5 minutes",
+    )
+    assert jobs.calls == [["/bin/launchctl", "print", f"gui/{os.getuid()}/banksman.reap"]]
+
+
+def test_a_saved_reap_job_that_launchd_has_not_loaded_is_a_warning(capsys, home):
+    path = save(home / job.LAUNCH_AGENT, job.launchd(this_banksman()))
+    check = reap_job(capsys)
+    assert check["status"] == "warn"
+    assert "launchd has not loaded it" in check["detail"]
+    assert check["fix"] == f"launchctl bootstrap gui/{os.getuid()} {path}"
+
+
+def test_a_saved_reap_job_that_differs_or_cannot_run_fails(capsys, home, jobs):
+    jobs.loaded = True
+    printed_job = job.launchd(this_banksman())
+    path = save(home / job.LAUNCH_AGENT, printed_job.replace("300", "600"))
+    check = reap_job(capsys)
+    assert (check["status"], check["detail"]) == ("fail", doctor._differs(path))
+    assert check["fix"].startswith(f"launchctl bootout gui/{os.getuid()}/banksman.reap; ")
+    save(path, job.launchd(("/no/such/banksman",)))
+    check = reap_job(capsys)
+    assert check["status"] == "fail"
+    assert "/no/such/banksman is not an executable file" in check["detail"]
+
+
+def test_a_reap_job_of_another_banksman_is_a_warning(capsys, home, jobs, banksman_bin):
+    jobs.loaded = True
+    other = str(banksman_bin / "banksman")
+    save(home / job.LAUNCH_AGENT, job.launchd((other,)))
+    check = reap_job(capsys)
+    assert check["status"] == "warn"
+    assert f"runs {other} reap, but this banksman is {sys.executable} -m banksman" in (
+        check["detail"]
+    )
+    # The job is loaded, so launchd must unload it before it loads the new file.
+    assert check["fix"].startswith(f"launchctl bootout gui/{os.getuid()}/banksman.reap; ")
+
+
+def test_the_reap_job_of_cron_is_a_line_of_the_crontab(
+    capsys, config_path, sdk, monkeypatch, jobs
+):
+    monkeypatch.setattr(job, "LAUNCHD", False)
+    configure(config_path, TIMED, sdk=sdk)
+    check = reap_job(capsys)
+    assert check["status"] == "warn"
+    assert check["detail"].startswith("no line of the crontab runs banksman reap, so")
+    jobs.crontab = f"MAILTO=me\n{job.cron_line(this_banksman())}\n"
+    check = reap_job(capsys)
+    assert (check["status"], check["detail"]) == (
+        "ok",
+        f"the crontab runs {sys.executable} -m banksman reap every 5 minutes",
+    )
+    jobs.crontab = "*/10 * * * * /opt/banksman reap\n"
+    assert reap_job(capsys)["status"] == "fail"
+    # launchd is not asked on such a system.
+    assert {call[0] for call in jobs.calls} == {"crontab"}
+
+
+def test_a_crontab_that_cannot_be_read_matters_only_with_a_timeout(
+    capsys, config_path, sdk, monkeypatch
+):
+    monkeypatch.setattr(job, "LAUNCHD", False)
+
+    def missing(command):
+        raise job.JobError("crontab is not on the PATH")
+
+    monkeypatch.setattr(job, "run_program", missing)
+    configure(config_path, sdk=sdk)
+    check = reap_job(capsys)
+    assert (check["status"], check["detail"]) == (
+        "skip",
+        "the reap job is not installed: cannot read the crontab: crontab is not on the PATH",
+    )
+    configure(config_path, TIMED, sdk=sdk)
+    assert reap_job(capsys)["status"] == "warn"
