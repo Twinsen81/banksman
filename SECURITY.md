@@ -230,5 +230,7 @@ the holder of the device as `status` shows it, with the purpose, and its JSON na
 holder. A call that the guard lets run because the lease of the device
 belongs to the caller's holding touches that holding, without an owner process. It needs the
 same lease id or owner process as `touch`, so it gives no process a way to keep a lease that
-`touch` does not give it already.
+`touch` does not give it already. The line that the guard prints for an agent's `adb devices`
+names only the devices and the labels of the caller's own holdings, never another holder or a
+purpose, so it shows an agent nothing that `banksman held` does not show it already.
 

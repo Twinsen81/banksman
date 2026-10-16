@@ -60,8 +60,8 @@ resource, so an operator can also declare other resources, such as host ports or
 - **A guard for raw adb calls, when the operator wants it.** An optional `adb` wrapper on the
   `PATH` refuses an agent's device command on a device that another holder leases, also when
   a script or an agent calls adb without banksman. An adb call of the holder on its own device
-  keeps the lease, so a lease that an agent uses with direct adb calls does not become idle. A
-  warn mode lists the scripts and agents that still use devices without a lease, before a
+  keeps the lease, so a lease that an agent uses with direct adb calls does not become idle. An
+  agent's `adb devices` also says which devices are its own. A warn mode lists the scripts and agents that still use devices without a lease, before a
   strict mode refuses them.
 - **Knows no app.** banksman leases devices. What a run installs or clears on a device is
   the run's own business.

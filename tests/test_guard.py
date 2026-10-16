@@ -135,8 +135,11 @@ def check(system, *arguments, env=None, adb=no_adb):
     ("arguments", "call"),
     [
         ([], Call(HOST)),
-        (["devices", "-l"], Call(HOST, "devices")),
-        (["-s", "emulator-5554", "devices"], Call(HOST, "devices")),
+        (["devices"], Call(HOST, "devices", lists=True)),
+        (["devices", "-l"], Call(HOST, "devices", lists=True)),
+        (["-s", "emulator-5554", "devices"], Call(HOST, "devices", lists=True)),
+        (["devices", "-x"], Call(HOST, "devices")),
+        (["track-devices"], Call(HOST, "track-devices")),
         (["version"], Call(HOST, "version")),
         (["--version"], Call(HOST, "--version")),
         (["connect", "192.0.2.7"], Call(HOST, "connect")),
@@ -166,7 +169,7 @@ def check(system, *arguments, env=None, adb=no_adb):
         (["forward", "tcp:8000", "tcp:8000"], Call(DEVICE, "forward")),
         (["wait-for-device", "shell", "ls"], Call(DEVICE, "wait-for-device shell")),
         (["wait-for-device"], Call(HOST, "wait-for-device")),
-        (["wait-for-device", "devices"], Call(HOST, "wait-for-device devices")),
+        (["wait-for-device", "devices"], Call(HOST, "wait-for-device devices", lists=True)),
         (["wait-for-device", "kill-server"], Call(ALL, "wait-for-device kill-server")),
         (
             ["wait-for-usb-device", "forward", "--remove-all"],
@@ -199,11 +202,12 @@ def test_the_command_line_is_read_as_adb_reads_it(arguments, call):
 
 
 @pytest.mark.parametrize(
-    "arguments", [["devices"], ["-s", "emulator-5554", "devices"], ["forward", "--list"], []]
+    "arguments", [["track-devices"], ["devices", "-x"], ["version"], ["forward", "--list"], []]
 )
 def test_a_command_without_a_device_passes_without_reading_anything(store, system, arguments):
     lease(store, system, "e2e_phone", other(), serial="emulator-5554")
-    assert check(NoProcessList(), *arguments) is None
+    decision = guard.check(arguments, load_config(), {}, NoProcessList(), no_adb)
+    assert decision == guard.RUNS
 
 
 # The device of another holding.
@@ -319,6 +323,45 @@ def test_an_own_lease_that_is_lost_is_refused(store, system, state_dir):
     assert check(system, "-s", "emulator-5554", "shell") == (
         "adb shell: refused: your lease of emulator-5554 (e2e_phone) is lost: it is draining."
         " Stop using the device, and acquire one again"
+    )
+
+
+def test_an_own_lease_that_is_void_but_not_reaped_yet_is_lost(store, system):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    # The guard does not reap, so the lease file still says that the lease is ready.
+    system.advance(Timeouts().idle_timeout)
+    found = verdict(system, "-s", "emulator-5554", "shell")
+    assert (found.action, found.reason) == (REFUSED, LOST)
+    assert found.text == (
+        "adb shell: refused: your lease of emulator-5554 (e2e_phone) is lost: nothing touched the"
+        " lease for the idle timeout. Stop using the device, and acquire one again"
+    )
+
+
+def test_a_void_lease_of_the_lease_id_is_lost_for_an_agent(store, system):
+    granted = lease(store, system, "e2e_phone", mine(owner_pid=None), serial="emulator-5554")
+    env = {"BANKSMAN_LEASE": granted.lease_id}
+    system.advance(Timeouts().hard_cap)
+    assert check(system, "-s", "emulator-5554", "shell", env=env) == (
+        "adb shell: refused: your lease of emulator-5554 (e2e_phone) is lost: the lease reached"
+        " its hard cap. Stop using the device, and acquire one again"
+    )
+    # A person's call passes, as on a lease that drains.
+    system.parents[ME] = 1
+    assert check(system, "-s", "emulator-5554", "shell", env=env) is None
+
+
+def test_the_lease_id_reads_the_process_list_only_after_the_grace_of_the_owner(store, system):
+    # The owner process is the run that acquired the lease, as for banksman run --where.
+    system.spawn(700, parent=SHELL)
+    granted = lease(store, system, "e2e_phone", mine(owner_pid=700), serial="emulator-5554")
+    env = {"BANKSMAN_LEASE": granted.lease_id}
+    system.end(700)
+    system.advance(Timeouts().owner_grace - 1)
+    assert check(NoProcessList(), "-s", "emulator-5554", "shell", env=env) is None
+    system.advance(1)
+    assert "is lost: the owner process ended" in check(
+        system, "-s", "emulator-5554", "shell", env=env
     )
 
 
@@ -783,6 +826,167 @@ def test_the_launcher_starts_the_guard_without_the_command_line(monkeypatch):
     assert calls == [["adb", "--", "devices"]]
 
 
+# The note on adb devices: which devices are the caller's own.
+
+
+def note(system, *arguments, env=None):
+    return guard.check(list(arguments or ["devices"]), load_config(), env or {}, system).note
+
+
+NO_DEVICE = (
+    "no device here is yours. Get one with banksman acquire; do not choose a serial from this"
+    " list."
+)
+
+
+def labelled(store, system, label, serials):
+    """Grant a holding with a label to the caller's agent, with a serial for each resource."""
+    needs = [Need((Choice(resource, "emulator"),)) for resource in serials]
+    store.grant(needs, mine(), label=label)
+    store.observe(
+        [SerialSeen(name, "emulator", serial, system.now) for name, serial in serials.items()]
+    )
+
+
+@pytest.mark.parametrize("arguments", [["devices"], ["devices", "-l"], ["-P", "5038", "devices"]])
+def test_adb_devices_of_an_agent_names_the_device_of_its_holding(store, system, arguments):
+    labelled(store, system, "login-tests", {"e2e_phone": "emulator-5554"})
+    lease(store, system, "e2e_tablet", other(), serial="emulator-5556")
+    assert note(system, *arguments) == (
+        "your holding login-tests has emulator-5554. Use only that device; get another with"
+        " banksman acquire."
+    )
+
+
+def test_adb_devices_of_an_agent_without_a_device_says_so(store, system):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    assert note(system) == NO_DEVICE
+
+
+def test_the_note_names_no_other_holder_and_no_free_device(store, system):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    lease(store, system, "e2e_tablet", other(), serial="emulator-5556")
+    found = note(system)
+    for text in ("e2e_", "emulator-", "codex", "#123", "tablet layout", "tree-b"):
+        assert text not in found
+
+
+def test_a_device_that_does_not_run_yet_is_named_by_its_resource(store, system):
+    lease(store, system, "e2e_phone", mine())
+    assert note(system) == (
+        "your holding has e2e_phone. Use only that device; get another with banksman acquire."
+    )
+
+
+def test_the_note_names_every_device_of_the_holding(store, system):
+    serials = {"e2e_phone": "emulator-5554", "e2e_tablet": "emulator-5556"}
+    labelled(store, system, "login-tests", serials)
+    assert note(system) == (
+        "your holding login-tests has emulator-5554, emulator-5556. Use only these devices; get"
+        " another with banksman acquire."
+    )
+
+
+def test_several_holdings_are_named_with_their_labels(store, system):
+    # The subagents of one session share its agent process, so each sees the holdings of all.
+    labelled(store, system, "search-tests", {"e2e_tablet": "emulator-5556"})
+    lease(store, system, "R5CR1234ABC", mine(), kind="device")
+    labelled(store, system, "login-tests", {"e2e_phone": "emulator-5554"})
+    assert note(system) == (
+        "your holdings have these devices: login-tests: emulator-5554; search-tests:"
+        " emulator-5556; without a label: R5CR1234ABC. Use only the devices of your own holding;"
+        " get another with banksman acquire."
+    )
+
+
+def test_a_lost_lease_and_a_lease_without_a_device_are_not_named(
+    store, system, state_dir, config_path
+):
+    write_config(config_path, "[kinds.build]\ncount = 1\n")
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    edit_lease(state_dir, "e2e_phone", drain)
+    store.acquire("build-0", "build", mine())
+    assert note(system) == NO_DEVICE
+
+
+@pytest.mark.parametrize(
+    ("timeouts", "past"),
+    [(Timeouts(), Timeouts().idle_timeout), (Timeouts(idle_timeout=None), Timeouts().hard_cap)],
+)
+def test_a_lease_that_is_void_but_not_reaped_yet_is_not_named(store, system, timeouts, past):
+    store.acquire("e2e_phone", "emulator", mine(), timeouts=timeouts)
+    store.observe([SerialSeen("e2e_phone", "emulator", "emulator-5554", system.now)])
+    # The guard does not reap, so the lease file still says that the lease is ready.
+    system.now += past
+    assert note(system) == NO_DEVICE
+
+
+def test_a_detached_command_of_an_agent_gets_the_note_of_its_agent(store, system):
+    env = detach(system)
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    assert note(system, env=env).startswith("your holding has emulator-5554.")
+
+
+def test_adb_devices_of_a_person_gets_no_note(store, system):
+    lease(store, system, "e2e_phone", mine(owner_pid=None), serial="emulator-5554")
+    system.parents[ME] = 1
+    assert note(system) is None
+
+
+def test_inside_banksman_run_the_note_reads_nothing(store, system):
+    granted = lease(store, system, "e2e_phone", mine(owner_pid=None), serial="emulator-5554")
+    assert note(NoProcessList(), env={"BANKSMAN_LEASE": granted.lease_id}) is None
+
+
+def test_the_operator_can_turn_the_note_off(system, config_path):
+    write_config(config_path, "[guard]\ndevices_note = false\n")
+    assert note(NoProcessList()) is None
+
+
+def test_adb_devices_prints_the_note_on_standard_error_before_adb_runs(
+    machine, store, system, capsys
+):
+    labelled(store, system, "login-tests", {"e2e_phone": "emulator-5554"})
+    assert guarded("devices", "-l", fallback="/opt/adb") == 0
+    printed = capsys.readouterr()
+    assert printed.out == "/opt/adb\n"
+    assert printed.err == (
+        "banksman: your holding login-tests has emulator-5554. Use only that device; get another"
+        " with banksman acquire.\n"
+    )
+
+
+@pytest.mark.parametrize("broken", ["lease schema", "process list"])
+def test_a_note_that_cannot_be_made_is_left_out_without_a_word(
+    broken, machine, store, system, state_dir, capsys, monkeypatch
+):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    if broken == "lease schema":
+        edit_lease(state_dir, "e2e_phone", lambda data: data.update(schema=99))
+    else:
+
+        def blocked():
+            raise MachineError("cannot run ps: not permitted")
+
+        monkeypatch.setattr(system, "process_table", blocked)
+    assert guarded("devices", fallback="/opt/adb") == 0
+    assert capsys.readouterr() == ("/opt/adb\n", "")
+
+
+def test_the_note_writes_nothing_to_the_log_and_takes_no_lock(
+    machine, store, system, log_path, monkeypatch
+):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+
+    def no_lock(*args, **kwargs):
+        raise AssertionError("the guard took the lock")
+
+    monkeypatch.setattr(guard, "log_lock", no_lock)
+    monkeypatch.setattr(guard, "Store", no_lock)
+    assert guarded("devices") == 0
+    assert not log_path.exists()
+
+
 # The log of refused and warned calls.
 
 CALLER = Holder("/work/tree-a", owner_pid=AGENT, agent="claude")
@@ -930,8 +1134,8 @@ def test_a_call_without_a_refusal_or_a_warning_takes_no_lock(
     monkeypatch.setattr(guard, "log_lock", lambda *arguments: locks.append(arguments))
     lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
     assert guarded("-s", "emulator-5554", "shell") == 0
-    assert guarded("devices") == 0
     system.parents[ME] = 1
+    assert guarded("devices") == 0
     assert guarded("-s", "emulator-5556", "shell") == 0
     assert locks == []
     assert capsys.readouterr().err == ""
@@ -1099,7 +1303,7 @@ def test_a_void_lease_is_not_touched_again(machine, store, system, state_dir):
     lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
     system.advance(20 * 60)
     before = touched(state_dir, "e2e_phone")
-    assert guarded("-s", "emulator-5554", "shell") == 0
+    assert guarded("-s", "emulator-5554", "shell") == guard.EXIT_REFUSED
     assert touched(state_dir, "e2e_phone") == before
 
 
@@ -1252,6 +1456,16 @@ def test_the_wrapper_passes_every_argument_to_the_guard(shim, fake_adb, tmp_path
         "echo 'a  b'",
         "",
     ]
+
+
+def test_the_note_of_the_guard_leaves_the_output_of_adb_as_it_is(shim, fake_adb, tmp_path):
+    listed = "List of devices attached\nemulator-5554\tdevice\n\n"
+    fake_adb.write_text(f"#!/bin/sh\nprintf {shlex.quote(listed)}\n")
+    path = banksman_on_path(
+        tmp_path, f"#!/bin/sh\necho 'banksman: a note' >&2\necho {shlex.quote(str(fake_adb))}\n"
+    )
+    result = run_wrapper(shim, "devices", path=path)
+    assert (result.returncode, result.stdout, result.stderr) == (0, listed, "banksman: a note\n")
 
 
 def test_a_refusal_ends_the_call_with_3_and_runs_no_adb(shim, fake_adb, tmp_path):

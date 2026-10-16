@@ -7,7 +7,9 @@ decides from the lease files, without the lock, without reaping, and without dis
 the process list and runs `adb devices` only when a decision needs them, because it runs before
 every adb call, and a UI test makes many. It writes to the log only when it refuses a call, or
 lets a call run with a warning. It takes the lock of the lease store only then, and when a call
-of the holder touches the lease of its device, which is due about once a minute.
+of the holder touches the lease of its device, which is due about once a minute. For
+`adb devices`, it also tells an agent which devices are its own, so it reads the lease files and
+the process list for that call too.
 
 It is a guardrail, not a security boundary: a call through the full path of adb, a tool that
 talks to the adb server itself, and the emulator console do not pass through it. It never
@@ -21,7 +23,7 @@ import contextlib
 import os
 import re
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -44,7 +46,15 @@ from banksman.history import (
     History,
 )
 from banksman.identity import find_agent, find_holder
-from banksman.lease import HELD, LEASE_VARIABLE, RESOURCE_NAME, Holder, Lease
+from banksman.lease import (
+    HELD,
+    LEASE_VARIABLE,
+    RESOURCE_NAME,
+    VOID_REASONS,
+    Holder,
+    Lease,
+    void_reason,
+)
 from banksman.sanitize import clean
 from banksman.store import (
     Snapshot,
@@ -127,6 +137,8 @@ class Call:
     server: tuple[str, ...] = ()
     # `adb emu` talks to the console of an emulator, which it chooses by rules of its own.
     console: bool = False
+    # `adb devices` or `adb devices -l`, which lists the devices.
+    lists: bool = False
 
 
 @dataclass(frozen=True)
@@ -153,6 +165,8 @@ class Decision:
     # The held leases of the holding whose lease of the device let the call run, also the leases
     # of its other resources. The call is use of the holding, so it touches them.
     used: tuple[Lease, ...] = ()
+    # The line for an agent's `adb devices`: which devices of the list are its own.
+    note: str | None = None
 
 
 RUNS = Decision()
@@ -188,6 +202,8 @@ def main(argv: Sequence[str]) -> int:
         # protection, so the call runs, and the person who reads the output sees why.
         _say(f"adb guard: this adb call is not checked: {_reason(exc)}")
         decision = RUNS
+    if decision.note is not None:
+        _say(decision.note)
     verdict = decision.verdict
     # A touch that fails changes nothing for the call. The guard says nothing about it either,
     # because a script can read standard error with the output of adb, and the next call of the
@@ -220,6 +236,8 @@ def check(
     `listing` lists the devices as `adb devices -l` does; by default it runs adb.
     """
     call = parse(arguments)
+    if call.lists:
+        return Decision(note=devices_note(config, env, system))
     if call.scope == HOST:
         return RUNS
     snapshot = peek(default_state_dir(), default_quarantine_dir())
@@ -291,7 +309,9 @@ def parse(arguments: Sequence[str]) -> Call:
     wait = [rest.pop(0)] if rest and rest[0].startswith("wait-for-") else []
     options = tuple(server)
     if not rest or rest[0] in _HOST_COMMANDS or rest[:2] == ["forward", "--list"]:
-        return Call(HOST, " ".join(wait + rest[:1]))
+        # adb refuses `devices` with other arguments.
+        lists = rest[:1] == ["devices"] and rest[1:] in ([], ["-l"])
+        return Call(HOST, " ".join(wait + rest[:1]), lists=lists)
     if rest[0] == "kill-server":
         return Call(ALL, " ".join(wait + rest[:1]), server=options)
     if rest == ["disconnect"] or rest[:2] in _FOR_EVERY_DEVICE:
@@ -334,6 +354,24 @@ class Caller:
         """Return the caller as acquire would record it: the worktree, the agent, and the issue."""
         return find_holder(self._table, self.rules, env=self.env, pid=self.pid)
 
+    def void(self, lease: Lease) -> str | None:
+        """Return why a lease that its file shows as held is void by the rules of the reaper, or
+        None while it is valid.
+
+        The guard does not reap, so the file of a lease still says that it is held after its idle
+        timeout, for example, until the next banksman command takes it back. The process list is
+        read only when a rule needs a process.
+        """
+        # Not the rule for a restart, so that no call waits for sysctl. A restart ends every
+        # process, and a lease of the caller's holding has an owner process above the caller, or
+        # its id in the environment of the caller, so it is a lease of this boot.
+        return void_reason(
+            lease,
+            boot_id=lease.boot_id,
+            now=self.system.clock(),
+            running=_Started(lambda: self._table),
+        )
+
     def descends_from(self, pid: int | None, started: str | None) -> bool:
         process = None if pid is None else self._table.get(pid)
         if process is None or process.started != started:
@@ -366,6 +404,23 @@ class Caller:
         return find_agent(self._table, self.rules.agents, self.pid, self.env)[0]
 
 
+class _Started(Mapping[int, str]):
+    """The start time of each process that runs now, from a process list that is read at the
+    first question."""
+
+    def __init__(self, table: Callable[[], Mapping[int, Process]]) -> None:
+        self._table = table
+
+    def __getitem__(self, pid: int) -> str:
+        return self._table()[pid].started
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self._table())
+
+    def __len__(self) -> int:
+        return len(self._table())
+
+
 def decide(
     call: Call, caller: Caller, devices: Snapshot, strict: str | None, listing: Listing
 ) -> Decision:
@@ -395,22 +450,25 @@ def decide(
         return RUNS
     # The lease id that `banksman run` gives its command decides without the process list.
     token = caller.token_holding()
-    if not unreadable and all(lease.state in HELD and lease.holding == token for lease in leases):
+    if not unreadable and all(
+        lease.state in HELD and lease.holding == token and caller.void(lease) is None
+        for lease in leases
+    ):
         return Decision(used=tuple(leases))
     # A call without an agent process is a person's: it may use any device, and it is no
     # use by the holder.
     if not caller.is_agent():
         return RUNS
     for lease in leases:
-        if lease.state in HELD and lease.holding in caller.holdings:
+        mine = lease.holding in caller.holdings
+        void = caller.void(lease) if mine and lease.state in HELD else None
+        if mine and lease.state in HELD and void is None:
             continue
         # The on_acquire hook of the acquire that resets the instance, or the on_void hook of
         # the reaper that takes it back, which can run inside a command of another agent.
         if caller.descends_from(lease.reaper_pid, lease.reaper_started):
             continue
-        return Decision(
-            _refused(call, caller, serial, lease, mine=lease.holding in caller.holdings)
-        )
+        return Decision(_refused(call, caller, serial, lease, mine=mine, void=void))
     if unreadable:
         text = (
             f"adb {call.command}: refused: the lease file of {serial} cannot be read, so the"
@@ -419,6 +477,68 @@ def decide(
         return Decision(Verdict(REFUSED, UNREADABLE, text, call.command, caller, serial))
     used = [lease for lease in leases if lease.state in HELD and lease.holding in caller.holdings]
     return Decision(used=tuple(used))
+
+
+def devices_note(config: Config, env: Mapping[str, str], system: System) -> str | None:
+    """Return the line that tells an agent which devices of `adb devices` are its own, or None
+    for a call without an agent process.
+
+    The line names only the devices of the caller's holdings. A list of free devices is out of
+    date as soon as it is printed, and two agents that read it would choose the same device. It
+    names no other holder, because the text of other agents must not reach the agent in the output
+    of adb.
+    """
+    # A command of banksman run has its device in ANDROID_SERIAL. A script there can call adb
+    # devices in a loop while it waits for a boot, and read standard error with the list.
+    if not config.guard.devices_note or env.get(LEASE_VARIABLE):
+        return None
+    try:
+        snapshot = peek(default_state_dir(), default_quarantine_dir())
+        caller = Caller(env, snapshot.leases, system, config.holder)
+        if not caller.is_agent():
+            return None
+        # The next banksman command takes a void lease back, so the line does not name it.
+        own = [
+            lease
+            for lease in _devices(snapshot, config).leases
+            if lease.state in HELD
+            and lease.holding in caller.holdings
+            and caller.void(lease) is None
+        ]
+    except (BanksmanError, OSError):
+        # adb devices is not checked, so a process list that the sandbox hides, or a lease file
+        # of a newer banksman, only leaves the line out.
+        return None
+    return _own_devices(own)
+
+
+def _own_devices(own: Sequence[Lease]) -> str:
+    if not own:
+        return (
+            "no device here is yours. Get one with banksman acquire; do not choose a serial from"
+            " this list."
+        )
+    holdings: dict[str, list[Lease]] = {}
+    # The holdings with a label first, as held lists them.
+    for lease in sorted(own, key=lambda lease: (lease.label is None, lease.label or "")):
+        holdings.setdefault(lease.holding, []).append(lease)
+    # A device that does not run yet has no serial.
+    named = [
+        (leases[0].label, ", ".join(lease.serial or lease.resource for lease in leases))
+        for leases in holdings.values()
+    ]
+    if len(named) == 1:
+        ((label, names),) = named
+        use = "that device" if len(own) == 1 else "these devices"
+        return (
+            f"your holding{f' {label}' if label else ''} has {names}. Use only {use}; get another"
+            " with banksman acquire."
+        )
+    listed = "; ".join(f"{label or 'without a label'}: {names}" for label, names in named)
+    return (
+        f"your holdings have these devices: {listed}. Use only the devices of your own holding;"
+        " get another with banksman acquire."
+    )
 
 
 def touch(used: Sequence[Lease], system: System) -> list[Lease]:
@@ -606,12 +726,15 @@ def _not_leased(call: Call, caller: Caller, serial: str, *, refuse: bool) -> Ver
     return Verdict(WARNED, NOT_LEASED, text, call.command, caller, serial)
 
 
-def _refused(call: Call, caller: Caller, serial: str, lease: Lease, *, mine: bool) -> Verdict:
+def _refused(
+    call: Call, caller: Caller, serial: str, lease: Lease, *, mine: bool, void: str | None = None
+) -> Verdict:
     device = serial if lease.resource == serial else f"{serial} ({lease.resource})"
     if mine:
+        why = f"it is {lease.state}" if void is None else VOID_REASONS[void]
         text = (
-            f"adb {call.command}: refused: your lease of {device} is lost: it is {lease.state}."
-            " Stop using the device, and acquire one again"
+            f"adb {call.command}: refused: your lease of {device} is lost: {why}. Stop using the"
+            " device, and acquire one again"
         )
         return Verdict(REFUSED, LOST, text, call.command, caller, serial, (lease,))
     text = (
