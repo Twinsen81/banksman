@@ -38,7 +38,7 @@ contains the agent, a program above it, or the reaper itself. Without a known ow
 it signals nothing. Another local user can create the state directory first; banksman then
 refuses to run. That is a denial of service, not a takeover.
 
-**banksman ends only the emulators that it started.** On `--start`, banksman runs the
+**Which emulators banksman ends.** On `--start`, banksman runs the
 `emulator` command of the SDK in the configuration, never one from the `PATH`, with the
 options of `start_args` in the configuration, which are code of the operator like a hook. It
 records the pid and the start time of each emulator that it starts in
@@ -47,8 +47,13 @@ there that another user owns or that group or others can write to, because that 
 which emulators the reaper ends. The reaper signals only that one process, and only while the
 pid has the recorded start time on the same boot, so it never signals a process that the
 system gave the pid to later. It never signals a process group: other emulators use the
-`netsimd` daemon that an emulator can start in its group. An emulator that the holder or a
-person started is never ended. With the `free_timeout` of its kind, the reaper also ends a free
+`netsimd` daemon that an emulator can start in its group. An emulator that a person started is
+never ended. An emulator that the holder or an agent started outside banksman is ended only
+with the `unused_timeout` of its kind, by `banksman reap`, and only when it is an emulator of
+an allowed AVD, no lease of the AVD exists, the agent process that its environment names has
+ended, and `dumpsys power` on the emulator says that it has had no input for that time. The
+reaper then records that process by its pid and start time under the lock of the lease store,
+and signals only that process. With the `free_timeout` of its kind, the reaper also ends a free
 emulator that banksman started; under the lock of the lease store, it first writes a lease of
 its own for the emulator, so that no request gets the emulator while it ends. `release --end`
 ends an emulator in the same way, as a take-back with the `on_void` hook of the kind, and only
@@ -71,11 +76,13 @@ AVD that runs and that banksman does not know, from `/proc` on Linux and from th
 macOS. The environment can hold secrets of the person or the program that started the
 emulator, so banksman uses only the pid variable of each agent from it, stores nothing of it,
 and shows nothing of it except the pid of the agent in `status`. It reads no environment of
-an emulator that banksman knows, and the kernel gives no environment of a process of another
-user. A process of the user can set the pid variable of a running agent in an emulator that it
-starts, and so give that emulator to that agent; that is no more than the process could do if
-it gave the agent the serial of the emulator, and banksman still ends no emulator that it did
-not start.
+an emulator that banksman knows, except in `banksman reap` with the `unused_timeout` of the
+kind, for an emulator that banksman did not start and that has had no input for that time, and
+the kernel gives no environment of a process of another user. A process of the user can set the
+pid variable of a running agent in an emulator that it starts, and so give that emulator to
+that agent; that is no more than the process could do if it gave the agent the serial of the
+emulator. With the pid variable of an agent that has ended, it can also make the unused timeout
+end that emulator after a time without input; the process could end the emulator itself.
 
 **Configuration runs as code.** A kind's hooks are commands that banksman runs as the
 user. So banksman refuses a configuration file that a user other than the user and root

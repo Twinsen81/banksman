@@ -33,6 +33,7 @@ from banksman.lease import (
     REBOOTED,
     RELEASE,
     RELEASED_END,
+    UNUSED,
     Holder,
     SerialSeen,
     Timeouts,
@@ -1988,6 +1989,23 @@ def test_the_reaper_ends_a_free_instance_under_a_lease_of_its_own(state_dir, sys
     assert [(event.event, event.resource, event.reason) for event in events] == [
         (REAP, "qa_phone", FREE_TIMEOUT)
     ]
+
+
+def test_the_reapers_lease_of_an_instance_without_input_has_its_own_reason(state_dir, system):
+    seen = []
+
+    def take_back(lease):
+        seen.append(lease.void_reason)
+        return None
+
+    def unused(leased, now):
+        return [Unused("qa_phone", "emulator", "emulator-5556", UNUSED)]
+
+    events = []
+    store = Store(state_dir, system, take_back=take_back, unused=unused, record=events.append)
+    assert reaped(store) == [("qa_phone", UNUSED, RELEASED)]
+    assert seen == [UNUSED]
+    assert [(event.event, event.reason) for event in events] == [(REAP, UNUSED)]
 
 
 def test_the_search_for_free_instances_gets_every_resource_with_a_lease_file(state_dir, system):

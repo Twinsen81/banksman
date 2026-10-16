@@ -9,8 +9,10 @@ banksman records each emulator that it starts, and each emulator that runs when 
 AVD ends, by its pid and start time. Every other emulator of an allowed AVD is unmanaged: a
 person or a program outside banksman started it, and a request does not get it unless its kind
 says so, or unless the request comes from the agent process that started it. The reaper ends
-only an emulator that banksman started: when a lease of it becomes void, or, with the free
-timeout of its kind, when no lease of its AVD has existed for that time.
+an emulator that banksman started when a lease of it becomes void, or, with the free timeout of
+its kind, when no lease of its AVD has existed for that time. With the unused timeout of its
+kind, `banksman reap` also ends an emulator without a lease that has had no input for that
+time, when banksman started it, or when an agent started it and that agent has ended.
 """
 
 from __future__ import annotations
@@ -95,6 +97,17 @@ class Started:
     pid: int
 
 
+@dataclass(frozen=True)
+class Idle:
+    """A running emulator that has had no input for the unused timeout of its kind, and that
+    banksman started, or that an agent started that has ended."""
+
+    resource: str
+    pid: int
+    started: str
+    serial: str
+
+
 # Records a serial in the lease: the first of these that no held lease records. Returns it.
 Claim = Callable[[Sequence[str]], str]
 
@@ -160,6 +173,7 @@ def discover(
     *,
     agents: Sequence[str] = (),
     accounts: bool = True,
+    input_age: bool | None = None,
     system: System | None = None,
 ) -> tuple[Document, dict[str, StartedBy | None]]:
     """Find the AVDs, as the preset does, and which of those that run are unmanaged, each with
@@ -169,7 +183,7 @@ def discover(
     emulator in the first seconds of its start, or on a console port outside its range.
     """
     system = Machine() if system is None else system
-    document = android.emulators(settings, accounts=accounts)
+    document = android.emulators(settings, accounts=accounts, input_age=input_age)
     notes = document.setdefault("notes", [])
     table: dict[int, Process] | None
     try:
@@ -330,6 +344,90 @@ def unused(
     ]
 
 
+def idle(
+    kind: Kind,
+    settings: Android,
+    allowed: Callable[[str], bool],
+    *,
+    agents: Sequence[str] = (),
+    system: System | None = None,
+    run: android.Run | None = None,
+) -> list[Idle]:
+    """Find the emulators of a kind that the unused timeout of the kind ends, if no lease of
+    their AVD exists.
+
+    `allowed` tells whether agents may use an AVD of the kind: an emulator of any other AVD,
+    such as a personal one, is never ended. An emulator that banksman did not start ends only
+    when the agent process that started it has ended, so one that a person started stays. This
+    runs adb, about 100 ms for each emulator, so the reaper runs it before it takes the lock of
+    the lease store, and checks the rest under the lock (see `ending`).
+    """
+    if kind.unused_timeout is None:
+        return []
+    system = Machine() if system is None else system
+    table = system.commands()
+    # With several emulators of one AVD, the one at the serial that adb gives can be any of them.
+    processes = {
+        name: running
+        for name, running in by_avd(table).items()
+        if len(running) == 1 and allowed(name)
+    }
+    # adb starts its server when it does not run. A scheduled reap on a machine without an
+    # emulator must not start it.
+    if not processes:
+        return []
+    document = android.emulators(settings, run, accounts=False, input_age=True)
+    known = load(kind, system)
+    found = []
+    for instance in document["instances"]:
+        name, facts = instance["name"], instance["facts"]
+        serial, age = facts.get("serial"), facts.get(android.INPUT_AGE)
+        # An input age that is not known never counts as idle.
+        if name not in processes or not isinstance(serial, str) or not isinstance(age, int):
+            continue
+        if age < kind.unused_timeout:
+            continue
+        (process,) = processes[name]
+        entry = known.get(name)
+        if entry is None or entry.pid != process.pid or not entry.created:
+            started = None
+            if agents:
+                env = system.environment(process.pid)
+                started = identity.started_by(table, agents, process, env or {})
+            if started is None or started.running:
+                continue
+        found.append(Idle(name, process.pid, process.started, serial))
+    return found
+
+
+def ending(kind: Kind, found: Idle, system: System | None = None) -> bool:
+    """Record the emulator that the unused timeout ends, so that every reaper that takes the
+    reaper's lease of it back ends that process and no other. Return False when it no longer
+    runs, or another emulator is recorded for its AVD.
+
+    The caller holds the lock of the lease store, and has found no lease file of the AVD. The
+    emulator counts as one that banksman knows from now on, as one that runs when a lease of its
+    AVD ends.
+    """
+    system = Machine() if system is None else system
+    with changing(kind, system) as known:
+        if system.running([found.pid]).get(found.pid) != found.started:
+            return False
+        entry = known.get(found.resource)
+        if entry is not None:
+            return entry.pid == found.pid
+        known[found.resource] = Known(
+            found.resource,
+            found.pid,
+            found.started,
+            system.boot_id(),
+            False,
+            time.time(),
+            _port(found.serial),
+        )
+    return True
+
+
 def _marked(entry: Known, leased: Collection[str], now: float) -> Known:
     if entry.resource in leased:
         return replace(entry, free_since=None)
@@ -340,16 +438,20 @@ def _marked(entry: Known, leased: Collection[str], now: float) -> Known:
     return entry
 
 
-def take_back(kind: Kind, resource: str, system: System | None = None) -> str | None:
+def take_back(
+    kind: Kind, resource: str, system: System | None = None, *, unused: bool = False
+) -> str | None:
     """End the emulator of a void lease when banksman started it; record any other emulator of
-    the AVD that runs, as at a release.
+    the AVD that runs, as at a release. With `unused`, for the reaper's lease of an emulator
+    that the unused timeout ends, end the emulator of the record, whoever started it: `ending`
+    recorded it.
 
     Return None when that is done, or why the emulator did not end.
     """
     system = Machine() if system is None else system
     try:
         entry = load(kind, system).get(resource)
-        if entry is None or not entry.created:
+        if entry is None or not (entry.created or unused):
             adopt(kind, resource, system)
             return None
     except BanksmanError as exc:
@@ -562,6 +664,11 @@ def _last_line(resource: str) -> str:
 
 def _serial(port: int) -> str:
     return f"{_SERIAL_PREFIX}{port}"
+
+
+def _port(serial: str) -> int | None:
+    number = serial.removeprefix(_SERIAL_PREFIX)
+    return int(number) if serial.startswith(_SERIAL_PREFIX) and number.isdigit() else None
 
 
 def _runs(system: System, pid: int, started: str) -> bool:

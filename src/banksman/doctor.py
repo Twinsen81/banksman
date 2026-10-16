@@ -6,7 +6,8 @@ inventory, the Android SDK, the PATH, and the directories of banksman.
 
 It changes nothing: it does not reap, it creates no directory, and it writes no log. It reads the
 lease files as the adb guard does, and it runs discovery without the accounts, `adb version`,
-and `adb devices -l`. It never calls the network.
+`adb devices -l`, and `launchctl print` or `crontab -l` for the reap job. It never calls the
+network.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from banksman import __version__, android, emulator, printed
+from banksman import __version__, android, emulator, job, printed
 from banksman.config import (
     ANDROID_EMULATOR,
     ANDROID_REMOTE,
@@ -126,6 +127,7 @@ def run(shell: Shell) -> list[Check]:
         _guarded("adb-wrapper", _adb_wrapper, wrapper, config),
         *_gradle(shell.home, config, config_path),
         *_skills(shell.home),
+        _guarded("reap-job", _reap_job, shell, config),
         _guarded("state-dir", _place, "state-dir", default_state_dir),
         _guarded("quarantine-dir", _place, "quarantine-dir", default_quarantine_dir),
         _guarded("log", _place, "log", default_log_path, False),
@@ -461,6 +463,89 @@ def _saved(name: str, path: Path, expected: str, fix: str, missing: Check) -> Ch
 
 def _differs(path: Path) -> str:
     return f"{path} is not what this banksman prints, for example a copy from an earlier version"
+
+
+def _reap_job(shell: Shell, config: Config | None) -> Check:
+    name = "reap-job"
+    if job.LAUNCHD:
+        path = shell.home / job.LAUNCH_AGENT
+        domain = f"gui/{os.getuid()}"
+        load = f"launchctl bootstrap {domain} {_quoted(path)}"
+        fix = f"banksman admin reap-agent > {_quoted(path)} && {load}"
+        try:
+            text = _read(path)
+        except _Unreadable as exc:
+            return Check(name, FAIL, f"cannot read {path}: {exc}", fix)
+        if text is None:
+            return _no_reap_job(name, f"{path} does not exist", fix, config)
+        # launchd keeps a loaded job until it is unloaded, also when the file changes.
+        fix = f"launchctl bootout {domain}/{job.LABEL}; {fix}"
+        command = job.saved_launchd(text)
+        if command is None:
+            return Check(name, FAIL, _differs(path), fix)
+        where = str(path)
+    else:
+        fix = "add the line that banksman admin reap-agent prints with crontab -e"
+        try:
+            table = job.crontab()
+        except job.JobError as exc:
+            return _no_reap_job(name, f"cannot read the crontab: {exc}", fix, config)
+        command, found = job.saved_cron(table)
+        if command is None:
+            if found:
+                return Check(
+                    name,
+                    FAIL,
+                    "the line of the crontab that runs banksman reap is not what this banksman"
+                    " prints",
+                    "replace it with the line that banksman admin reap-agent prints",
+                )
+            return _no_reap_job(name, "no line of the crontab runs banksman reap", fix, config)
+        where = "the crontab"
+    runs = shlex.join([*command, "reap"])
+    if not (os.path.isfile(command[0]) and os.access(command[0], os.X_OK)):
+        return Check(
+            name, FAIL, f"{where} runs {runs}, but {command[0]} is not an executable file", fix
+        )
+    current = job.program(shell.program)
+    if _real(command) != _real(current):
+        return Check(
+            name,
+            WARN,
+            f"{where} runs {runs}, but this banksman is {shlex.join(current)}, so the job can run"
+            " another install",
+            fix,
+        )
+    if job.LAUNCHD and not job.loaded():
+        return Check(
+            name,
+            WARN,
+            f"{where} is what this banksman prints, but launchd has not loaded it, so it does not"
+            " run before the next login",
+            load,
+        )
+    return Check(name, OK, f"{where} runs {runs} every 5 minutes")
+
+
+def _no_reap_job(name: str, detail: str, fix: str, config: Config | None) -> Check:
+    kinds = [] if config is None else list(config.kinds.values())
+    unused = [kind.name for kind in kinds if kind.unused_timeout is not None]
+    free = [kind.name for kind in kinds if kind.free_timeout is not None]
+    effects = []
+    if unused:
+        effects.append(f"the unused timeout of the kinds {_some(unused)} ends no emulator")
+    if free:
+        effects.append(
+            f"the free timeout of the kinds {_some(free)} ends an emulator only when a banksman"
+            " command runs"
+        )
+    if not effects:
+        return Check(name, SKIP, f"the reap job is not installed: {detail}")
+    return Check(name, WARN, f"{detail}, so {', and '.join(effects)}", fix)
+
+
+def _real(command: Sequence[str]) -> list[str]:
+    return [os.path.realpath(command[0]), *command[1:]]
 
 
 def _place(name: str, where: Callable[[], Path], directory: bool = True) -> Check:

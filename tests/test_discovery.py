@@ -163,7 +163,9 @@ def test_a_preset_returns_the_same_document(monkeypatch):
         "emulators": document({"name": "qa_phone_api35", "facts": {"api": 35}}),
         "devices": document({"name": "R5CR1234ABC", "accounts": []}),
     }
-    monkeypatch.setattr(android, "emulators", lambda settings, accounts: documents["emulators"])
+    monkeypatch.setattr(
+        android, "emulators", lambda settings, accounts, input_age: documents["emulators"]
+    )
     monkeypatch.setattr(android, "devices", lambda settings, accounts: documents["devices"])
     emulator = discovery.discover(Kind("emulator", preset="android-emulator"), Config())
     device = discovery.discover(Kind("device", preset="android-device"), Config())
@@ -239,8 +241,8 @@ def test_a_serial_that_names_another_instance_runs_the_discovery_without_account
     monkeypatch.setattr(android, "avd_name", lambda settings, serial: "qa_tablet")
     calls = []
 
-    def emulators(settings, accounts):
-        calls.append(accounts)
+    def emulators(settings, accounts, input_age):
+        calls.append((accounts, input_age))
         return document(
             {"name": "qa_phone", "facts": {"running": True, "serial": "emulator-5556"}},
             {"name": "qa_tablet", "facts": {"running": True, "serial": "emulator-5554"}},
@@ -252,14 +254,14 @@ def test_a_serial_that_names_another_instance_runs_the_discovery_without_account
         SerialSeen("qa_phone", "emulator", "emulator-5556", 3.0),
         SerialSeen("qa_tablet", "emulator", "emulator-5554", 3.0),
     )
-    assert calls == [False]
+    assert calls == [(False, None)]
 
 
 def test_a_known_serial_that_another_emulator_has_now_leaves_the_lease(monkeypatch):
     kind = Kind("emulator", preset="android-emulator")
     monkeypatch.setattr(android, "avd_name", lambda settings, serial: "qa_tablet")
 
-    def fails(settings, accounts):
+    def fails(settings, accounts, input_age):
         raise android.AndroidError("adb devices failed")
 
     monkeypatch.setattr(android, "emulators", fails)

@@ -253,8 +253,11 @@ banksman acquire --holding ui-tests --where form=phone --start --for "UI tests" 
   `acquire`.
 - A release leaves the emulator running, so the next request gets it without a boot. The
   reaper ends an emulator that banksman started when its lease becomes void, and, with the
-  `free_timeout` of the kind, when no lease of its AVD has existed for that time. So a script
-  uses `--start` also for an AVD that ran before.
+  `free_timeout` of the kind, when no lease of its AVD has existed for that time. With the
+  `unused_timeout` of the kind, `banksman reap` also ends an emulator without a lease and
+  without input for that time, when banksman started it, or when the agent that started it,
+  for example in a script of the project, has ended. So a script uses `--start` also for an
+  AVD that ran before.
 - A script that does not need the emulator again soon, for example at the end of a run of the
   whole suite, gives it back with `banksman release --end`, or `banksman_release --end`:
   banksman then ends the emulator at once when it started it, after the scripts of the lease,

@@ -53,8 +53,11 @@ resource, so an operator can also declare other resources, such as host ports or
   started outside banksman is not given to an agent.
 - **Starts emulators, when asked.** With `--start`, banksman starts a granted emulator that
   does not run, on a port that it chooses before the boot, so two parallel starts never mix
-  up their serials. It ends only the emulators that it started, also, with a free timeout,
-  the free ones that no lease has used for that time. With `--no-wait`, the start goes on
+  up their serials. It ends the emulators that it started, also, with a free timeout, the free
+  ones that no lease has used for that time. With an unused timeout, `banksman reap` also ends
+  an emulator without a lease that has had no input for that time, when banksman started it or
+  the agent that started it has ended, and `banksman admin reap-agent` prints a launchd job or a
+  crontab line that runs `banksman reap` every 5 minutes. With `--no-wait`, the start goes on
   after `acquire` has returned, so the time limit of an agent's shell tool does not stop it,
   and `banksman wait` waits until the emulator is ready.
 - **A guard for raw adb calls, when the operator wants it.** An optional `adb` wrapper on the

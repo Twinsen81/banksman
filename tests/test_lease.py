@@ -181,14 +181,14 @@ def test_a_lease_file_of_an_earlier_schema_is_refused():
     data = LEASE.to_json()
     del data["label"]
     data["schema"] = 7
-    with pytest.raises(LeaseFormatError, match="does not have schema 11"):
+    with pytest.raises(LeaseFormatError, match="does not have schema 12"):
         Lease.from_json(data)
 
 
-@pytest.mark.parametrize("schema", [8, 9, 10])
+@pytest.mark.parametrize("schema", [8, 9, 10, 11])
 def test_a_lease_file_of_an_earlier_schema_that_only_lacks_a_void_reason_is_read(schema):
-    # Schemas 9, 10, and 11 only added void reasons, so every file of schema 8, 9, or 10 is a valid
-    # file of schema 11, and the leases of an earlier banksman stay after the upgrade.
+    # Schemas 9 to 12 only added void reasons, so every file of schema 8 to 11 is a valid file of
+    # schema 12, and the leases of an earlier banksman stay after the upgrade.
     lease = replace(LEASE, label="login-tests")
     data = lease.to_json()
     data["schema"] = schema
@@ -200,11 +200,11 @@ def test_a_lease_file_of_an_earlier_schema_that_only_lacks_a_void_reason_is_read
 def test_a_lease_file_with_a_schema_that_is_not_a_number_is_refused(schema):
     data = LEASE.to_json()
     data["schema"] = schema
-    with pytest.raises(LeaseFormatError, match="does not have schema 11"):
+    with pytest.raises(LeaseFormatError, match="does not have schema 12"):
         Lease.from_json(data)
 
 
-@pytest.mark.parametrize("void", ["free_timeout", "acquire_gone", "released_end"])
+@pytest.mark.parametrize("void", ["free_timeout", "acquire_gone", "released_end", "unused"])
 def test_a_draining_lease_keeps_its_void_reason(void):
     data = replace(LEASE, state="draining", drain_deadline=10.0, void_reason=void)
     assert Lease.from_json(data.to_json()).void_reason == void
