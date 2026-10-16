@@ -343,13 +343,14 @@ def test_a_failed_discovery_is_a_warning(capsys, config_path):
 
 
 def test_doctor_gives_the_command_that_fetches_the_catalogue_of_a_remote_kind(
-    capsys, config_path, tmp_path
+    capsys, config_path, tmp_path, sdk
 ):
     # The notes for agents only say that the operator can fetch it.
     configure(
         config_path,
-        f'[android]\n{FakeAndroidCli(tmp_path).config()}'
+        f'{FakeAndroidCli(tmp_path).config()}'
         '[kinds.remote]\npreset = "android-remote"\nproject = "lab-project"\n',
+        sdk=sdk,
     )
     save_inventory(Inventory(kinds={"remote": Decisions(allowed=("tokay:34",))}))
     found = checks(capsys)
