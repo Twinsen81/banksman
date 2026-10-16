@@ -256,11 +256,25 @@ minutes, and its lease can become void in the middle.
   (`drain_timeout`, section 5), the lease is quarantined: it is never handed on, and it
   stays in `status` until a person runs `banksman admin release --force`, also when the
   script ends later. That command refuses while a banksman process takes the lease back or
-  resets its instance, because that process could act on the instance of the next holder. The command that
-  quarantines the lease names the processes that still run, on standard error, and the log
-  records them, with whether stopping was on for the kind (section 10). The reason:
-  banksman must never stop a process that the user did not expect, whatever agent the user
-  runs. A blocked device costs time; a stopped process costs trust.
+  resets its instance, because that process could act on the instance of the next holder. The
+  log records the processes that still run, with whether stopping was on for the kind
+  (section 10). The reason: banksman must never stop a process that the user did not expect,
+  whatever agent the user runs. A blocked device costs time; a stopped process costs trust.
+- **A quarantine notice goes to the operator.** Every command reaps first, so a command of
+  any caller can quarantine the lease of another holder, for example a build that releases
+  its build slot. A person gets the notice on standard error: the processes that still run and
+  the command that releases the lease, or why the take-back failed. Every other caller gets
+  nothing about the lease of another holder. About a lease of its own, whose owner process is
+  the caller, a process above it, or its agent process, it gets one line without a pid and
+  without a command: that the lease is quarantined, why, and that only the operator can
+  release it. An agent reads a command in its output as its next step, and a build or a
+  scheduled job has no reader. A caller is a person when its standard error is a terminal and
+  no agent process is above it (section 9): a Gradle daemon can be older than the agent that
+  uses it now, so banksman does not find that agent, but the daemon reads the output of
+  banksman through a pipe. banksman reads the process list for this only when the reap has
+  something to tell. The log keeps every fact (section 10). The operator finds the quarantines
+  in `status` and `watch`, and `banksman admin doctor` lists them with the command that
+  releases them.
 - **A release waits for the scripts too.** When the holder releases a lease while its
   scripts still run, the lease drains like a void lease, so that the scripts end before the
   resource is handed on. The `on_void` hook does not run: the holder gives the instance back
@@ -980,8 +994,9 @@ holdings apart (section 9).
   the remote directory, shows the live reservations of the account as notes, and then works as
   for every kind. The remote directory is `~/.local/state/banksman/remote`, outside `/tmp`, as
   the log; next to the state directory when only `BANKSMAN_STATE_DIR` is set; or
-  `BANKSMAN_REMOTE_DIR`. Without a catalogue, the kind has no instances, and agents see the
-  command that fetches it; `status` shows how old the catalogue is. Every other command reads
+  `BANKSMAN_REMOTE_DIR`. Without a catalogue, the kind has no instances, and agents see that
+  only the operator can fetch it; `banksman admin doctor` gives the command. `status` shows how
+  old the catalogue is. Every other command reads
   only local sources: the catalogue; the properties file `active-connections.properties` in
   `cli_state`, where the daemon of each live connection writes its reservation and its port;
   `adb devices -l`, which confirms the port; and `<kind>-sessions.json`, banksman's own record
@@ -1180,7 +1195,10 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   finds. Under the table, it shows why the discovery of a
   kind failed, and how many other notes the discovery has. Those notes can name an instance
   that agents may not use, such as a personal phone that is not authorized, so the commands
-  for agents, `status` and `acquire`, never show their text; `banksman admin discover` does.
+  for agents, `status` and `acquire`, never show their text; `banksman admin discover` and
+  `banksman admin doctor` do. What `status` and `acquire` say names no command of the operator,
+  for any caller: it says only that the operator sees more, or can act. An agent would read
+  such a command as its next step, and the JSON of `status` is the same for every caller.
 - `banksman watch` shows the same table again every 5 seconds, or at `--interval`. Each
   refresh reaps, reads the configuration again, and runs discovery. An error is shown in
   place of the table, and the next refresh tries again.
@@ -1211,7 +1229,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   time between two touches, both in awake time. They are the data for tuning the hard cap and
   the idle timeout. Behind the adb guard, a device call of the holder is a touch too
   (section 12), so for such a holder the longest time between two touches is the longest time
-  without a banksman call and without a device call. A quarantine records its problem, or the scripts that still ran at the
+  without a banksman call and without a device call. A quarantine records its problem, such
+  as why the take-back of its instance failed, or the scripts that still ran at the
   drain deadline and whether stopping was on for the kind, so that an operator can see what
   the reaper would have stopped before turning `stop = true` on (section 4). The end of a free
   emulator after its free timeout is a reap with the reason `free_timeout` and the holder
@@ -1242,7 +1261,9 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   as a skill in `~/.claude/skills/banksman/SKILL.md` and `~/.codex/skills/banksman/SKILL.md` are
   what the installed banksman prints; that the state directory, the quarantine directory, the
   log, and the record of lease ends belong to the user and can be written; the quarantined
-  leases, as a warning; and the holder that `whoami` shows in this shell. It compares the
+  leases, as a warning, with the command that releases them; and the holder that `whoami`
+  shows in this shell. The doctor is the place where the operator finds that command: the
+  notice of the reaper gives it only to a person (section 4). It compares the
   content of each file, so a printed file needs no version stamp, also while every development
   install has the same version. A file that is missing is `skip`, because each of these parts is
   optional, but a part that another part needs is a failure: an init script without the
@@ -1251,7 +1272,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   file at the place where the setup saves the adb wrapper is the saved wrapper, also when it is
   empty: the redirection of a save empties the file before banksman runs, so a save that failed
   leaves an empty `adb`, which does nothing. For a failure or a warning, the doctor gives the
-  command or the step that repairs it. It does not reap, creates no directory, writes no log,
+  command or the step that repairs it, such as `banksman admin discover --kind <kind>` when the
+  discovery of a remote kind fails. It does not reap, creates no directory, writes no log,
   and calls no network. It runs discovery, as `status` does, `adb version`, and `adb devices
   -l`, and none of them changes a device. The doctor sees the `PATH` and the home directory of
   its own shell, which can differ from those of the agents. `--json` prints each check with
@@ -1891,6 +1913,8 @@ Done:
 - A start that continues after its `acquire`: `acquire --start --no-wait` prints the grant at
   once and continues the start in a process that the shell tool of an agent does not stop, and
   `banksman wait` waits until the holding is ready.
+- Notices for the operator go only to a person: an agent, a build, or a scheduled job gets no
+  command of the operator, and nothing about the quarantines of other holders.
 
 Next:
 

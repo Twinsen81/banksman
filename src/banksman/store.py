@@ -31,6 +31,7 @@ from banksman.history import (
     RELEASE as RELEASE_EVENT,
     VOID,
     Event,
+    problem_text,
     processes,
 )
 from banksman.lease import (
@@ -289,10 +290,10 @@ class Reaped:
 
 
 # Ends the instance of a void lease, for example with the on_void hook of its kind. Returns
-# False when that cannot be confirmed; the lease is then quarantined. Only one reaper at a time
-# runs it for a lease, but a reaper that ended in the middle leaves the lease to the next one,
-# so it must be safe to run again.
-TakeBack = Callable[[Lease], bool]
+# why that cannot be confirmed, or None; with a reason, the lease is quarantined, and the log
+# records the reason. Only one reaper at a time runs it for a lease, but a reaper that ended in
+# the middle leaves the lease to the next one, so it must be safe to run again.
+TakeBack = Callable[[Lease], str | None]
 # Whether the reaper may signal the scripts of a void lease.
 Stopping = Callable[[Lease], bool]
 # Returns the free instances that the reaper ends now. It gets the resources that have a lease
@@ -368,8 +369,8 @@ def lasting_dir(variable: str) -> Path:
     return Path(home) / ".local" / "state" / "banksman"
 
 
-def _take_back_nothing(lease: Lease) -> bool:
-    return True
+def _take_back_nothing(lease: Lease) -> str | None:
+    return None
 
 
 def _stop_nothing(lease: Lease) -> bool:
@@ -968,7 +969,7 @@ class Store:
                         self.system.wall_clock(),
                         FORCE_RELEASE,
                         resource,
-                        problem=f"the lease file could not be read: {current.error}",
+                        problem=problem_text(f"the lease file could not be read: {current.error}"),
                     )
                 )
             return current, running
@@ -1103,15 +1104,16 @@ class Store:
                     )
                     return [Reaped(self._write(waiting), DRAINING, users)]
                 lease = self._write(replace(current, users=()))
-        freed = lease.void_reason == RELEASE or self._take_back(lease)
+        failure = None if lease.void_reason == RELEASE else self._take_back(lease)
         self._stop(lease)
         with self._lock():
             current = self._claimed(lease, me)
             if current is None:
                 return []
-            if not freed:
+            if failure is not None:
                 quarantined = self._write(_quarantined(current))
-                self._log(QUARANTINE, quarantined, problem="its instance could not be taken back")
+                problem = problem_text(f"its instance could not be taken back: {failure}")
+                self._log(QUARANTINE, quarantined, problem=problem)
                 return [Reaped(quarantined, QUARANTINED)]
             ended = replace(current, ended=True, reaper_pid=None, reaper_started=None)
             table = self.system.process_table() if ended.users else {}

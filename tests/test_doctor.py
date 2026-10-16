@@ -4,7 +4,7 @@ import json
 import sys
 
 import pytest
-from helpers import drain, edit_lease, hook, write_config
+from helpers import FakeAndroidCli, drain, edit_lease, hook, write_config
 
 from banksman import doctor, printed
 from banksman.cli import main
@@ -340,6 +340,27 @@ def test_a_failed_discovery_is_a_warning(capsys, config_path):
     found = checks(capsys)
     assert found["kind:lab"]["status"] == "warn"
     assert found["kind:lab"]["detail"].startswith("discovery failed: ")
+
+
+def test_doctor_gives_the_command_that_fetches_the_catalogue_of_a_remote_kind(
+    capsys, config_path, tmp_path, sdk
+):
+    # The notes for agents only say that the operator can fetch it.
+    configure(
+        config_path,
+        f'{FakeAndroidCli(tmp_path).config()}'
+        '[kinds.remote]\npreset = "android-remote"\nproject = "lab-project"\n',
+        sdk=sdk,
+    )
+    save_inventory(Inventory(kinds={"remote": Decisions(allowed=("tokay:34",))}))
+    found = checks(capsys)
+    assert found["kind:remote"] == {
+        "check": "kind:remote",
+        "status": "warn",
+        "detail": "discovery failed: kind remote has no catalogue of models yet; only the"
+        " operator can fetch it",
+        "fix": "banksman admin discover --kind remote",
+    }
 
 
 def test_the_init_script_without_the_build_slot_part_fails(capsys, config_path, home):

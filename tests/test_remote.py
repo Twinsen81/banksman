@@ -336,16 +336,17 @@ def test_a_tool_that_hangs_is_stopped_and_its_output_is_kept(cli):
 # Discovery.
 
 
-def test_without_a_catalogue_agents_see_the_command_that_fetches_it(
+def test_without_a_catalogue_agents_see_that_only_the_operator_can_fetch_it(
     capsys, config_path, sdk, cli
 ):
     configure(config_path, sdk, cli)
     assert main(["status"]) == 0
     out = capsys.readouterr().out
     assert (
-        "note: kind remote: kind remote has no catalogue of models yet: run banksman admin"
-        " discover --kind remote"
+        "note: kind remote: kind remote has no catalogue of models yet; only the operator can"
+        " fetch it"
     ) in out
+    assert "banksman admin" not in out
     assert cli.calls() == []
 
 
@@ -361,7 +362,8 @@ def test_the_allowed_models_are_free_and_paid_without_a_call_of_the_tool(
     assert sorted(rows) == ["OP573DL1:34", "r11:30", "tokay:34", "tokay:35"]
     assert (rows["tokay:34"]["KIND"], rows["tokay:34"]["STATE"]) == ("remote (paid)", "free")
     assert rows["r11:30"]["FORM"] == "watch"
-    assert "the catalogue of models was fetched 3 days ago" in out
+    assert "the catalogue of models was fetched 3 days ago; only the operator can renew it" in out
+    assert "banksman admin" not in out
     assert cli.calls() == []
 
 
@@ -930,7 +932,9 @@ def test_a_reservation_that_has_ended_already_counts_as_taken_back(
     assert leases() == {}
 
 
-def test_a_take_back_that_fails_quarantines_the_model(capsys, config_path, sdk, cli, state_dir):
+def test_a_take_back_that_fails_quarantines_the_model(
+    capsys, config_path, sdk, cli, state_dir, person
+):
     _, answers = start_one(capsys, config_path, sdk, cli)
     answers[f"device remote remove {FIRST}"] = {"err": "Error: UNAVAILABLE\n", "status": 1}
     cli.answer(answers)
@@ -1058,7 +1062,7 @@ def test_release_with_end_of_a_model_without_a_reservation_says_so(capsys, confi
 
 
 def test_release_with_end_quarantines_a_model_whose_reservation_does_not_end(
-    capsys, config_path, sdk, cli
+    capsys, config_path, sdk, cli, person
 ):
     values, answers = start_one(capsys, config_path, sdk, cli)
     answers[f"device remote remove {FIRST}"] = {"err": "Error: UNAVAILABLE\n", "status": 1}

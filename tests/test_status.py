@@ -231,7 +231,7 @@ def test_status_does_not_show_a_note_that_can_name_a_personal_device(capsys, con
         f"[kinds.device]\ndiscover = {json.dumps(hook(PRINT_ARGUMENT, json.dumps(found)))}\n",
     )
     save_inventory(Inventory(kinds={"device": Decisions(allowed=("qa_phone",))}))
-    expected = "kind device: discovery has 1 other note; banksman admin discover shows it"
+    expected = "kind device: discovery has 1 other note, which only the operator sees"
     assert main(["status"]) == 0
     out = capsys.readouterr().out
     assert "R5CR_PERSONAL" not in out

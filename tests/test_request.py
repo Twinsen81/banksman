@@ -174,7 +174,7 @@ def test_agents_see_how_many_notes_discovery_has_but_not_the_notes():
     # A note can name a device that agents may not use, such as a personal phone.
     result = search(CONFIG, INVENTORY, [Part()], discover=FakeDiscovery())
     assert result.notes == (
-        "kind device: discovery has 1 other note; banksman admin discover shows it",
+        "kind device: discovery has 1 other note, which only the operator sees",
     )
 
 
