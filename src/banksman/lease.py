@@ -376,8 +376,13 @@ def void_reason(
         return HARD_CAP
     quiet = now - lease.touched
     # A restarted run can keep touching its lease from carried-over commands, so owner death
-    # voids the lease only after the grace period without a touch.
-    if lease.owner_pid is not None and not owner_runs(lease, running) and quiet >= lease.owner_grace:
+    # voids the lease only after the grace period without a touch. The time comes first, so that
+    # the adb guard reads the process list only when the rule can apply.
+    if (
+        lease.owner_pid is not None
+        and quiet >= lease.owner_grace
+        and not owner_runs(lease, running)
+    ):
         return OWNER_GONE
     if lease.idle_timeout is not None and quiet >= lease.idle_timeout:
         return IDLE

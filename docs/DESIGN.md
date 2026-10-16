@@ -1415,12 +1415,24 @@ is a setup of the operator, and a project needs nothing for it.
     the instance, or the reaper that takes it back. Their hooks act on the device, and a reaper
     can run inside a command of another agent (section 5).
 
+  A held lease of the caller's holding counts only while it is valid. The guard does not reap,
+  so a lease file can still say that a lease is held after the lease became void, for example
+  after its idle timeout while no banksman command ran, until the next command takes it back. So
+  the guard applies the rules of the reaper (section 3) to such a lease itself, apart from the
+  rule for a restart: a restart ends every process, and such a lease has an owner process above
+  the caller, or its id in the environment of the caller, so it is a lease of this boot, and no
+  call waits for `sysctl`. The guard reads the process list for these rules only when a rule
+  needs a process: for the owner process after the grace period without a touch, and for a
+  booting lease whose `acquire` must still run. So a call with `BANKSMAN_LEASE` still decides
+  without the process list while its lease is touched.
+
   Otherwise the guard exits with status 3, the status of `check` for a lost lease, and runs no
   adb. On standard error, it names the device, the state of its lease, and the holder as
   `status` shows it, and it ends with "Run banksman agent-guide and follow it", so that an agent
   without the guide of section 15 learns how to get a device. The purpose in it is untrusted
   text, as in `status`. When the lease belongs to the caller's holding but is no longer held,
-  for example because it drains, the guard says that the lease is lost.
+  for example because it drains, or is void by the rules of the reaper, the guard says that the
+  lease is lost, and why.
 - **Touches.** The idle timeout ends a lease that nothing touched (section 3). An agent that
   uses its device with direct adb calls, for example to verify a change on the device, makes
   many device calls and no banksman call. So a device command that the guard lets run because
@@ -1467,11 +1479,9 @@ is a setup of the operator, and a project needs nothing for it.
 
   When the agent process has several holdings, for example one for each subagent of a session,
   the line names the devices of each holding after its label, and says to use only the devices
-  of the agent's own holding. The guard does not reap, so a lease file can still say that a
-  lease is held after the lease became void, for example after its idle timeout or its hard cap.
-  The guard applies the rules of the reaper (section 3) to these leases itself, and the line
-  names no void lease, because the next banksman command takes it back. Without such a lease,
-  the line is:
+  of the agent's own holding. The line names only the leases that are valid by the rules of the
+  reaper, as the guard applies them for a device call, because the next banksman command takes
+  a void lease back. Without such a lease, the line is:
 
   ```text
   banksman: no device here is yours. Get one with banksman acquire; do not choose a serial from this list.
@@ -1575,8 +1585,8 @@ is a setup of the operator, and a project needs nothing for it.
   lease files without the lock: every write replaces a whole file with a rename, so each file
   that it reads is whole. It also reads the copies of the quarantines, so a quarantine counts
   also after a restart emptied the state directory. It does not reap, and it runs no discovery.
-  It reads the process list only when the lease id in `BANKSMAN_LEASE` does not decide, and it
-  asks `adb devices` only when the command line does not name the device by a serial that a
+  It reads the process list only when the lease id in `BANKSMAN_LEASE` does not decide, or when
+  a rule of the reaper needs a process for the lease of that id, and it asks `adb devices` only when the command line does not name the device by a serial that a
   lease has. It takes the lock of the lease store only to add an event to the log, that is, for
   a call that it refuses or warns about, and for a touch that is due, about once a minute
   for each holding that uses its device. It waits for the lock for half a second at most, and

@@ -453,6 +453,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through the guard now reads the lease files and the process list, which adds about 30 ms to
   the call. The guide for agents names the line. The lease schema and the output schema do not
   change.
+- The adb guard now refuses an agent's device command on a lease of its holding that is void by
+  the rules of the reaper but not reaped yet, for example after the idle timeout while no
+  banksman command ran. It says that the lease is lost, and why, as for a lease that drains,
+  and a person's call still passes. Before, the call ran, and the touch left the void lease as
+  it was. The guard applies every rule but the one for a restart, and reads the process list
+  for them only when a rule needs a process, so a call with `BANKSMAN_LEASE` still decides
+  without the process list while its lease is touched. The lease schema and the output schema
+  do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

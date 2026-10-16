@@ -326,6 +326,45 @@ def test_an_own_lease_that_is_lost_is_refused(store, system, state_dir):
     )
 
 
+def test_an_own_lease_that_is_void_but_not_reaped_yet_is_lost(store, system):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    # The guard does not reap, so the lease file still says that the lease is ready.
+    system.advance(Timeouts().idle_timeout)
+    found = verdict(system, "-s", "emulator-5554", "shell")
+    assert (found.action, found.reason) == (REFUSED, LOST)
+    assert found.text == (
+        "adb shell: refused: your lease of emulator-5554 (e2e_phone) is lost: nothing touched the"
+        " lease for the idle timeout. Stop using the device, and acquire one again"
+    )
+
+
+def test_a_void_lease_of_the_lease_id_is_lost_for_an_agent(store, system):
+    granted = lease(store, system, "e2e_phone", mine(owner_pid=None), serial="emulator-5554")
+    env = {"BANKSMAN_LEASE": granted.lease_id}
+    system.advance(Timeouts().hard_cap)
+    assert check(system, "-s", "emulator-5554", "shell", env=env) == (
+        "adb shell: refused: your lease of emulator-5554 (e2e_phone) is lost: the lease reached"
+        " its hard cap. Stop using the device, and acquire one again"
+    )
+    # A person's call passes, as on a lease that drains.
+    system.parents[ME] = 1
+    assert check(system, "-s", "emulator-5554", "shell", env=env) is None
+
+
+def test_the_lease_id_reads_the_process_list_only_after_the_grace_of_the_owner(store, system):
+    # The owner process is the run that acquired the lease, as for banksman run --where.
+    system.spawn(700, parent=SHELL)
+    granted = lease(store, system, "e2e_phone", mine(owner_pid=700), serial="emulator-5554")
+    env = {"BANKSMAN_LEASE": granted.lease_id}
+    system.end(700)
+    system.advance(Timeouts().owner_grace - 1)
+    assert check(NoProcessList(), "-s", "emulator-5554", "shell", env=env) is None
+    system.advance(1)
+    assert "is lost: the owner process ended" in check(
+        system, "-s", "emulator-5554", "shell", env=env
+    )
+
+
 def test_a_physical_device_is_found_by_its_name_in_every_state(store, system, state_dir):
     lease(store, system, "R5CR1234ABC", other(), kind="device")
     edit_lease(state_dir, "R5CR1234ABC", drain)
@@ -1264,7 +1303,7 @@ def test_a_void_lease_is_not_touched_again(machine, store, system, state_dir):
     lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
     system.advance(20 * 60)
     before = touched(state_dir, "e2e_phone")
-    assert guarded("-s", "emulator-5554", "shell") == 0
+    assert guarded("-s", "emulator-5554", "shell") == guard.EXIT_REFUSED
     assert touched(state_dir, "e2e_phone") == before
 
 

@@ -23,7 +23,7 @@ import contextlib
 import os
 import re
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -46,7 +46,15 @@ from banksman.history import (
     History,
 )
 from banksman.identity import find_agent, find_holder
-from banksman.lease import HELD, LEASE_VARIABLE, RESOURCE_NAME, Holder, Lease, void_reason
+from banksman.lease import (
+    HELD,
+    LEASE_VARIABLE,
+    RESOURCE_NAME,
+    VOID_REASONS,
+    Holder,
+    Lease,
+    void_reason,
+)
 from banksman.sanitize import clean
 from banksman.store import (
     Snapshot,
@@ -346,9 +354,23 @@ class Caller:
         """Return the caller as acquire would record it: the worktree, the agent, and the issue."""
         return find_holder(self._table, self.rules, env=self.env, pid=self.pid)
 
-    def running(self) -> dict[int, str]:
-        """Map each process that runs now to its start time, as `System.running` does."""
-        return {pid: process.started for pid, process in self._table.items()}
+    def void(self, lease: Lease) -> str | None:
+        """Return why a lease that its file shows as held is void by the rules of the reaper, or
+        None while it is valid.
+
+        The guard does not reap, so the file of a lease still says that it is held after its idle
+        timeout, for example, until the next banksman command takes it back. The process list is
+        read only when a rule needs a process.
+        """
+        # Not the rule for a restart, so that no call waits for sysctl. A restart ends every
+        # process, and a lease of the caller's holding has an owner process above the caller, or
+        # its id in the environment of the caller, so it is a lease of this boot.
+        return void_reason(
+            lease,
+            boot_id=lease.boot_id,
+            now=self.system.clock(),
+            running=_Started(lambda: self._table),
+        )
 
     def descends_from(self, pid: int | None, started: str | None) -> bool:
         process = None if pid is None else self._table.get(pid)
@@ -382,6 +404,23 @@ class Caller:
         return find_agent(self._table, self.rules.agents, self.pid, self.env)[0]
 
 
+class _Started(Mapping[int, str]):
+    """The start time of each process that runs now, from a process list that is read at the
+    first question."""
+
+    def __init__(self, table: Callable[[], Mapping[int, Process]]) -> None:
+        self._table = table
+
+    def __getitem__(self, pid: int) -> str:
+        return self._table()[pid].started
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self._table())
+
+    def __len__(self) -> int:
+        return len(self._table())
+
+
 def decide(
     call: Call, caller: Caller, devices: Snapshot, strict: str | None, listing: Listing
 ) -> Decision:
@@ -411,22 +450,25 @@ def decide(
         return RUNS
     # The lease id that `banksman run` gives its command decides without the process list.
     token = caller.token_holding()
-    if not unreadable and all(lease.state in HELD and lease.holding == token for lease in leases):
+    if not unreadable and all(
+        lease.state in HELD and lease.holding == token and caller.void(lease) is None
+        for lease in leases
+    ):
         return Decision(used=tuple(leases))
     # A call without an agent process is a person's: it may use any device, and it is no
     # use by the holder.
     if not caller.is_agent():
         return RUNS
     for lease in leases:
-        if lease.state in HELD and lease.holding in caller.holdings:
+        mine = lease.holding in caller.holdings
+        void = caller.void(lease) if mine and lease.state in HELD else None
+        if mine and lease.state in HELD and void is None:
             continue
         # The on_acquire hook of the acquire that resets the instance, or the on_void hook of
         # the reaper that takes it back, which can run inside a command of another agent.
         if caller.descends_from(lease.reaper_pid, lease.reaper_started):
             continue
-        return Decision(
-            _refused(call, caller, serial, lease, mine=lease.holding in caller.holdings)
-        )
+        return Decision(_refused(call, caller, serial, lease, mine=mine, void=void))
     if unreadable:
         text = (
             f"adb {call.command}: refused: the lease file of {serial} cannot be read, so the"
@@ -455,21 +497,14 @@ def devices_note(config: Config, env: Mapping[str, str], system: System) -> str 
         caller = Caller(env, snapshot.leases, system, config.holder)
         if not caller.is_agent():
             return None
+        # The next banksman command takes a void lease back, so the line does not name it.
         own = [
             lease
             for lease in _devices(snapshot, config).leases
-            if lease.state in HELD and lease.holding in caller.holdings
+            if lease.state in HELD
+            and lease.holding in caller.holdings
+            and caller.void(lease) is None
         ]
-        # The guard does not reap, so a lease file still says that a lease is held after the
-        # lease became void, for example after its idle timeout. The next banksman command takes
-        # such a lease back, so the line must not tell the agent to use its device.
-        if own:
-            boot_id, now, running = system.boot_id(), system.clock(), caller.running()
-            own = [
-                lease
-                for lease in own
-                if void_reason(lease, boot_id=boot_id, now=now, running=running) is None
-            ]
     except (BanksmanError, OSError):
         # adb devices is not checked, so a process list that the sandbox hides, or a lease file
         # of a newer banksman, only leaves the line out.
@@ -691,12 +726,15 @@ def _not_leased(call: Call, caller: Caller, serial: str, *, refuse: bool) -> Ver
     return Verdict(WARNED, NOT_LEASED, text, call.command, caller, serial)
 
 
-def _refused(call: Call, caller: Caller, serial: str, lease: Lease, *, mine: bool) -> Verdict:
+def _refused(
+    call: Call, caller: Caller, serial: str, lease: Lease, *, mine: bool, void: str | None = None
+) -> Verdict:
     device = serial if lease.resource == serial else f"{serial} ({lease.resource})"
     if mine:
+        why = f"it is {lease.state}" if void is None else VOID_REASONS[void]
         text = (
-            f"adb {call.command}: refused: your lease of {device} is lost: it is {lease.state}."
-            " Stop using the device, and acquire one again"
+            f"adb {call.command}: refused: your lease of {device} is lost: {why}. Stop using the"
+            " device, and acquire one again"
         )
         return Verdict(REFUSED, LOST, text, call.command, caller, serial, (lease,))
     text = (
