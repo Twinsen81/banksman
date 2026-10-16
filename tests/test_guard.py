@@ -18,7 +18,7 @@ import time
 from importlib import resources
 
 import pytest
-from helpers import SRC, FakeSystem, drain, edit_lease, write_config
+from helpers import NOT_ENDED, SRC, FakeSystem, drain, edit_lease, write_config
 
 from banksman import android, cli, guard
 from banksman import store as store_module
@@ -433,7 +433,7 @@ def test_the_reaper_must_be_above_the_caller(store, system, state_dir):
 def test_a_quarantine_counts_also_after_a_restart_emptied_the_state_directory(
     state_dir, quarantine_dir, system
 ):
-    store = Store(state_dir, system, take_back=lambda lease: False)
+    store = Store(state_dir, system, take_back=lambda lease: NOT_ENDED)
     lease(store, system, "R5CR1234ABC", other(), kind="device")
     system.advance(20 * 60)
     store.reap()

@@ -24,6 +24,7 @@ from pathlib import Path
 from banksman import __version__, android, emulator, printed
 from banksman.config import (
     ANDROID_EMULATOR,
+    ANDROID_REMOTE,
     PRESETS,
     Config,
     HolderRules,
@@ -237,7 +238,12 @@ def _kind(kind: Kind, config: Config, inventory: Inventory) -> Check:
     name = f"kind:{kind.name}"
     found = discover(kind, config, accounts=False)
     if found.failure is not None:
-        return Check(name, WARN, f"discovery failed: {found.failure}")
+        # The discovery of a remote kind fails when its catalogue of models is missing or not
+        # valid, and the notes for agents do not say how to fetch it.
+        fix = None
+        if kind.preset == ANDROID_REMOTE:
+            fix = f"banksman admin discover --kind {kind.name}"
+        return Check(name, WARN, f"discovery failed: {found.failure}", fix)
     names = {instance.name for instance in found.instances}
     allowed = inventory.kinds.get(kind.name, Decisions()).allowed
     # The notes are text, not a warning: many of them name a normal state, such as a personal

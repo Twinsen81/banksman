@@ -278,17 +278,16 @@ def _shown_notes(found: Found) -> list[str]:
 
     A note of a hook or a preset can name an instance that the inventory does not allow, such as
     a personal phone that is not authorized. So agents see only why the discovery failed, and how
-    many other notes it has. The operator sees them with banksman admin discover.
+    many other notes it has. The operator sees them with banksman admin discover and banksman
+    admin doctor. The notes for agents name no command of the operator: an agent would read it
+    as its next step.
     """
     shown = [] if found.failure is None else [f"kind {found.kind}: {found.failure}"]
     shown += found.shown
     hidden = len(found.notes) - len(shown)
     if hidden:
         notes = "1 other note" if hidden == 1 else f"{hidden} other notes"
-        them = "it" if hidden == 1 else "them"
-        shown.append(
-            f"kind {found.kind}: discovery has {notes}; banksman admin discover shows {them}"
-        )
+        shown.append(f"kind {found.kind}: discovery has {notes}, which only the operator sees")
     return shown
 
 

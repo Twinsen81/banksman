@@ -12,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from helpers import SRC, age_lease, drain, edit_lease, reap_in_child
+from helpers import NOT_ENDED, SRC, age_lease, drain, edit_lease, reap_in_child
 
 from banksman import LEASE_SCHEMA
 from banksman.errors import BanksmanError
@@ -312,7 +312,7 @@ def reset_by_another_process(store, system, state_dir):
 
 def test_a_void_lease_is_taken_back_only_after_its_reset_has_ended(state_dir, system):
     taken = []
-    store = Store(state_dir, system, take_back=lambda lease: taken.append(lease) or True)
+    store = Store(state_dir, system, take_back=lambda lease: taken.append(lease))
     lease = reset_by_another_process(store, system, state_dir)
     system.advance(5 * 60)
     # The reset can still act on the instance, so no take-back runs next to it.
@@ -350,7 +350,7 @@ def test_a_booting_lease_is_taken_back_as_soon_as_the_process_that_resets_it_has
     state_dir, system
 ):
     taken = []
-    store = Store(state_dir, system, take_back=lambda lease: taken.append(lease) or True)
+    store = Store(state_dir, system, take_back=lambda lease: taken.append(lease))
     lease = reset_by_another_process(store, system, state_dir)
     system.end(4242)
     # Nothing marks the lease ready any more, so the next command does not wait for the boot
@@ -372,7 +372,7 @@ def test_a_pid_that_names_a_new_process_does_not_keep_a_booting_lease(store, sys
 
 def test_a_release_during_a_reset_by_another_process_waits_for_the_reset(state_dir, system):
     taken = []
-    store = Store(state_dir, system, take_back=lambda lease: taken.append(lease) or True)
+    store = Store(state_dir, system, take_back=lambda lease: taken.append(lease))
     lease = reset_by_another_process(store, system, state_dir)
     drained = store.release("emu-1", lease.lease_id)
     assert (drained.state, drained.void_reason, drained.reaper_pid) == (DRAINING, RELEASE, 4242)
@@ -560,7 +560,7 @@ def test_a_reaped_resource_can_be_leased_again(store, system):
 
 def test_a_resource_that_cannot_be_taken_back_is_quarantined(state_dir, system):
     freed = False
-    store = Store(state_dir, system, take_back=lambda lease: freed)
+    store = Store(state_dir, system, take_back=lambda lease: None if freed else NOT_ENDED)
     store.acquire("phone-1", "device", Holder(OWNER))
     system.advance(20 * 60)
     assert reaped(store) == [("phone-1", IDLE, QUARANTINED)]
@@ -581,7 +581,7 @@ def test_a_quarantine_that_a_restart_did_not_clear_stays(state_dir, system):
 
     def take_back(lease):
         attempts.append(lease.void_reason)
-        return False
+        return NOT_ENDED
 
     store = Store(state_dir, system, take_back=take_back)
     store.acquire("phone-1", "device", Holder(OWNER))
@@ -605,7 +605,7 @@ def test_the_owner_check_fails_while_the_lease_drains(state_dir, system):
         with pytest.raises(NotHeld, match="draining"):
             Store(state_dir, system).touch("phone-1", lease.lease_id)
         checks.append(lease.state)
-        return True
+        return None
 
     store = Store(state_dir, system, take_back=take_back)
     store.acquire("phone-1", "device", Holder(OWNER))
@@ -649,7 +649,7 @@ def test_a_reaper_finishes_its_own_lease_after_a_failed_take_back(state_dir, sys
         attempts.append(lease.lease_id)
         if len(attempts) == 1:
             raise OSError("the device did not answer")
-        return True
+        return None
 
     store = Store(state_dir, system, take_back=take_back)
     store.acquire("phone-1", "device", Holder(OWNER))
@@ -664,7 +664,7 @@ def test_a_reaper_leaves_a_lease_that_another_reaper_took_over(state_dir, system
     def take_back(lease):
         system.processes = {4242: "start-4242"}
         edit_lease(state_dir, "phone-1", taken_back_by(4242))
-        return True
+        return None
 
     store = Store(state_dir, system, take_back=take_back)
     store.acquire("phone-1", "device", Holder(OWNER))
@@ -682,7 +682,7 @@ def test_only_one_reaper_takes_a_lease_back(state_dir):
 
     def take_back(lease):
         second.append(reap_in_child(state_dir))
-        return True
+        return None
 
     first = Store(state_dir, machine, take_back=take_back).reap()
     assert second == [[]]
@@ -717,7 +717,7 @@ def test_only_one_reaper_takes_back_a_lease_from_an_earlier_boot(state_dir, stat
 
     def take_back(lease):
         second.append(reap_in_child(state_dir))
-        return True
+        return None
 
     first = Store(state_dir, machine, take_back=take_back).reap()
     assert second == [[]]
@@ -733,7 +733,7 @@ def test_the_reaper_does_not_delete_a_newer_lease(state_dir, system):
         (state_dir / "phone-1.json").unlink()
         Store(state_dir, system).acquire("phone-1", "device", Holder(OTHER))
         edit_lease(state_dir, "phone-1", drain)
-        return True
+        return None
 
     store = Store(state_dir, system, take_back=take_back)
     store.acquire("phone-1", "device", Holder(OWNER))
@@ -1301,7 +1301,7 @@ def test_the_instance_is_ended_once_and_before_its_scripts_end(state_dir, system
 
     def take_back(lease):
         ended.append([user.pid for user in lease.users])
-        return True
+        return None
 
     store = Store(state_dir, system, take_back=take_back)
     entered(store, system)
@@ -1315,7 +1315,7 @@ def test_the_instance_is_ended_once_and_before_its_scripts_end(state_dir, system
 
 def test_a_release_while_scripts_run_drains_without_ending_the_instance(state_dir, system):
     ended = []
-    store = Store(state_dir, system, take_back=lambda lease: ended.append(lease) or True)
+    store = Store(state_dir, system, take_back=lambda lease: ended.append(lease))
     lease = entered(store, system)
     drained = store.release("phone-1", lease.lease_id)
     assert (drained.state, drained.void_reason) == (DRAINING, RELEASE)
@@ -1363,7 +1363,7 @@ def test_with_stopping_on_a_script_that_left_meanwhile_is_not_stopped(state_dir,
         system.parents[os.getpid()] = 202
         Store(state_dir, system).leave("phone-1", lease.lease_id, 202)
         del system.parents[os.getpid()]
-        return True
+        return None
 
     store = stopping(state_dir, system, take_back=take_back)
     lease = entered(store, system)
@@ -1389,7 +1389,7 @@ def test_a_release_with_end_takes_the_instance_back_at_once(state_dir, system):
         assert grant_one(other, [Choice("emu-1", "emulator")], Holder(OTHER)) is None
         with pytest.raises(BanksmanError, match=f"process {os.getpid()} takes emu-1 back"):
             other.force_release("emu-1")
-        return True
+        return None
 
     events = []
     store = Store(state_dir, system, take_back=take_back, record=events.append)
@@ -1422,7 +1422,7 @@ def test_a_release_without_end_says_so_in_the_log(state_dir, system):
 
 def test_a_release_with_end_waits_for_the_scripts_before_the_instance_ends(state_dir, system):
     seen = []
-    store = Store(state_dir, system, take_back=lambda lease: seen.append(lease) or True)
+    store = Store(state_dir, system, take_back=lambda lease: seen.append(lease))
     lease = entered(store, system)
     drained = store.release("phone-1", lease.lease_id, end=True)
     assert (drained.state, drained.void_reason) == (DRAINING, RELEASED_END)
@@ -1459,7 +1459,7 @@ def test_a_release_with_end_whose_scripts_still_run_at_the_drain_deadline_is_qua
 def test_with_stopping_on_a_release_with_end_stops_the_scripts_before_the_end(state_dir, system):
     seen = []
     store = stopping(
-        state_dir, system, take_back=lambda lease: seen.append(list(system.signals)) or True
+        state_dir, system, take_back=lambda lease: seen.append(list(system.signals))
     )
     lease = entered(store, system)
     assert store.release("phone-1", lease.lease_id, end=True) is None
@@ -1469,7 +1469,7 @@ def test_with_stopping_on_a_release_with_end_stops_the_scripts_before_the_end(st
 
 def test_a_release_with_end_whose_scripts_outlive_the_stop_waits_for_them(state_dir, system):
     seen = []
-    store = stopping(state_dir, system, take_back=lambda lease: seen.append(lease) or True)
+    store = stopping(state_dir, system, take_back=lambda lease: seen.append(lease))
     lease = entered(store, system)
     system.ignores[201] = {signal.SIGTERM, signal.SIGKILL}
     drained = store.release("phone-1", lease.lease_id, end=True)
@@ -1486,14 +1486,14 @@ def test_a_release_with_end_whose_scripts_outlive_the_stop_waits_for_them(state_
 
 def test_a_release_with_end_whose_instance_does_not_end_is_quarantined(state_dir, system):
     events = []
-    store = Store(state_dir, system, take_back=lambda lease: False, record=events.append)
+    store = Store(state_dir, system, take_back=lambda lease: NOT_ENDED, record=events.append)
     lease = store.acquire("emu-1", "emulator", Holder(OWNER))
     quarantined = store.release("emu-1", lease.lease_id, end=True)
     assert (quarantined.state, quarantined.void_reason) == (QUARANTINED, RELEASED_END)
     assert lease_file(state_dir, "emu-1")["state"] == QUARANTINED
     assert (events[-1].event, events[-1].problem) == (
         QUARANTINE,
-        "its instance could not be taken back",
+        f"its instance could not be taken back: {NOT_ENDED}",
     )
     with pytest.raises(Busy, match="quarantined"):
         store.acquire("emu-1", "emulator", Holder(OTHER))
@@ -1508,7 +1508,7 @@ def test_a_release_with_end_that_ends_in_the_middle_is_finished_by_the_next_reap
         attempts.append(lease.attempts)
         if len(attempts) == 1:
             raise KeyboardInterrupt
-        return True
+        return None
 
     store = Store(state_dir, system, take_back=take_back)
     lease = store.acquire("emu-1", "emulator", Holder(OWNER))
@@ -1525,7 +1525,7 @@ def test_a_release_with_end_during_a_reset_by_another_process_waits_for_the_rese
     state_dir, system
 ):
     seen = []
-    store = Store(state_dir, system, take_back=lambda lease: seen.append(lease) or True)
+    store = Store(state_dir, system, take_back=lambda lease: seen.append(lease))
     lease = reset_by_another_process(store, system, state_dir)
     drained = store.release("emu-1", lease.lease_id, end=True)
     assert (drained.state, drained.void_reason, drained.reaper_pid) == (
@@ -1553,7 +1553,7 @@ def test_a_release_with_end_needs_the_current_lease(state_dir, system):
 
 def test_a_holding_release_ends_only_the_instances_that_it_names(state_dir, system):
     seen = []
-    store = Store(state_dir, system, take_back=lambda lease: seen.append(lease.resource) or True)
+    store = Store(state_dir, system, take_back=lambda lease: seen.append(lease.resource))
     system.spawn(100)
     needs = [Need((Choice("emu-1", "emulator"),)), Need((Choice("phone-1", "device"),))]
     granted = store.grant(needs, Holder(OWNER, owner_pid=100))
@@ -1595,7 +1595,7 @@ def test_force_release_waits_for_a_take_back_that_runs(state_dir, system):
     def take_back(lease):
         with pytest.raises(BanksmanError, match=f"process {os.getpid()} takes phone-1 back"):
             Store(state_dir, system).force_release("phone-1")
-        return True
+        return None
 
     store = Store(state_dir, system, take_back=take_back)
     store.acquire("phone-1", "device", Holder(OWNER))
@@ -1676,7 +1676,7 @@ def test_the_end_of_a_take_back_is_recorded_when_its_lease_is_deleted(state_dir,
         # A discovery that starts while the instance is taken back can still see it.
         discovered.append(system.clock())
         system.advance(5)
-        return True
+        return None
 
     store = Store(state_dir, system, take_back=take_back)
     store.acquire("phone-1", "device", Holder(OTHER))
@@ -1896,7 +1896,7 @@ def test_after_a_restart_the_reapers_quarantined_lease_keeps_the_holder_before_i
     store = Store(state_dir, system)
     lease = store.acquire("qa_phone", "emulator", Holder(OWNER))
     store.release("qa_phone", lease.lease_id)
-    failing = Store(state_dir, system, take_back=lambda lease: False, unused=ending("qa_phone"))
+    failing = Store(state_dir, system, take_back=lambda lease: NOT_ENDED, unused=ending("qa_phone"))
     assert reaped(failing) == [("qa_phone", FREE_TIMEOUT, QUARANTINED)]
     # The take-back after the restart gives the reaper's lease the reason rebooted.
     system.boot = "boot-2"
@@ -1969,7 +1969,7 @@ def test_the_reaper_ends_a_free_instance_under_a_lease_of_its_own(state_dir, sys
         assert grant_one(other, [Choice("qa_phone", "emulator")], Holder(OTHER)) is None
         with pytest.raises(BanksmanError, match=f"process {os.getpid()} takes qa_phone back"):
             other.force_release("qa_phone")
-        return True
+        return None
 
     events = []
     store = Store(
@@ -2010,7 +2010,7 @@ def test_the_reaper_never_ends_an_instance_that_has_a_lease(state_dir, system):
 
 
 def test_a_free_instance_that_does_not_end_is_quarantined(state_dir, system):
-    store = Store(state_dir, system, take_back=lambda lease: False, unused=ending("qa_phone"))
+    store = Store(state_dir, system, take_back=lambda lease: NOT_ENDED, unused=ending("qa_phone"))
     assert reaped(store) == [("qa_phone", FREE_TIMEOUT, QUARANTINED)]
     assert lease_file(state_dir, "qa_phone")["state"] == QUARANTINED
     with pytest.raises(Busy, match="quarantined"):
@@ -2024,7 +2024,7 @@ def test_the_end_of_a_free_instance_that_a_reaper_left_is_finished(state_dir, sy
         attempts.append(lease.attempts)
         if len(attempts) == 1:
             raise KeyboardInterrupt
-        return True
+        return None
 
     store = Store(state_dir, system, take_back=take_back, unused=ending("qa_phone"))
     with pytest.raises(KeyboardInterrupt):
@@ -2057,7 +2057,9 @@ def test_a_draining_lease_of_an_earlier_boot_is_finished_on_this_boot(store, sys
 
 def failing(state_dir, system, results=()):
     results = list(results)
-    return Store(state_dir, system, take_back=lambda lease: results.pop(0) if results else False)
+    return Store(
+        state_dir, system, take_back=lambda lease: results.pop(0) if results else NOT_ENDED
+    )
 
 
 def quarantine(store, system):
@@ -2103,7 +2105,7 @@ def test_a_quarantine_that_a_cleaner_deletes_during_a_command_is_not_handed_on(
 
 
 def test_a_quarantine_survives_restarts_that_empty_tmp(state_dir, quarantine_dir, system):
-    store = failing(state_dir, system, results=[False, False, True])
+    store = failing(state_dir, system, results=[NOT_ENDED, NOT_ENDED, None])
     quarantine(store, system)
     shutil.rmtree(state_dir)
     system.boot = "boot-2"

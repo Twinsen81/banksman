@@ -8,7 +8,7 @@ import stat
 from pathlib import Path
 
 import pytest
-from helpers import drain, edit_lease
+from helpers import NOT_ENDED, drain, edit_lease
 
 from banksman import OUTPUT_SCHEMA
 from banksman.history import (
@@ -24,6 +24,7 @@ from banksman.history import (
     Event,
     READABLE_SCHEMAS,
     History,
+    MAX_PROBLEM_LENGTH,
     LogError,
     Process,
 )
@@ -128,14 +129,34 @@ def test_a_quarantine_records_the_scripts_that_still_ran_and_whether_stopping_wa
 
 
 def test_a_failed_take_back_records_the_problem(state_dir, system):
-    store, events = recording(state_dir, system, take_back=lambda lease: False)
+    store, events = recording(state_dir, system, take_back=lambda lease: NOT_ENDED)
     store.acquire("phone-1", "device", Holder(OWNER))
     system.advance(21 * 60)
     store.reap()
     assert (events[-1].event, events[-1].problem) == (
         QUARANTINE,
-        "its instance could not be taken back",
+        f"its instance could not be taken back: {NOT_ENDED}",
     )
+
+
+def test_a_long_take_back_failure_keeps_its_quarantine_event_readable(
+    state_dir, system, tmp_path
+):
+    # A remote tool can print a line of 300 characters, and the log adds its own words to it.
+    history = History(tmp_path / "log.jsonl")
+    failure = "android device remote remove failed:\n\x1b[31m" + "x" * 400
+    store = Store(state_dir, system, take_back=lambda lease: failure, record=history.append)
+    store.acquire("phone-1", "device", Holder(OWNER))
+    system.advance(21 * 60)
+    store.reap()
+    events, skipped = history.read()
+    assert skipped == 0
+    problem = events[-1].problem
+    assert (events[-1].event, len(problem)) == (QUARANTINE, MAX_PROBLEM_LENGTH)
+    assert problem.startswith(
+        "its instance could not be taken back: android device remote remove failed: xxx"
+    )
+    assert problem.endswith("...")
 
 
 def test_a_take_back_that_never_finishes_records_the_problem(state_dir, system):
@@ -150,7 +171,7 @@ def test_a_take_back_that_never_finishes_records_the_problem(state_dir, system):
 
 
 def test_a_quarantine_of_an_earlier_boot_is_void_again(state_dir, system):
-    store, events = recording(state_dir, system, take_back=lambda lease: False)
+    store, events = recording(state_dir, system, take_back=lambda lease: NOT_ENDED)
     store.acquire("phone-1", "device", Holder(OWNER))
     system.advance(21 * 60)
     store.reap()
@@ -161,7 +182,7 @@ def test_a_quarantine_of_an_earlier_boot_is_void_again(state_dir, system):
 
 
 def test_a_forced_release_records_the_state_of_the_lease(state_dir, system):
-    store, events = recording(state_dir, system, take_back=lambda lease: False)
+    store, events = recording(state_dir, system, take_back=lambda lease: NOT_ENDED)
     store.acquire("phone-1", "device", Holder(OWNER))
     system.advance(21 * 60)
     store.reap()

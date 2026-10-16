@@ -963,7 +963,7 @@ def test_release_with_end_during_a_reset_leaves_an_emulator_that_banksman_did_no
 
 
 def test_release_with_end_quarantines_an_emulator_that_does_not_end(
-    capsys, config_path, sdk, monkeypatch
+    capsys, config_path, sdk, monkeypatch, person
 ):
     configure(config_path, sdk)
     status, values, err = acquire(capsys, "--where", "avd=qa_phone", "--start")
@@ -1080,7 +1080,7 @@ def test_a_void_lease_leaves_the_emulator_that_the_holder_started(
 
 
 def test_an_emulator_that_does_not_end_quarantines_the_avd(
-    capsys, config_path, sdk, state_dir, monkeypatch
+    capsys, config_path, sdk, state_dir, monkeypatch, person
 ):
     configure(config_path, sdk)
     status, _, err = acquire(capsys, "--where", "avd=qa_phone", "--start")

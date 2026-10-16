@@ -38,6 +38,7 @@ from banksman.lease import (
     is_purpose,
     is_wall_time,
 )
+from banksman.sanitize import clean
 
 ACQUIRE = "acquire"
 RELEASE = "release"
@@ -467,6 +468,14 @@ def _is_seconds(value: object) -> bool:
         and math.isfinite(value)
         and value >= 0
     )
+
+
+def problem_text(text: str) -> str:
+    """Return a problem as the log accepts it: one line without control characters, and at most
+    MAX_PROBLEM_LENGTH characters. A reader leaves out an event whose problem is not valid, so a
+    long error of a tool or a hook would hide the whole event."""
+    text = clean(" ".join(text.split()))
+    return text if len(text) <= MAX_PROBLEM_LENGTH else text[: MAX_PROBLEM_LENGTH - 3] + "..."
 
 
 def _is_problem(value: object) -> bool:

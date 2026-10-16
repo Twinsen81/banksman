@@ -257,7 +257,7 @@ def test_on_void_gets_the_serial_that_discovery_finds_at_the_take_back(
     assert out.read_text() == shown
 
 
-def test_a_failing_on_void_hook_quarantines_the_lease(capsys, state_dir, config_path):
+def test_a_failing_on_void_hook_quarantines_the_lease(capsys, state_dir, config_path, person):
     write_config(
         config_path, f"[kinds.emulator]\non_void = {json.dumps(hook('raise SystemExit(3)'))}\n"
     )
@@ -400,7 +400,9 @@ def test_a_script_whose_lease_is_revoked_ends_by_its_own_check_loop(state_dir):
         _clean_up(script, work)
 
 
-def test_by_default_a_script_that_does_not_stop_quarantines_its_lease(capsys, state_dir):
+def test_by_default_a_script_that_does_not_stop_quarantines_its_lease(
+    capsys, state_dir, person
+):
     holder = Holder(OWNER, owner_pid=os.getpid())
     lease = Store(state_dir, Machine()).acquire("phone-1", "device", holder)
     script = _start(SCRIPT_WITHOUT_A_CHECK_LOOP)

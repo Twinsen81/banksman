@@ -413,21 +413,26 @@ def save_catalogue(kind: Kind, models: Sequence[Model], fetched: float) -> Path:
 
 
 def load_catalogue(kind: Kind) -> tuple[list[Model], float]:
-    """Return the models of the catalogue of a kind, and when it was fetched."""
-    renew = f"run banksman admin discover --kind {kind.name}"
+    """Return the models of the catalogue of a kind, and when it was fetched.
+
+    The errors reach agents as notes of discovery, so they name no command of the operator.
+    """
+    renew = "only the operator can fetch it again"
     path = _catalogue_path(kind)
     data = _read(path)
     if data is None:
-        raise RemoteError(f"kind {kind.name} has no catalogue of models yet: {renew}")
+        raise RemoteError(
+            f"kind {kind.name} has no catalogue of models yet; only the operator can fetch it"
+        )
     if (
         not isinstance(data, dict)
         or data.get("schema") != FILE_SCHEMA
         or not isinstance(data.get("models"), list)
         or not _is_time(data.get("fetched_at"))
     ):
-        raise RemoteError(f"the catalogue of kind {kind.name} is not valid: {renew}")
+        raise RemoteError(f"the catalogue of kind {kind.name} is not valid; {renew}")
     if data.get("project") != kind.project:
-        raise RemoteError(f"the catalogue of kind {kind.name} is of another project: {renew}")
+        raise RemoteError(f"the catalogue of kind {kind.name} is of another project; {renew}")
     models = []
     for entry in data["models"]:
         if not isinstance(entry, dict):
@@ -499,7 +504,7 @@ def discover(
     models, fetched = load_catalogue(kind)
     shown = [
         f"kind {kind.name}: the catalogue of models was fetched {_age(time.time() - fetched)}"
-        f" ago; banksman admin discover --kind {kind.name} renews it"
+        " ago; only the operator can renew it"
     ]
     notes: list[str] = []
     assert kind.project is not None

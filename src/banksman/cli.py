@@ -23,6 +23,7 @@ from banksman import (
     console,
     doctor,
     emulator,
+    fencing,
     guard,
     hooks,
     printed,
@@ -105,7 +106,7 @@ from banksman.store import (
     default_state_dir,
     satisfiable,
 )
-from banksman.system import Machine, System
+from banksman.system import Machine, Process, System
 
 VERSION_LINE = (
     f"banksman {__version__} (output schema {OUTPUT_SCHEMA}, lease schema {LEASE_SCHEMA})"
@@ -704,12 +705,72 @@ def _print_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
     print(console.table(header, rows))
 
 
-def _open_store(config: Config) -> Store:
+@dataclass(frozen=True)
+class _Caller:
+    # An agent process is above the caller, or the caller's environment names one.
+    agent: bool
+    # The processes whose leases are the caller's, by pid and start time: the caller, its
+    # ancestors, and its agent process.
+    processes: frozenset[tuple[int, str]]
+
+
+def _caller_of(
+    table: Mapping[int, Process], agents: Sequence[str], pid: int, env: Mapping[str, str]
+) -> _Caller:
+    agent, _ = find_agent(table, agents, pid, env)
+    pids = [pid, *fencing.ancestors(table, pid), *([] if agent is None else [agent])]
+    return _Caller(
+        agent is not None,
+        frozenset((each, table[each].started) for each in pids if each in table),
+    )
+
+
+class _Audience:
+    """Who reads the notices that a command prints on standard error about the leases.
+
+    Any command can reap the leases of other holders. A notice for the operator, such as the
+    command that releases a quarantine, goes only to a person. An agent reads such a command as
+    its next step, and a build or a scheduled job has no reader. So everyone else gets only a
+    short line about a lease of their own, and the log keeps every fact.
+    """
+
+    def __init__(self, agents: Sequence[str]) -> None:
+        self._agents = agents
+        self._caller: _Caller | None = None
+
+    def _find(self) -> _Caller:
+        # Only when there is something to tell: it reads the process list.
+        if self._caller is None:
+            try:
+                table = Machine().process_table()
+            except (BanksmanError, OSError):
+                # Nothing about any lease, rather than a command for the operator to an agent.
+                self._caller = _Caller(True, frozenset())
+            else:
+                self._caller = _caller_of(table, self._agents, os.getpid(), os.environ)
+        return self._caller
+
+    def person(self) -> bool:
+        """Whether a person reads standard error: it is a terminal, and no agent process is
+        above the caller. A Gradle daemon can be older than the agent that uses it now, so
+        banksman does not find that agent; but the daemon reads the output of banksman through
+        a pipe."""
+        return _stderr_is_terminal() and not self._find().agent
+
+    def owns(self, lease: Lease) -> bool:
+        return (lease.owner_pid, lease.owner_started) in self._find().processes
+
+
+def _stderr_is_terminal() -> bool:
+    return sys.stderr.isatty()
+
+
+def _open_store(config: Config, audience: _Audience) -> Store:
     machine = Machine()
     return Store(
         default_state_dir(),
         machine,
-        take_back=_take_back(config),
+        take_back=_take_back(config, audience),
         stopping=_stopping(config),
         record=_recorder(),
         unused=_unused(config, machine),
@@ -760,30 +821,34 @@ def _hooked(config: Config) -> Hooked:
     return hooked
 
 
-def _take_back(config: Config) -> TakeBack:
-    def take_back(lease: Lease) -> bool:
-        kind = config.kinds.get(lease.kind)
-        if lease.void_reason == RELEASED_END and _released_as_it_is(config, lease):
-            return True
-        # banksman ends only an instance that it started, and a hook of the kind runs after that.
-        failure = None
-        if kind is not None and kind.preset == ANDROID_REMOTE and lease.handle is not None:
-            failure = remote.take_back(kind, config.android, lease.resource, lease.handle)
-        elif kind is not None and kind.preset == ANDROID_EMULATOR:
-            failure = emulator.take_back(kind, lease.resource)
-        if failure is not None:
+def _take_back(config: Config, audience: _Audience) -> TakeBack:
+    def take_back(lease: Lease) -> str | None:
+        failure = _failed_take_back(config, lease)
+        if failure is not None and audience.person():
             print(clean(f"banksman: cannot take back {lease.resource}: {failure}"), file=sys.stderr)
-            return False
-        if kind is not None and kind.on_void is not None:
-            # The hook can end the instance by its serial. The serial in the lease can be old,
-            # and an emulator takes the lowest free port, so another instance can have it now.
-            lease = replace(lease, serial=_serial_found(config, kind, lease))
-        failure = hooks.take_back(config.kinds, lease)
-        if failure is not None:
-            print(clean(f"banksman: cannot take back {lease.resource}: {failure}"), file=sys.stderr)
-        return failure is None
+        return failure
 
     return take_back
+
+
+def _failed_take_back(config: Config, lease: Lease) -> str | None:
+    """Take back the instance of a void lease. Return why that cannot be confirmed, or None."""
+    kind = config.kinds.get(lease.kind)
+    if lease.void_reason == RELEASED_END and _released_as_it_is(config, lease):
+        return None
+    # banksman ends only an instance that it started, and a hook of the kind runs after that.
+    failure = None
+    if kind is not None and kind.preset == ANDROID_REMOTE and lease.handle is not None:
+        failure = remote.take_back(kind, config.android, lease.resource, lease.handle)
+    elif kind is not None and kind.preset == ANDROID_EMULATOR:
+        failure = emulator.take_back(kind, lease.resource)
+    if failure is not None:
+        return failure
+    if kind is not None and kind.on_void is not None:
+        # The hook can end the instance by its serial. The serial in the lease can be old, and
+        # an emulator takes the lowest free port, so another instance can have it now.
+        lease = replace(lease, serial=_serial_found(config, kind, lease))
+    return hooks.take_back(config.kinds, lease)
 
 
 def _released_as_it_is(config: Config, lease: Lease) -> bool:
@@ -843,15 +908,36 @@ def _stopping(config: Config) -> Stopping:
 def _reaped_store(config: Config | None = None) -> tuple[Store, list[Reaped]]:
     """Open the store and reap first, as every command that reads or changes leases does."""
     config = load_config() if config is None else config
-    store = _open_store(config)
+    audience = _Audience(config.holder.agents)
+    store = _open_store(config, audience)
     reaped = store.reap()
     for item in reaped:
-        if item.outcome == QUARANTINED and item.running:
-            print(clean(_still_running(item, config)), file=sys.stderr)
-        elif item.problem is not None:
-            message = f"banksman: quarantined {item.lease.resource}: {item.problem}"
-            print(clean(message), file=sys.stderr)
+        if item.outcome != QUARANTINED:
+            continue
+        resource = item.lease.resource
+        if audience.person():
+            if item.running:
+                print(clean(_still_running(item, config)), file=sys.stderr)
+            elif item.problem is not None:
+                print(clean(f"banksman: quarantined {resource}: {item.problem}"), file=sys.stderr)
+            # Otherwise the take-back failed, and it said why.
+        elif audience.owns(item.lease):
+            print(
+                clean(
+                    f"banksman: your lease on {resource} is quarantined, because"
+                    f" {_quarantined_because(item)}. Only the operator can release it."
+                ),
+                file=sys.stderr,
+            )
     return store, reaped
+
+
+def _quarantined_because(item: Reaped) -> str:
+    if item.running:
+        return "its scripts still ran at the drain deadline"
+    if item.problem is not None:
+        return item.problem
+    return "banksman could not take back its instance"
 
 
 def _still_running(item: Reaped, config: Config) -> str:
@@ -923,8 +1009,8 @@ def _status(config: Config) -> _Status:
 def _status_text(status: _Status) -> str:
     if not status.resources:
         text = (
-            "No resources. The configuration declares the kinds, and banksman admin discover"
-            " allows the instances that agents may use."
+            "No resources. The operator declares the kinds in the configuration, and chooses the"
+            " instances that agents may use."
         )
     else:
         text = console.table(
@@ -2249,10 +2335,7 @@ def _no_match(parts: Sequence[Part], candidates: Sequence[Sequence[Candidate]]) 
         )
         if empty.name is not None:
             found = f"part {empty.name}: {found}"
-    return (
-        f"{found}. The operator decides what agents may use, in the configuration and with"
-        " banksman admin discover"
-    )
+    return f"{found}. The operator decides what agents may use"
 
 
 def _busy(parts: Sequence[Part], candidates: Sequence[Sequence[Candidate]], *, still: bool) -> str:

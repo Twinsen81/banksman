@@ -489,4 +489,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ANDROID_SERIAL` under several devices. It also says that `PREVIOUS=self` counts every agent
   in the worktree, also the other subagents of a session, so `self` says nothing about what a
   sibling subagent did on the device.
+- Agents no longer see instructions for the operator. Every command reaps first, so a build
+  that released its build slot printed the quarantine of another holder's lease into the log
+  of an agent, with its pid and `banksman admin release --force`. The notice now goes in full
+  only to a person: standard error is a terminal, and no agent process is above the caller.
+  Every other caller, such as an agent, a Gradle build, or a scheduled job, gets nothing about
+  the lease of another holder, and one line without a pid and without a command about its own.
+  The log now also records why a take-back failed. The notes of `status` and `acquire` and the
+  messages of a remote kind without a catalogue no longer name `banksman admin`, for any
+  caller; `banksman admin doctor` gives the command that fetches the catalogue. The guide for
+  agents says to tell the user when only the operator can do something. The lease schema and
+  the output schema do not change.
 

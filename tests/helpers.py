@@ -117,6 +117,10 @@ class FakeSystem:
                 self.end(pid)
 
 
+# What a take-back that fails says, in the tests of the store.
+NOT_ENDED = "the instance did not end"
+
+
 def write_config(path: Path, text: str) -> Path:
     """Write a configuration file that banksman accepts, whatever the umask is."""
     path.write_text(text)

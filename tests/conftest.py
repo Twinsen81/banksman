@@ -70,6 +70,15 @@ def no_agent_pid(monkeypatch):
 
 
 @pytest.fixture
+def person(monkeypatch):
+    """Let each command count its caller as a person: standard error is a terminal, and no agent
+    process is above the caller. Under pytest, standard error is not a terminal, and an agent can
+    run the tests."""
+    monkeypatch.setattr(cli, "_stderr_is_terminal", lambda: True)
+    monkeypatch.setattr(cli, "find_agent", lambda table, agents, pid, env: (None, None))
+
+
+@pytest.fixture
 def system():
     return FakeSystem()
 
