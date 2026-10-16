@@ -11,7 +11,7 @@ import time
 import pytest
 from helpers import SRC, age_lease, edit_lease, hook, table_rows, write_config
 
-from banksman import __version__, cli, console
+from banksman import __version__, cli, console, hooks
 from banksman.cli import main
 from banksman.config import parse_duration
 from banksman.errors import BanksmanError
@@ -538,12 +538,34 @@ def test_agent_guide_prints_a_skill_for_the_installed_version(capsys):
     # It is text for agents, so it says what the agents must not do.
     assert "Never run `banksman admin`" in guide
     assert "Do not use `banksman release --all`" in guide
-    # It says when the agent can skip the setup of a device.
+    # It says when the agent can skip the setup of a device, and that a sibling subagent in the
+    # same worktree counts as the worktree.
     assert "`PREVIOUS=self` says that your worktree used the device last" in guide
+    assert "also the other subagents of your\n  session" in guide
     # It says when the agent ends what it started.
     assert "`STARTED=true` says that this request started the device" in guide
     # It says where the agent finds a refusal of the adb guard that a script hid.
     assert "run `banksman held` first" in guide
+
+
+def test_the_guide_names_every_key_of_the_grant_and_every_variable_of_run(capsys):
+    assert main(["agent-guide"]) == 0
+    guide = capsys.readouterr().out
+    keys = ("RESOURCE", "KIND", "LEASE", "STATE", "KEPT", "PREVIOUS", "STARTED", "SERIAL")
+    for key in (*keys, "HANDLE", "ACCOUNTS"):
+        assert f"`{key}`" in guide, key
+    # With --as, each key has the prefix of its part.
+    assert "`PHONE_SERIAL`" in guide
+    for placeholder in (
+        cli.SERIAL_PLACEHOLDER,
+        cli.RESOURCE_PLACEHOLDER,
+        cli.SERIALS_PLACEHOLDER,
+        cli.RESOURCES_PLACEHOLDER,
+    ):
+        assert f"`{placeholder}`" in guide, placeholder
+    for variable in (*hooks.VARIABLES, hooks.ANDROID_SERIAL):
+        assert f"`{variable}`" in guide, variable
+    assert f"`{hooks.NO_SERIAL}`" in guide
 
 
 def test_the_guide_waits_less_than_the_time_limit_of_an_agent(capsys):

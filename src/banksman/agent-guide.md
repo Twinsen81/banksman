@@ -20,13 +20,20 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
   the same label share one holding, and so one device.
 - Run the same command again to keep the same device, for example after you lost the output:
   banksman then prints `KEPT=true`. You do not need to remember the lease id.
-- banksman prints `KEY=value` lines: `RESOURCE` (the device), `SERIAL` (its serial, when it
-  runs), `LEASE` (the lease id), `PREVIOUS`, and `STARTED`.
+- banksman prints `KEY=value` lines: `RESOURCE` (the device), `KIND`, `LEASE` (the lease id),
+  `STATE` (`ready`, or `booting` after `--no-wait`), `KEPT`, `PREVIOUS`, and `STARTED`. It
+  also prints `SERIAL` when the device has a serial now, `HANDLE` (the reservation) for a remote
+  device, and `ACCOUNTS` with `--accounts`. With `--as <part>`, which names each part of a
+  request for several devices, each key starts with the name of its part in capitals, for
+  example `PHONE_SERIAL`, and there is no `RESOURCE` line.
 - `PREVIOUS=self` says that your worktree used the device last, gave it back with a release,
   and banksman knows of nothing that changed it since. What you installed or signed in can
   still be there: check it quickly, and skip only the setup that is still done. `self` is not a
   proof, because a person can have used the device. `PREVIOUS=other` says that another holder,
   a restart, or a take-back came between: set the device up again.
+- Every agent in your worktree counts as your worktree, also the other subagents of your
+  session. After another subagent of your worktree released the device, you get
+  `PREVIOUS=self`, and `self` says nothing about what that subagent did on the device.
 - `STARTED=true` says that this request started the device with `--start`: banksman started
   the emulator, or reserved the remote device. `STARTED=false` says that the device ran
   already, that you kept it, or that you did not use `--start`. When you started the device and
@@ -62,13 +69,20 @@ banksman run --holding login-tests -- ./scripts/ui-tests.sh --device {serial}
 ```
 
 - `banksman run` runs the command under the lease, and stops it when the lease is lost. Each
-  argument that is exactly `{serial}` becomes the serial of the device.
+  argument that is exactly `{serial}` becomes the serial of the device, and `{resource}` the
+  device.
 - The command gets `ANDROID_SERIAL`, so `adb` without `-s` and the connected tests of Gradle use
   the leased device. It also gets `BANKSMAN_LEASE`, so a script of the project that uses
-  banksman keeps your lease instead of taking another device.
+  banksman keeps your lease instead of taking another device. `BANKSMAN_RESOURCE`,
+  `BANKSMAN_KIND`, `BANKSMAN_SERIAL`, `BANKSMAN_ACCOUNTS` with accounts, and `BANKSMAN_HANDLE`
+  for a remote device carry the other values of the grant.
 - When your holding has several devices, the command runs under all of them, and stops when
   any lease is lost: pass `{serials}`, the serials with commas, to a tool that uses several
-  devices. `ANDROID_SERIAL` then names no device. For one device, add `--resource <device>`.
+  devices. `{resources}` lists the devices, and the command gets the same lists in
+  `BANKSMAN_SERIALS` and `BANKSMAN_RESOURCES`. `{serial}` and `{resource}` are then an error,
+  the variables of one device are not set, and `ANDROID_SERIAL` is `banksman-serial-unknown`,
+  which names no device, so `adb` without `-s` fails with "device not found". For one device,
+  add `--resource <device>`.
 - Outside `banksman run`, pass the serial to every tool, for example `adb -s <serial>`. A bare
   `adb` command acts on whatever device adb chooses.
 
@@ -152,7 +166,10 @@ banksman release --holding login-tests
 - Write `--paid` right after `acquire` or `run`, for example
   `banksman acquire --paid --holding login-tests --where kind=remote --start`. For a remote
   device, `--start` reserves and connects it, which adds about a minute to the command.
-- A holding that you keep with `--holding` needs no new `--paid`.
+- Only a command that leases a new device needs `--paid`: `acquire`, and `run --where`. A
+  holding that you keep or use with `--holding` needs no new `--paid`, so leave it out of
+  `run --holding`. banksman ignores it there, but the permission rules can still ask the user
+  about it.
 
 ## Other rules
 

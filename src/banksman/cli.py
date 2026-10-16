@@ -447,7 +447,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="with --where: the process whose end frees the lease, by default this run; with"
         " --holding: the owner process of the holding, by default the agent process",
     )
-    _paid_argument(run, "with --where: ")
+    _paid_argument(
+        run,
+        "with --where: ",
+        "; --lease and --holding ignore it, because their leases need no new --paid",
+    )
     _start_argument(run, "with --where: ")
     run.add_argument(
         "command_line",
@@ -622,12 +626,12 @@ def _label(text: str) -> str:
     return text
 
 
-def _paid_argument(parser: argparse.ArgumentParser, prefix: str) -> None:
+def _paid_argument(parser: argparse.ArgumentParser, prefix: str, suffix: str = "") -> None:
     parser.add_argument(
         "--paid",
         action="store_true",
         help=f"{prefix}also offer resources whose use costs money, such as remote devices;"
-        " give it only after the user agreed to the cost",
+        f" give it only after the user agreed to the cost{suffix}",
     )
 
 
@@ -1227,6 +1231,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "run --lease takes one --resource; for several resources of a holding, use"
                 " --holding"
             )
+        # --paid is not in the list: it acknowledges the cost of a new lease, and the leases
+        # here are held already, so they need none (as for acquire --holding). An agent that
+        # writes it after run as for acquire gets the run, not an error.
         given = [
             flag
             for flag, value in (
@@ -1235,7 +1242,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 ("--wait", args.wait),
                 ("--issue", args.issue),
                 ("--owner-pid", args.owner_pid if args.holding is None else None),
-                ("--paid", args.paid or None),
                 ("--start", args.start or None),
             )
             if value is not None
