@@ -479,4 +479,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under CPU load on macOS the leader got the next Ctrl-C and the command did not. The leader
   program now forwards each terminal signal (SIGHUP, SIGINT, SIGQUIT, SIGTERM) that it receives
   to the command, so the signal always reaches it.
+- `banksman run --lease` and `run --holding` now accept `--paid`, run the command, and say on
+  standard error that `--paid` is not needed, because their leases are held already and need no
+  new acknowledgement. Before, `run --paid --holding` failed with "run --paid needs --where",
+  although the guide for agents says to write `--paid` right after `run`. The guide now also
+  says that only `acquire` and `run --where` need it.
+- The guide for agents now names every key of the grant, the prefix of the keys with `--as`,
+  the placeholders and variables of `banksman run`, and the value `banksman-serial-unknown` of
+  `ANDROID_SERIAL` under several devices. It also says that `PREVIOUS=self` counts every agent
+  in the worktree, also the other subagents of a session, so `self` says nothing about what a
+  sibling subagent did on the device.
 

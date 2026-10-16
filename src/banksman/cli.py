@@ -447,7 +447,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="with --where: the process whose end frees the lease, by default this run; with"
         " --holding: the owner process of the holding, by default the agent process",
     )
-    _paid_argument(run, "with --where: ")
+    _paid_argument(
+        run,
+        "with --where: ",
+        "; --lease and --holding need none, because their leases are held already",
+    )
     _start_argument(run, "with --where: ")
     run.add_argument(
         "command_line",
@@ -622,12 +626,12 @@ def _label(text: str) -> str:
     return text
 
 
-def _paid_argument(parser: argparse.ArgumentParser, prefix: str) -> None:
+def _paid_argument(parser: argparse.ArgumentParser, prefix: str, suffix: str = "") -> None:
     parser.add_argument(
         "--paid",
         action="store_true",
         help=f"{prefix}also offer resources whose use costs money, such as remote devices;"
-        " give it only after the user agreed to the cost",
+        f" give it only after the user agreed to the cost{suffix}",
     )
 
 
@@ -1227,6 +1231,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "run --lease takes one --resource; for several resources of a holding, use"
                 " --holding"
             )
+        # --paid is not in the list: it acknowledges the cost of a new lease, and the leases
+        # here are held already, so they need none (as for acquire --holding). An agent that
+        # writes it after run as for acquire gets the run and a note, not an error: the user can
+        # have agreed already in a permission prompt for the flag.
         given = [
             flag
             for flag, value in (
@@ -1235,7 +1243,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 ("--wait", args.wait),
                 ("--issue", args.issue),
                 ("--owner-pid", args.owner_pid if args.holding is None else None),
-                ("--paid", args.paid or None),
                 ("--start", args.start or None),
             )
             if value is not None
@@ -1243,6 +1250,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if given:
             needs = "--where or --holding" if given[0] == "--owner-pid" else "--where"
             raise BanksmanError(f"run {given[0]} needs {needs}")
+        if args.paid:
+            way = "--lease" if args.holding is None else "--holding"
+            _print_notes(
+                [
+                    f"run {way} needs no --paid, because its leases are held already. Leave"
+                    " --paid out, so that the user gets no question about a cost"
+                ]
+            )
         config = load_config()
         store, _ = _reaped_store(config)
         if args.holding is None:

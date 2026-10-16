@@ -549,14 +549,16 @@ holdings apart (section 9).
   (section 4), no take-back hook ran then or since, the kind has no `on_acquire` hook, which
   changes the instance for every new lease, the instance is not unmanaged, and it has the same
   handle, so for a remote device the same reservation. An AVD that a release ended keeps its
-  disk, so the next `acquire --start` of the worktree boots it with its state. A kept
-  lease is `self` too. In every other case it is `other`: a lease of another worktree, a void
-  lease, a forced release, a restart of the machine, a new reservation, or no entry. Two values
-  keep the logic of a project to one branch. `self` is not a proof: a person or a program
-  outside banksman can have used the instance, and an emulator can have stopped. So the project
-  still checks quickly, for example whether its app is installed and signed in, and skips only
-  the full setup. banksman reports the history of the leases only, and knows no app. `status`
-  does not show the record, so that agents do not choose instances by it.
+  disk, so the next `acquire --start` of the worktree boots it with its state. A kept lease is
+  `self` too. In every other case it is `other`: a lease of another worktree, a void lease, a
+  forced release, a restart of the machine, a new reservation, or no entry. Every agent in the
+  worktree counts as the worktree, also another subagent of the caller's session, so after such
+  an agent released the instance, `self` says nothing about what it did there. Two values keep
+  the logic of a project to one branch. `self` is not a proof: a person or a program outside
+  banksman can have used the instance, and an emulator can have stopped. So the project still
+  checks quickly, for example whether its app is installed and signed in, and skips only the
+  full setup. banksman reports the history of the leases only, and knows no app. `status` does
+  not show the record, so that agents do not choose instances by it.
 - **Paid resources need an acknowledgement.** Without `--paid`, the resources of a paid kind
   (section 5) are not candidates. A request whose candidates are all paid, for example
   `--where kind=remote`, fails at once with exit status 1, and says that the resources are
@@ -564,10 +566,14 @@ holdings apart (section 9).
   match in use also says how many paid resources would match. With `--paid`, paid resources
   take part, after every resource that costs nothing. `--paid` is an acknowledgement, not a
   filter: `--where paid=true` asks for a paid resource. A lease that the caller keeps with
-  `--lease` or `--holding` needs no new acknowledgement. The store checks the acknowledgement again under its
-  lock, so a kept lease that ends meanwhile cannot let a new paid lease through. `status` marks
-  a paid kind as `remote (paid)`, and `status --json` carries `paid` for each resource. The
-  permission rules of the agents can ask the user before every `--paid` (section 15).
+  `--lease` or `--holding` needs no new acknowledgement. `run --lease` and `run --holding`
+  lease nothing new, so they accept `--paid`, run the command, and say on standard error that
+  `--paid` is not needed: an agent that writes `--paid` after `run` as after `acquire` gets its
+  run, not an error, and learns to leave the flag out. The store checks the acknowledgement
+  again under its lock, so a kept lease that ends meanwhile cannot let a new paid lease
+  through. `status` marks a paid kind as `remote (paid)`, and `status --json` carries `paid`
+  for each resource. The permission rules of the agents can ask the user before every `--paid`
+  (section 15).
 - **Starting an instance.** Without `--start`, every grant is `ready`. The holder checks
   whether the instance runs, and starts it if it does not, for example with the `emulator`
   command. With `--start`, banksman starts a granted instance that does not run when it can

@@ -748,6 +748,41 @@ def test_run_fails_before_the_command_when_the_reservation_has_ended(
     assert leases()["tokay:34"].handle == FIRST
 
 
+def test_a_run_of_a_paid_holding_takes_paid_and_needs_no_new_one(
+    capsys, config_path, sdk, cli, tmp_path
+):
+    configure(config_path, sdk, cli)
+    save_catalogue()
+    adb_lists(sdk, [49522])
+    lifecycle(cli)
+    holding = ["--holding", "remote-tests", "--owner-pid", str(os.getpid())]
+    status, values, err = acquire(
+        capsys, "--paid", *holding, "--where", "codename=tokay", "--start"
+    )
+    assert status == 0, err
+    shown = tmp_path / "shown"
+    command = ["--", sys.executable, "-c", SHOW, "{serial}", str(shown)]
+    by_lease = ["--lease", values["LEASE"], "--resource", "tokay:34"]
+    # The guide for agents writes --paid right after run, as after acquire. The leases are held
+    # and paid already, so the flag changes nothing, and a note says to leave it out.
+    for options, way in (
+        (["--paid", *holding], "--holding"),
+        (holding, None),
+        (["--paid", *by_lease], "--lease"),
+    ):
+        shown.unlink(missing_ok=True)
+        status = main(["run", *options, *command])
+        err = capsys.readouterr().err
+        assert status == 0, err
+        assert shown.read_text().split() == ["localhost:49522", FIRST]
+        note = f"banksman: note: run {way} needs no --paid, because its leases are held already"
+        assert (note in err) == (way is not None), err
+    assert [call for call in cli.calls() if "create" in call] == [
+        "device remote create tokay/34 --connect"
+    ]
+    assert leases()["tokay:34"].lease_id == values["LEASE"]
+
+
 def test_acquire_with_lease_connects_a_kept_device_again(capsys, config_path, sdk, cli):
     values, answers = start_one(capsys, config_path, sdk, cli)
     cli.connected({})
@@ -1142,9 +1177,8 @@ def test_a_void_lease_records_a_reservation_that_banksman_has_no_record_of(
     assert sessions()[SECOND].created is False
 
 
-def test_start_and_paid_need_where_in_run(capsys, config_path, sdk, cli):
+def test_start_needs_where_in_run(capsys, config_path, sdk, cli):
     configure(config_path, sdk, cli)
-    for flag in ("--paid", "--start"):
-        status = main(["run", "--lease", "x", "--resource", "tokay:34", flag, "--", "true"])
-        assert status == 1
-        assert f"run {flag} needs --where" in capsys.readouterr().err
+    status = main(["run", "--lease", "x", "--resource", "tokay:34", "--start", "--", "true"])
+    assert status == 1
+    assert "run --start needs --where" in capsys.readouterr().err

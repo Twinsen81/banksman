@@ -204,7 +204,9 @@ account. banksman gives a worktree the free instance that it used last first, al
 instance does not run and another one does. The grant says whether the instance is as the
 worktree left it: `PREVIOUS=self` when the last lease of the instance was of the same worktree,
 ended with a release on this boot of the machine, and banksman knows of nothing that changed it
-since. In every other case it says `PREVIOUS=other` (DESIGN.md, section 6).
+since. In every other case it says `PREVIOUS=other` (DESIGN.md, section 6). Every agent in the
+worktree counts as the worktree, also the other subagents of one session: after one of them
+released the instance, the next one gets `PREVIOUS=self`, with what the first one left on it.
 
 `self` is not a proof: a person or a program outside banksman can have used the instance. So the
 script still checks quickly, and skips only the full setup:
