@@ -1,8 +1,10 @@
 """The start of emulators, the emulators that banksman knows, and unmanaged instances, against a
 fake emulator command and a fake adb."""
 
+import contextlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -480,6 +482,194 @@ def test_after_a_stop_of_a_start_the_same_label_starts_again_at_once(capsys, con
     assert (values["RESOURCE"], values["KEPT"]) == ("qa_phone", "false")
     assert leases()["qa_phone"].state == "ready"
     assert known()["qa_phone"].pid != stopped
+
+
+# A start that continues after its acquire: acquire --no-wait, and banksman wait.
+
+NO_WAIT = ["--holding", "ui", "--where", "avd=qa_phone", "--start", "--no-wait", *ME]
+
+
+def no_wait_in_child(*arguments):
+    return subprocess.run(
+        [sys.executable, "-m", "banksman", "acquire", *arguments],
+        env={**os.environ, "PYTHONPATH": SRC},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def values_of(text):
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+
+@pytest.fixture
+def starters():
+    """The processes that continue the starts of a test: each ends when the test does."""
+    pids = []
+    yield pids
+    for pid in pids:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGKILL)
+
+
+def starter(starters, err):
+    """Return the process that continues the start, which the note of acquire names."""
+    found = re.search(r"banksman process (\d+) starts or resets", err)
+    assert found is not None, err
+    pid = int(found[1])
+    starters.append(pid)
+    return pid
+
+
+def descendants(pid):
+    table = Machine().process_table()
+    found, more = set(), {pid}
+    while more:
+        found |= more
+        more = {each for each, process in table.items() if process.ppid in more} - found
+    return found - {pid}
+
+
+def test_acquire_with_no_wait_returns_while_its_start_goes_on_in_a_process_of_its_own(
+    capsys, config_path, sdk, starters
+):
+    configure(config_path, sdk)
+    sdk.emulator_behaves(boot=2)
+    done = no_wait_in_child(*NO_WAIT, "--json")
+    assert done.returncode == 0, done.stderr
+    (part,) = json.loads(done.stdout)["parts"]
+    assert (part["resource"], part["state"], part["kept"], part["started"]) == (
+        "qa_phone",
+        "booting",
+        False,
+        True,
+    )
+    assert "banksman wait --holding ui --wait 5m waits until it is ready" in done.stderr
+    pid = starter(starters, done.stderr)
+    assert leases()["qa_phone"].reaper_pid == pid
+    # The acquire has ended, and the lease names the process that continues the start. That
+    # process left the process tree and the session of the test.
+    assert runs(pid)
+    assert Machine().process_table()[pid].ppid != os.getpid()
+    assert os.getsid(pid) != os.getsid(0)
+    assert main(["wait", "--holding", "ui", "--wait", "60s", *ME]) == 0
+    (row,) = table_rows(capsys.readouterr().out)
+    record = known()["qa_phone"]
+    assert (row["STATE"], row["SERIAL"]) == ("ready", f"emulator-{record.port}")
+    lease = leases()["qa_phone"]
+    assert (lease.state, lease.reaper_pid, lease.label) == ("ready", None, "ui")
+    assert (record.created, runs(record.pid)) == (True, True)
+    wait_for(lambda: not runs(pid))
+    # The same request keeps the holding now.
+    status, values, err = acquire(capsys, *NO_WAIT)
+    assert status == 0, err
+    assert (values["KEPT"], values["STATE"], values["STARTED"]) == ("true", "ready", "false")
+
+
+def test_a_start_that_continues_outlives_a_stop_of_the_command_that_ran_acquire(
+    config_path, sdk, starters, tmp_path
+):
+    configure(config_path, sdk)
+    sdk.emulator_behaves(boot=3)
+    out = tmp_path / "grant"
+    acquire_line = " ".join(
+        [sys.executable, "-m", "banksman", "acquire", *NO_WAIT, ">", str(out), "2>&1"]
+    )
+    # The command of an agent's tool, which goes on after acquire, until the tool stops it.
+    command = subprocess.Popen(
+        ["/bin/sh", "-c", f"{acquire_line}; sleep 60"],
+        env={**os.environ, "PYTHONPATH": SRC},
+        start_new_session=True,
+    )
+    try:
+        wait_for(lambda: "STATE=booting" in (out.read_text() if out.exists() else ""))
+        pid = starter(starters, out.read_text())
+        assert pid not in descendants(command.pid)
+    finally:
+        # The tool stops every process below the command, and the process group of the command.
+        for each in descendants(command.pid):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(each, signal.SIGKILL)
+        os.killpg(command.pid, signal.SIGKILL)
+        command.wait()
+    assert values_of(out.read_text())["STARTED"] == "true"
+    assert runs(pid)
+    status = subprocess.run(
+        [sys.executable, "-m", "banksman", "wait", "--holding", "ui", "--wait", "60s", *ME],
+        env={**os.environ, "PYTHONPATH": SRC},
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert status.returncode == 0, status.stderr
+    assert leases()["qa_phone"].state == "ready"
+
+
+def test_a_start_that_continues_and_dies_frees_the_instance(capsys, config_path, sdk, starters):
+    configure(config_path, sdk)
+    sdk.emulator_behaves(boot=None)
+    done = no_wait_in_child(*NO_WAIT)
+    assert done.returncode == 0, done.stderr
+    pid = starter(starters, done.stderr)
+    wait_for(lambda: "qa_phone" in known())
+    emulator_pid = known()["qa_phone"].pid
+    os.kill(pid, signal.SIGKILL)
+    wait_for(lambda: not runs(pid))
+    # wait reaps first, so it frees the instance, and then finds no holding.
+    assert main(["wait", "--holding", "ui", *ME]) == cli.EXIT_LOST
+    assert "has no held holding with the label ui" in capsys.readouterr().err
+    assert not runs(emulator_pid)
+    assert leases() == {}
+    assert known() == {}
+
+
+def test_a_start_that_continues_and_fails_gives_its_lease_back(capsys, config_path, sdk, starters):
+    configure(config_path, sdk)
+    sdk.emulator_behaves(exit=1, say="ERROR | the AVD is broken")
+    done = no_wait_in_child(*NO_WAIT)
+    assert done.returncode == 0, done.stderr
+    pid = starter(starters, done.stderr)
+    wait_for(lambda: not runs(pid))
+    assert main(["wait", "--holding", "ui", "--wait", "30s", *ME]) == cli.EXIT_LOST
+    assert "acquire again without --no-wait to see why a start fails" in capsys.readouterr().err
+    assert leases() == {}
+    status, _, err = acquire(capsys, "--holding", "ui", "--where", "avd=qa_phone", "--start", *ME)
+    assert status == 1
+    assert "ERROR | the AVD is broken" in err
+
+
+def test_a_release_stops_a_start_that_continues(capsys, config_path, sdk, starters):
+    configure(config_path, sdk)
+    sdk.emulator_behaves(boot=None)
+    done = no_wait_in_child(*NO_WAIT)
+    assert done.returncode == 0, done.stderr
+    pid = starter(starters, done.stderr)
+    wait_for(lambda: "qa_phone" in known())
+    emulator_pid = known()["qa_phone"].pid
+    assert main(["release", "--holding", "ui", *ME]) == 0
+    assert f"it is free when banksman process {pid} has ended" in capsys.readouterr().out
+    # The start sees that its lease is no longer booting, and ends the emulator that it started.
+    wait_for(lambda: not runs(pid))
+    assert not runs(emulator_pid)
+    assert main(["reap"]) == 0
+    assert leases() == {}
+
+
+def test_no_wait_refuses_a_request_that_keeps_leases_of_its_holding(capsys, config_path, sdk):
+    configure(config_path, sdk)
+    status, _, err = acquire(capsys, "--holding", "ui", "--where", "avd=qa_phone", *ME)
+    assert status == 0, err
+    status, values, err = acquire(
+        capsys,
+        "--holding", "ui", "--as", "phone", "--where", "avd=qa_phone",
+        "--as", "tablet", "--where", "avd=qa_tablet", "--start", "--no-wait", *ME,
+    )  # fmt: skip
+    assert (status, values) == (1, {})
+    assert "acquire --no-wait starts a holding of its own" in err
+    assert "the new lease is given back" in err
+    assert set(leases()) == {"qa_phone"}
+    assert sdk.emulator_calls() == []
 
 
 # Instances that banksman did not start.

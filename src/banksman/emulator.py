@@ -408,12 +408,14 @@ def start(
     sleep: Callable[[float], None] = time.sleep,
     free: Callable[[int], bool] | None = None,
     run: android.Run | None = None,
+    check: Callable[[], None] | None = None,
 ) -> Started:
     """Start the emulator of an AVD on a free console port, and wait until its boot completes.
 
     `deadline` is when the boot must have completed, by `clock`. `claim` records the serial in
-    the lease before the emulator starts. When the start fails or does not complete in time, or
-    this command ends in the middle, banksman ends the emulator that it started.
+    the lease before the emulator starts. `check` raises when the start must not go on, and the
+    wait for the boot calls it before each look. When the start fails or does not complete in
+    time, or this command ends in the middle, banksman ends the emulator that it started.
     """
     system = Machine() if system is None else system
     free = port_free if free is None else free
@@ -460,7 +462,7 @@ def start(
                 known[resource] = Known(
                     resource, process.pid, started, system.boot_id(), True, time.time(), port
                 )
-        _wait_for_boot(settings, resource, serial, process, deadline, clock, sleep, run)
+        _wait_for_boot(settings, resource, serial, process, deadline, clock, sleep, run, check)
     except BaseException:
         if started is not None:
             stop(system, process.pid, started, clock=clock, sleep=sleep)
@@ -481,8 +483,11 @@ def _wait_for_boot(
     clock: Callable[[], float],
     sleep: Callable[[float], None],
     run: android.Run | None,
+    check: Callable[[], None] | None,
 ) -> None:
     while True:
+        if check is not None:
+            check()
         status = process.poll()
         if status is not None:
             raise EmulatorError(

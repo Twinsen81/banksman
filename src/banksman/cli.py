@@ -6,12 +6,14 @@ import argparse
 import contextlib
 import json
 import os
+import select
 import signal
 import sys
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from typing import NoReturn
 
 from banksman import (
     LEASE_SCHEMA,
@@ -272,6 +274,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _paid_argument(acquire, "")
     _start_argument(acquire, "")
+    acquire.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="with --start: print the grant at once, with the lease booting, and continue the"
+        " start in a banksman process of its own; banksman wait waits until it is ready",
+    )
     acquire.add_argument("--issue", help="the issue id; by default it comes from the branch name")
     acquire.add_argument(
         "--owner-pid",
@@ -279,6 +287,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="the process whose end frees the lease; by default the agent process",
     )
     acquire.add_argument("--json", action="store_true", help="print JSON")
+
+    wait_command = commands.add_parser(
+        "wait",
+        help="wait until every lease of a holding is ready, for example after acquire --start"
+        " --no-wait",
+        allow_abbrev=False,
+    )
+    wait_command.add_argument("--lease", metavar="ID", help="the id of a lease of the holding")
+    _holding_argument(
+        wait_command, "instead of --lease: the label of a holding of this agent process"
+    )
+    wait_command.add_argument(
+        "--wait",
+        type=_duration,
+        default=0,
+        metavar="DURATION",
+        help="how long to wait while a lease of the holding is booting, such as 5m",
+    )
+    wait_command.add_argument(
+        "--owner-pid", type=_pid, help="the owner process; by default the agent process"
+    )
+    wait_command.add_argument("--json", action="store_true", help="print JSON")
 
     touch = commands.add_parser(
         "touch",
@@ -1048,18 +1078,7 @@ def _cmd_held(args: argparse.Namespace) -> int:
             {
                 "schema": OUTPUT_SCHEMA,
                 "owner_pid": owner,
-                "leases": [
-                    {
-                        "label": lease.label,
-                        "lease_id": lease.lease_id,
-                        "resource": lease.resource,
-                        "kind": lease.kind,
-                        "state": lease.state,
-                        "serial": lease.serial,
-                        "handle": lease.handle,
-                    }
-                    for lease in leases
-                ],
+                "leases": [_held_json(lease) for lease in leases],
                 # Null when the log cannot be read.
                 "guard": None if calls is None else [console.count_json(group) for group in calls],
             }
@@ -1068,18 +1087,7 @@ def _cmd_held(args: argparse.Namespace) -> int:
     if not leases:
         print(f"Process {owner} holds no lease.")
     else:
-        rows = [
-            [
-                lease.label or console.NONE,
-                lease.lease_id,
-                lease.resource,
-                lease.kind,
-                lease.state,
-                lease.serial or console.NONE,
-            ]
-            for lease in leases
-        ]
-        _print_table(["LABEL", "LEASE", "RESOURCE", "KIND", "STATE", "SERIAL"], rows)
+        _print_held(leases)
     window = f"{GUARD_WINDOW // 60} minutes"
     print()
     if calls is None:
@@ -1095,6 +1103,33 @@ def _cmd_held(args: argparse.Namespace) -> int:
         by_id = {lease.lease_id: lease for lease in store.snapshot().leases}
         _print_table(console.GUARD_HEADER, console.guard_rows(calls, by_id))
     return 0
+
+
+def _held_json(lease: Lease) -> dict[str, object]:
+    return {
+        "label": lease.label,
+        "lease_id": lease.lease_id,
+        "resource": lease.resource,
+        "kind": lease.kind,
+        "state": lease.state,
+        "serial": lease.serial,
+        "handle": lease.handle,
+    }
+
+
+def _print_held(leases: Sequence[Lease]) -> None:
+    rows = [
+        [
+            lease.label or console.NONE,
+            lease.lease_id,
+            lease.resource,
+            lease.kind,
+            lease.state,
+            lease.serial or console.NONE,
+        ]
+        for lease in leases
+    ]
+    _print_table(["LABEL", "LEASE", "RESOURCE", "KIND", "STATE", "SERIAL"], rows)
 
 
 # `held` shows the adb calls of this time that the adb guard refused or warned about. The events
@@ -1221,8 +1256,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 # holder, so a command must not use the instance before that.
                 raise Busy(
                     f"{', '.join(booting)} of the holding {args.holding} is still booting:"
-                    f" {_BOOTING}. Wait until it is ready, or give it back with banksman release"
-                    f" --holding {args.holding}"
+                    f" {_BOOTING}. Wait until it is ready with banksman wait --holding"
+                    f" {args.holding}, or give it back with banksman release --holding"
+                    f" {args.holding}"
                 )
             named = [(lease.resource, lease.lease_id) for lease in held]
         leases, unknown = _with_serials_now(store, config, named)
@@ -1471,6 +1507,11 @@ def _warn(text: str) -> None:
 def _cmd_acquire(args: argparse.Namespace) -> int:
     if args.lease is not None and args.holding is not None:
         raise BanksmanError("acquire takes --lease or --holding, not both")
+    if args.no_wait and not args.start:
+        raise BanksmanError(
+            "acquire --no-wait needs --start: it returns before the start of an instance ends,"
+            " and a request without --start starts nothing"
+        )
     parts = _parts(args)
     grant = _acquire(
         parts,
@@ -1483,8 +1524,20 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         paid=args.paid,
         start=args.start,
         label=args.holding,
+        no_wait=args.no_wait,
     )
     _print_grant(parts, grant, args.json)
+    booting = [lease for lease in grant.leases if lease.state == BOOTING]
+    if booting:
+        named = f"--holding {args.holding}" if args.holding else f"--lease {booting[0].lease_id}"
+        _print_notes(
+            [
+                f"{', '.join(lease.resource for lease in booting)} is still booting: banksman"
+                f" process {booting[0].reaper_pid} starts or resets it in the background, also"
+                f" after this command has ended. banksman wait {named} --wait 5m waits until it"
+                " is ready"
+            ]
+        )
     return 0
 
 
@@ -1521,7 +1574,13 @@ def _acquire(
     paid: bool = False,
     start: bool = False,
     label: str | None = None,
+    no_wait: bool = False,
 ) -> _Grant:
+    """Grant the parts of a request, and start and reset their instances.
+
+    With `no_wait`, a process of its own continues the starts and the resets, and the new leases
+    are still booting when this returns.
+    """
     config = load_config()
     check_kinds([clause for part in parts for clause in part.clauses], config)
     machine = Machine()
@@ -1660,6 +1719,37 @@ def _acquire(
     # A kept remote device that is not connected now is connected again first, so that a
     # request that cannot get it spends no start.
     granted = _reconnect_kept(store, config, granted, found.serials)
+    new = [grant.lease for grant in granted if not grant.kept]
+    if no_wait and any(lease.state == BOOTING for lease in new):
+        if len(new) < len(granted):
+            for lease in new:
+                _give_back(store, lease)
+            given_back = "the new lease is" if len(new) == 1 else "the new leases are"
+            raise BanksmanError(
+                "acquire --no-wait starts a holding of its own, and this request keeps leases of a"
+                " holding: banksman wait could not tell a holding that is ready from one whose new"
+                f" lease was lost. Use another label, or acquire without --no-wait; {given_back}"
+                " given back"
+            )
+        leases = _detach(store, config, granted, starts)
+        created = [lease.resource in starts for lease in leases]
+    else:
+        leases, created = _boot(store, config, granted, starts)
+    boot_id = store.system.boot_id()
+    unmanaged = {each.resource for every in found.candidates for each in every if each.unmanaged}
+    previous = [
+        _left_as_is(grant, lease, holder.owner, config.kinds[lease.kind], boot_id, unmanaged)
+        for grant, lease in zip(granted, leases)
+    ]
+    return _Grant(store, config, granted, leases, previous, created)
+
+
+def _boot(
+    store: Store, config: Config, granted: Sequence[Granted], starts: Collection[str]
+) -> tuple[list[Lease], list[bool]]:
+    """Start and reset the instances of the new leases, and mark the leases ready, as `_prepare`
+    does. Return the leases with the serials that discovery finds after a reset, and for each
+    whether the request started its instance."""
     leases, created = _prepare(store, config, granted, starts)
     reset = [
         lease
@@ -1673,7 +1763,7 @@ def _acquire(
             kind = config.kinds[name]
             if not kind.discovered:
                 continue
-            started = machine.clock()
+            started = store.system.clock()
             after = serials_seen(discover(kind, config), started)
             seen.extend(after)
             # The serial from before the reset can name another instance now, so an instance
@@ -1691,13 +1781,141 @@ def _acquire(
             else lease
             for lease in leases
         ]
-    boot_id = store.system.boot_id()
-    unmanaged = {each.resource for every in found.candidates for each in every if each.unmanaged}
-    previous = [
-        _left_as_is(grant, lease, holder.owner, config.kinds[lease.kind], boot_id, unmanaged)
-        for grant, lease in zip(granted, leases)
+    return leases, created
+
+
+# How long acquire --no-wait waits until the process that continues its start has taken the
+# leases over. That process waits at most 10 seconds for the lock of the lease store.
+HANDOVER_SECONDS = 30.0
+
+
+def _detach(
+    store: Store, config: Config, granted: Sequence[Granted], starts: Collection[str]
+) -> list[Lease]:
+    """Continue the starts and the resets of the new leases in a process that has left the
+    process tree of the caller. Return the leases when that process has taken them over: they
+    name it in place of this acquire, which can then end.
+
+    The shell tool of an agent can stop every process below its command, also one in a session
+    of its own, so the process leaves the tree with a double fork: its parent ends at once, and
+    the init process adopts it. The leases are void as soon as it has ended, as they are when
+    their acquire ends, so a start that dies still frees the instance.
+    """
+    new = [grant.lease for grant in granted if not grant.kept]
+    # The output of this process must not appear twice.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    reading, writing = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(reading)
+        _continue_start(writing, store, config, granted, starts)
+    os.close(writing)
+    try:
+        os.waitpid(child, 0)
+        try:
+            answer = _handover_answer(reading)
+        finally:
+            os.close(reading)
+        if "pid" not in answer:
+            given_back = "the lease is" if len(new) == 1 else "the new leases are"
+            problem = answer.get("error") or "it ended before it took the leases over"
+            raise BanksmanError(
+                f"cannot continue the start in a process of its own: {problem}; {given_back}"
+                " given back"
+            )
+        current = {lease.lease_id: lease for lease in store.snapshot().leases}
+    except BaseException:
+        # Also after the handover: the process that continues the start then sees that its
+        # leases are no longer booting, and ends what it started.
+        for lease in new:
+            _give_back(store, lease)
+        raise
+    starter = {"reaper_pid": answer["pid"], "reaper_started": answer["started"]}
+    # A lease can already have ended, for example when its start failed at once.
+    return [
+        current.get(grant.lease.lease_id, replace(grant.lease, **starter))  # type: ignore[arg-type]
+        for grant in granted
     ]
-    return _Grant(store, config, granted, leases, previous, created)
+
+
+def _handover_answer(reading: int) -> dict[str, object]:
+    """Read what the process that continues the start says: its pid and start time, or why it
+    did not take the leases over. It closes its end of the pipe after that."""
+    data = b""
+    give_up = time.monotonic() + HANDOVER_SECONDS
+    while (left := give_up - time.monotonic()) > 0:
+        if not select.select([reading], [], [], left)[0]:
+            break
+        chunk = os.read(reading, 4096)
+        if not chunk:
+            break
+        data += chunk
+    with contextlib.suppress(ValueError):
+        answer = json.loads(data)
+        if isinstance(answer, dict):
+            return answer
+    return {}
+
+
+def _continue_start(
+    answer: int,
+    store: Store,
+    config: Config,
+    granted: Sequence[Granted],
+    starts: Collection[str],
+) -> NoReturn:
+    """In the child of acquire: fork again, and continue the starts and the resets of the new
+    leases in the grandchild. Neither process returns."""
+    try:
+        # A session of its own: no terminal and no process group of the caller reaches it.
+        os.setsid()
+        if os.fork() != 0:
+            os._exit(0)
+        _leave_caller(answer)
+        new = [grant.lease for grant in granted if not grant.kept]
+        before = (new[0].reaper_pid, new[0].reaper_started)
+        try:
+            taken = store.hand_over([(lease.resource, lease.lease_id) for lease in new], before)
+        except BaseException as exc:
+            _tell(answer, {"error": str(exc)})
+            os._exit(1)
+        _tell(answer, {"pid": taken[0].reaper_pid, "started": taken[0].reaper_started})
+        by_id = {lease.lease_id: lease for lease in taken}
+        handed = [
+            replace(grant, lease=by_id.get(grant.lease.lease_id, grant.lease)) for grant in granted
+        ]
+        _boot(store, config, handed, starts)
+    except BaseException:
+        # A start that fails gives its leases back. Its error reaches nobody: the caller has
+        # gone, and banksman wait reports the holding as lost.
+        os._exit(1)
+    os._exit(0)
+
+
+def _tell(answer: int, message: dict[str, object]) -> None:
+    with contextlib.suppress(OSError):
+        os.write(answer, json.dumps(message).encode())
+    with contextlib.suppress(OSError):
+        os.close(answer)
+
+
+def _leave_caller(keep: int) -> None:
+    """Let go of what ties this process to the command of the caller: its terminal, its pipes,
+    and its working directory."""
+    os.chdir("/")
+    nothing = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(nothing, fd)
+    os.close(nothing)
+    # A tool reads the output of its command until every copy of the pipe is closed, so a copy
+    # in this process would make the tool wait for the whole start. Only a descriptor that the
+    # caller passed on is inherited: the ones that Python opens are not.
+    for name in os.listdir("/dev/fd"):
+        fd = int(name)
+        with contextlib.suppress(OSError):
+            if fd > 2 and fd != keep and os.get_inheritable(fd):
+                os.close(fd)
 
 
 def _left_as_is(
@@ -1816,15 +2034,15 @@ def _paid_note(payable: Mapping[str, int]) -> str:
 
 # Why a lease of a holding boots, for the messages about a holding that is not ready.
 _BOOTING = (
-    "another acquire still starts or resets its instance, for example one that runs in the"
-    " background"
+    "a banksman process still starts or resets its instance: an acquire, for example one that"
+    " runs in the background, or the process that continues the start of acquire --no-wait"
 )
 
 
 def _booting_note(resources: Sequence[str]) -> str:
     return (
         f"{', '.join(resources)} of the kept holding is still booting: {_BOOTING}. The request"
-        " waits until that acquire is done"
+        " waits until that process is done"
     )
 
 
@@ -1954,6 +2172,7 @@ def _start(store: Store, config: Config, lease: Lease, given_back: str) -> tuple
                 system=store.system,
                 clock=store.system.clock,
                 sleep=store.system.sleep,
+                check=lambda: _still_booting(store, lease),
             ).serial
         except NotHeld:
             raise
@@ -1982,6 +2201,13 @@ def _start(store: Store, config: Config, lease: Lease, given_back: str) -> tuple
         lease.resource, lease.lease_id, handle=started.handle, serial=started.serial
     )
     return lease, started.created
+
+
+def _still_booting(store: Store, lease: Lease) -> None:
+    # Nobody gets the instance from a lease that was released, or that a reaper found void, so
+    # its start ends at once. The holder stops a start that continues after its acquire this way.
+    if not store.still_booting(lease.resource, lease.lease_id):
+        raise NotHeld(f"the lease on {lease.resource} was given back or became void")
 
 
 def _claim(store: Store, lease: Lease, serials: Sequence[str]) -> str:
@@ -2115,6 +2341,73 @@ def _paid_kinds(config: Config) -> set[str]:
 
 def _flag(value: bool) -> str:
     return "true" if value else "false"
+
+
+# How often wait looks at the leases of a holding again. A look reads the lease files and the
+# process list, but runs no discovery.
+WAIT_SECONDS = 1.0
+# What a holder that finds its holding lost needs to know: banksman wait cannot say why.
+_LOST_START = (
+    "When acquire --no-wait granted it, its start failed or was stopped, or the holding was"
+    " released: acquire again without --no-wait to see why a start fails"
+)
+
+
+def _cmd_wait(args: argparse.Namespace) -> int:
+    if (args.lease is None) == (args.holding is None):
+        raise BanksmanError("wait needs --lease, the id of a lease, or --holding, its label")
+    if args.owner_pid is not None and args.lease is not None:
+        raise BanksmanError("wait --owner-pid needs --holding")
+    config = load_config()
+    owner = None if args.holding is None else _owner_process(config, args.owner_pid)
+    if args.holding is not None and owner is None:
+        raise BanksmanError(_no_agent("--holding"))
+    machine = Machine()
+    give_up = machine.clock() + args.wait
+    # The leases that an earlier look found, by id. One that is no longer held is lost, also
+    # when the holding still has other leases.
+    seen: dict[str, str] = {}
+    while True:
+        # Every look reaps first, as acquire does, so that a start that died frees its instance.
+        config = load_config()
+        store, _ = _reaped_store(config)
+        if args.holding is not None:
+            leases = store.labelled(owner, args.holding)  # type: ignore[arg-type]
+            holding = f"the holding {args.holding}"
+            none = f"process {owner} has no held holding with the label {args.holding}"
+        else:
+            leases = store.holding(args.lease)
+            holding = f"the holding of the lease {args.lease}"
+            none = f"{holding} has no held lease"
+        if not leases:
+            raise NotHeld(f"{none}. {_LOST_START}")
+        ids = {lease.lease_id for lease in leases.values()}
+        lost = sorted(resource for lease_id, resource in seen.items() if lease_id not in ids)
+        if lost:
+            raise NotHeld(
+                f"the lease on {', '.join(lost)} of {holding} was given back or became void."
+                f" {_LOST_START}"
+            )
+        seen.update((lease.lease_id, lease.resource) for lease in leases.values())
+        booting = sorted(lease.resource for lease in leases.values() if lease.state == BOOTING)
+        if not booting:
+            break
+        left = give_up - machine.clock()
+        if left <= 0:
+            raise Busy(f"{', '.join(booting)} of {holding} is still booting: {_BOOTING}")
+        machine.sleep(min(WAIT_SECONDS, left))
+    # The holder is back, and uses the resources now.
+    touched = sorted(
+        store.touch_holding(next(iter(leases.values())).lease_id),
+        key=lambda lease: lease.resource,
+    )
+    if args.json:
+        _print_json(
+            {"schema": OUTPUT_SCHEMA, "leases": [_held_json(lease) for lease in touched]}
+        )
+    else:
+        _print_held(touched)
+    return 0
 
 
 def _cmd_touch(args: argparse.Namespace) -> int:
@@ -2752,6 +3045,7 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "leave": _cmd_leave,
     "run": _cmd_run,
     "acquire": _cmd_acquire,
+    "wait": _cmd_wait,
     "touch": _cmd_touch,
     "release": _cmd_release,
     "admin release": _cmd_admin_release,

@@ -663,6 +663,31 @@ def test_a_start_that_is_stopped_leaves_the_reservation_to_the_next_command(
     assert leases() == {}
 
 
+def test_with_no_wait_the_start_of_a_remote_device_goes_on_after_acquire(
+    capsys, config_path, sdk, cli
+):
+    configure(config_path, sdk, cli)
+    save_catalogue()
+    adb_lists(sdk, [49522])
+    lifecycle(cli, create=create_answer(cli, pause=2))
+    owner = ["--owner-pid", str(os.getpid())]
+    arguments = ["--holding", "ui", "--where", "codename=tokay", "--paid", "--start", "--no-wait"]
+    done = subprocess.run(
+        [sys.executable, "-m", "banksman", "acquire", *arguments, *owner],
+        env={**os.environ, "PYTHONPATH": SRC},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stderr
+    values = dict(line.split("=", 1) for line in done.stdout.splitlines())
+    assert (values["STATE"], values["STARTED"], "HANDLE" in values) == ("booting", "true", False)
+    assert main(["wait", "--holding", "ui", "--wait", "60s", *owner, "--json"]) == 0
+    (shown,) = json.loads(capsys.readouterr().out)["leases"]
+    assert (shown["state"], shown["serial"], shown["handle"]) == ("ready", "localhost:49522", FIRST)
+    assert sessions()[FIRST].created is True
+
+
 # Reconnect, take-back, and release.
 
 

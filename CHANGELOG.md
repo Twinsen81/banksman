@@ -422,6 +422,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `started_by` of each resource. The guide for agents tells an agent to acquire such an
   emulator of its own and not to start a second AVD, and to prefer `--start`. The lease
   schema and the output schema do not change.
+- A start that continues after its `acquire`. `acquire --start --no-wait` prints the grant
+  as soon as it has the resources, with `STATE=booting`, and a banksman process of its own
+  continues the start and the `on_acquire` hook. `acquire` forks twice, so that this process
+  leaves the process tree and the session of the caller before the shell tool of an agent can
+  stop it. Under the lock of the lease store, it takes the booting leases over, in place of the
+  `acquire`, only while they are valid and name that `acquire`. The leases are void as soon as
+  it has ended, so a start that dies frees the instance at the next command. A start of an
+  emulator ends early, and ends the emulator, when its lease is no longer booting, so a release
+  of the holding stops it; this also applies to a start in a waiting `acquire`. `--no-wait`
+  needs `--start`, and a request that keeps leases of its holding and adds a lease that boots is
+  refused. The grant prints `STARTED=true` for a part whose instance the request starts. The new
+  command `banksman wait --holding <label>`, or `--lease <id>`, exits with 0 when every lease of
+  the holding is ready, and then touches the holding and prints its leases as `held` does, with
+  4 while a lease boots, and with 3 when the holding is lost; `--wait` looks again every second.
+  `wait --json` prints the leases with the fields of `held --json`. `run --holding` names `wait`
+  when it refuses a booting lease. The guide for agents tells an agent to use `--no-wait` with
+  `--start`. The lease schema and the output schema do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

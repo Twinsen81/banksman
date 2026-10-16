@@ -55,6 +55,16 @@ ends an emulator in the same way, as a take-back with the `on_void` hook of the 
 the emulator of the lease that the command names by its lease id or its label, and only when
 banksman started it.
 
+**A start that continues after its command.** With `acquire --start --no-wait`, a banksman
+process continues the start after the command of the caller has ended, so the shell tool of an
+agent cannot stop it. It is not a daemon: it ends when the start ends, at the latest at the
+boot deadline of its leases. It takes over only booting leases that name the `acquire` that
+started it, under the lock of the lease store, and only while that `acquire` runs. It leaves
+the session and the process tree of the caller, works in `/`, and closes the standard streams
+and every descriptor that the caller passed on, so it holds no terminal and no pipe of the
+caller. The holder stops it with a release of the holding: it then ends the emulator that it
+started, as a failed start does.
+
 **The environment of an unmanaged emulator.** To give an emulator that an agent started
 outside banksman to that agent, discovery reads the environment of the only emulator of an
 AVD that runs and that banksman does not know, from `/proc` on Linux and from the kernel on

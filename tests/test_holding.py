@@ -18,7 +18,7 @@ from banksman.errors import BanksmanError
 from banksman.history import GUARD, NOT_LEASED, OTHER_HOLDER, REFUSED, WARNED, Event, History
 from banksman.inventory import Decisions, Inventory, save_inventory
 from banksman.lease import Holder
-from banksman.store import Choice, Need, Store
+from banksman.store import Choice, Need, NotHeld, Store
 from banksman.system import Machine
 
 OWNER = "/work/tree-a"
@@ -625,13 +625,15 @@ def test_a_holding_whose_reset_still_runs_is_neither_kept_nor_run(capsys, config
         assert status == cli.EXIT_BUSY
         assert values == {}
         assert (
-            "qa_phone of the kept holding is still booting: another acquire still starts or"
-            " resets its instance, for example one that runs in the background. The request"
-            " waits until that acquire is done"
+            "qa_phone of the kept holding is still booting: a banksman process still starts or"
+            " resets its instance: an acquire, for example one that runs in the background, or"
+            " the process that continues the start of acquire --no-wait. The request waits until"
+            " that process is done"
         ) in err
         done = run_in_child("--holding", "tests", *ME, "--", "true")
         assert done.returncode == cli.EXIT_BUSY
         assert "qa_phone of the holding tests is still booting" in done.stderr
+        assert "Wait until it is ready with banksman wait --holding tests" in done.stderr
         assert leases()["qa_phone"].state == "booting"
     finally:
         reset.kill()
@@ -651,3 +653,188 @@ def test_a_reset_whose_acquire_ended_is_taken_back_and_the_label_starts_again(
     status, again, _ = acquire(capsys, "--holding", "tests", "--where", "form=phone", *ME)
     assert (status, again["RESOURCE"], again["KEPT"]) == (0, "qa_phone", "false")
     assert again["LEASE"] != first["LEASE"]
+
+
+def test_a_booting_lease_goes_to_the_process_that_continues_its_start(store, agents, state_dir):
+    holder = Holder(OWNER, owner_pid=101)
+    reset = [Need((Choice("emu-1", "emulator", reset=True),))]
+    (granted,) = store.grant(reset, holder, label="tests")
+    lease = granted.lease
+    # The acquire, process 103, granted it.
+    store.system.spawn(103)
+    booting(state_dir, "emu-1", 103, "start-103")
+    leases = [("emu-1", lease.lease_id)]
+    # Only from the process that the lease names.
+    with pytest.raises(NotHeld, match="not booting for process 104"):
+        store.hand_over(leases, (104, "start-104"))
+    (taken,) = store.hand_over(leases, (103, "start-103"))
+    assert (taken.reaper_pid, taken.reaper_started) == (os.getpid(), "start-self")
+    assert taken.state == "booting"
+    # The lease stays valid after the acquire has ended.
+    store.system.end(103)
+    assert store.labelled(101, "tests") == {"emu-1": taken}
+
+
+def test_a_lease_whose_acquire_ended_before_the_handover_is_not_handed_over(
+    store, agents, state_dir
+):
+    (granted,) = store.grant(
+        [Need((Choice("emu-1", "emulator", reset=True),))], Holder(OWNER, owner_pid=101)
+    )
+    booting(state_dir, "emu-1", 103, "start-103")
+    with pytest.raises(NotHeld, match="void"):
+        store.hand_over([("emu-1", granted.lease.lease_id)], (103, "start-103"))
+
+
+def test_a_start_asks_whether_its_lease_is_still_booting(store, agents):
+    holder = Holder(OWNER, owner_pid=101)
+    (granted,) = store.grant([Need((Choice("emu-1", "emulator", reset=True),))], holder)
+    lease_id = granted.lease.lease_id
+    assert store.still_booting("emu-1", lease_id)
+    assert not store.still_booting("emu-1", "another-lease")
+    store.ready("emu-1", lease_id)
+    assert not store.still_booting("emu-1", lease_id)
+    (granted,) = store.grant([Need((Choice("emu-2", "emulator", reset=True),))], holder)
+    store.release("emu-2", granted.lease.lease_id)
+    assert not store.still_booting("emu-2", granted.lease.lease_id)
+
+
+# banksman wait: until every lease of a holding is ready.
+
+
+def wait_in_child(*arguments):
+    return subprocess.Popen(
+        [sys.executable, "-m", "banksman", "wait", *arguments],
+        env={**os.environ, "PYTHONPATH": SRC},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+@pytest.fixture
+def resetting():
+    """A process that the tests name as the banksman process that resets an instance."""
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    yield process
+    process.kill()
+    process.wait()
+
+
+def test_wait_exits_with_4_while_a_lease_boots_and_with_0_when_it_is_ready(
+    capsys, config_path, state_dir, resetting
+):
+    configure(config_path)
+    _, values, _ = acquire(capsys, "--holding", "tests", "--where", "form=phone", *ME)
+    booting(state_dir, "qa_phone", resetting.pid, Machine().running([resetting.pid])[resetting.pid])
+    assert main(["wait", "--holding", "tests", *ME]) == cli.EXIT_BUSY
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "qa_phone of the holding tests is still booting" in captured.err
+    Store(cli.default_state_dir(), Machine()).ready("qa_phone", values["LEASE"])
+    age_lease(state_dir, "qa_phone", 60)
+    before = leases()["qa_phone"].touched
+    assert main(["wait", "--holding", "tests", *ME]) == 0
+    (row,) = table_rows(capsys.readouterr().out)
+    assert (row["LABEL"], row["LEASE"], row["STATE"], row["SERIAL"]) == (
+        "tests",
+        values["LEASE"],
+        "ready",
+        "emulator-5554",
+    )
+    # The holder is back, so wait touches the holding.
+    assert leases()["qa_phone"].touched > before
+    assert main(["wait", "--lease", values["LEASE"], "--json"]) == 0
+    (shown,) = json.loads(capsys.readouterr().out)["leases"]
+    assert (shown["resource"], shown["state"]) == ("qa_phone", "ready")
+
+
+def test_wait_with_a_wait_returns_when_the_holding_is_ready(
+    capsys, config_path, state_dir, resetting
+):
+    configure(config_path)
+    _, values, _ = acquire(capsys, "--holding", "tests", "--where", "form=phone", *ME)
+    booting(state_dir, "qa_phone", resetting.pid, Machine().running([resetting.pid])[resetting.pid])
+    waiting = wait_in_child("--holding", "tests", "--wait", "60s", *ME)
+    try:
+        time.sleep(1.5)
+        assert waiting.poll() is None
+        Store(cli.default_state_dir(), Machine()).ready("qa_phone", values["LEASE"])
+        out, err = waiting.communicate(timeout=30)
+    finally:
+        waiting.kill()
+        waiting.wait()
+    assert waiting.returncode == 0, err
+    assert table_rows(out)[0]["STATE"] == "ready"
+
+
+def test_wait_exits_with_3_when_the_process_that_starts_the_holding_has_ended(
+    capsys, config_path, state_dir
+):
+    configure(config_path)
+    acquire(capsys, "--holding", "tests", "--where", "form=phone", *ME)
+    ended = subprocess.Popen([sys.executable, "-c", "pass"])
+    ended.wait()
+    booting(state_dir, "qa_phone", ended.pid, "gone")
+    assert main(["wait", "--holding", "tests", "--wait", "60s", *ME]) == cli.EXIT_LOST
+    err = capsys.readouterr().err
+    assert f"process {os.getpid()} has no held holding with the label tests" in err
+    assert "acquire again without --no-wait to see why a start fails" in err
+    # wait reaped first: the lease is void, and its resource is free.
+    assert leases() == {}
+
+
+def test_wait_exits_with_3_when_a_lease_of_the_holding_is_lost_while_it_waits(
+    capsys, config_path, state_dir, resetting
+):
+    configure(config_path)
+    _, values, _ = acquire(
+        capsys,
+        "--holding", "tests", "--as", "a", "--where", "form=phone",
+        "--as", "b", "--where", "form=phone", *ME,
+    )  # fmt: skip
+    started = Machine().running([resetting.pid])[resetting.pid]
+    for resource in ("qa_phone", "qa_phone2"):
+        booting(state_dir, resource, resetting.pid, started)
+    waiting = wait_in_child("--holding", "tests", "--wait", "60s", *ME)
+    try:
+        time.sleep(1.5)
+        # The other lease of the holding still boots, but the holding is not what was asked for.
+        Store(cli.default_state_dir(), Machine()).release("qa_phone", values["A_LEASE"])
+        out, err = waiting.communicate(timeout=30)
+    finally:
+        waiting.kill()
+        waiting.wait()
+    assert (waiting.returncode, out) == (cli.EXIT_LOST, "")
+    assert "the lease on qa_phone of the holding tests was given back or became void" in err
+
+
+@pytest.mark.parametrize(
+    "arguments,problem",
+    [
+        ([], "wait needs --lease, the id of a lease, or --holding, its label"),
+        (["--lease", "x", "--holding", "tests"], "wait needs --lease"),
+        (["--lease", "x", *ME], "wait --owner-pid needs --holding"),
+    ],
+)
+def test_wait_needs_one_holding(capsys, config_path, arguments, problem):
+    configure(config_path)
+    assert main(["wait", *arguments]) == 1
+    assert problem in capsys.readouterr().err
+
+
+def test_no_wait_needs_start(capsys, config_path):
+    configure(config_path)
+    status, values, err = acquire(capsys, "--where", "form=phone", "--no-wait", *ME)
+    assert (status, values) == (1, {})
+    assert "acquire --no-wait needs --start" in err
+
+
+def test_with_no_wait_a_grant_that_starts_nothing_is_ready_at_once(capsys, config_path):
+    configure(config_path)
+    status, values, err = acquire(
+        capsys, "--holding", "tests", "--where", "form=phone", "--start", "--no-wait", *ME
+    )
+    assert status == 0, err
+    assert (values["STATE"], values["STARTED"]) == ("ready", "false")
+    assert "banksman wait" not in err

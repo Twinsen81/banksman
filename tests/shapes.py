@@ -95,6 +95,16 @@ COUNT = {
 NAMES = {"kind": str, "name": str}
 DECISIONS = {"allowed": [str], "refused": [str]}
 
+HELD_LEASE = {
+    "label": TEXT,
+    "lease_id": str,
+    "resource": str,
+    "kind": str,
+    "state": str,
+    "serial": TEXT,
+    "handle": TEXT,
+}
+
 SHAPES: dict[str, Any] = {
     "version": {"schema": int, "version": str, "lease_schema": int},
     "status": {
@@ -135,19 +145,10 @@ SHAPES: dict[str, Any] = {
     "held": {
         "schema": int,
         "owner_pid": int,
-        "leases": [
-            {
-                "label": TEXT,
-                "lease_id": str,
-                "resource": str,
-                "kind": str,
-                "state": str,
-                "serial": TEXT,
-                "handle": TEXT,
-            }
-        ],
+        "leases": [HELD_LEASE],
         "guard": ([COUNT], None),
     },
+    "wait": {"schema": int, "leases": [HELD_LEASE]},
     "reap": {
         "schema": int,
         "reaped": [
