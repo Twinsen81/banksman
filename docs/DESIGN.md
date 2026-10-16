@@ -1467,7 +1467,11 @@ is a setup of the operator, and a project needs nothing for it.
 
   When the agent process has several holdings, for example one for each subagent of a session,
   the line names the devices of each holding after its label, and says to use only the devices
-  of the agent's own holding. Without such a lease, the line is:
+  of the agent's own holding. The guard does not reap, so a lease file can still say that a
+  lease is held after the lease became void, for example after its idle timeout or its hard cap.
+  The guard applies the rules of the reaper (section 3) to these leases itself, and the line
+  names no void lease, because the next banksman command takes it back. Without such a lease,
+  the line is:
 
   ```text
   banksman: no device here is yours. Get one with banksman acquire; do not choose a serial from this list.

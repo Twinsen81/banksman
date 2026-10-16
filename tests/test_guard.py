@@ -870,6 +870,18 @@ def test_a_lost_lease_and_a_lease_without_a_device_are_not_named(
     assert note(system) == NO_DEVICE
 
 
+@pytest.mark.parametrize(
+    ("timeouts", "past"),
+    [(Timeouts(), Timeouts().idle_timeout), (Timeouts(idle_timeout=None), Timeouts().hard_cap)],
+)
+def test_a_lease_that_is_void_but_not_reaped_yet_is_not_named(store, system, timeouts, past):
+    store.acquire("e2e_phone", "emulator", mine(), timeouts=timeouts)
+    store.observe([SerialSeen("e2e_phone", "emulator", "emulator-5554", system.now)])
+    # The guard does not reap, so the lease file still says that the lease is ready.
+    system.now += past
+    assert note(system) == NO_DEVICE
+
+
 def test_a_detached_command_of_an_agent_gets_the_note_of_its_agent(store, system):
     env = detach(system)
     lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
