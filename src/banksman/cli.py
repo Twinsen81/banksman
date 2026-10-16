@@ -1721,20 +1721,23 @@ def _acquire(
     granted = _reconnect_kept(store, config, granted, found.serials)
     new = [grant.lease for grant in granted if not grant.kept]
     if no_wait and any(lease.state == BOOTING for lease in new):
-        if len(new) < len(granted):
+        # The new leases join a held holding with the label or the lease id of the request, also
+        # when the request keeps none of its leases.
+        others = set(store.holding(new[0].lease_id)) - {lease.resource for lease in new}
+        if others:
             for lease in new:
                 _give_back(store, lease)
             given_back = "the new lease is" if len(new) == 1 else "the new leases are"
             raise BanksmanError(
-                "acquire --no-wait starts a holding of its own, and this request keeps leases of a"
-                " holding: banksman wait could not tell a holding that is ready from one whose new"
-                f" lease was lost. Use another label, or acquire without --no-wait; {given_back}"
-                " given back"
+                "acquire --no-wait starts a holding of its own, and this request joins a holding"
+                f" that has other leases: {', '.join(sorted(others))}. banksman wait could not"
+                " tell that holding, after its new lease was lost, from one that is ready. Use"
+                f" another label, or acquire without --no-wait; {given_back} given back"
             )
         leases = _detach(store, config, granted, starts)
         created = [lease.resource in starts for lease in leases]
     else:
-        leases, created = _boot(store, config, granted, starts)
+        leases, created = _prepare(store, config, granted, starts)
     boot_id = store.system.boot_id()
     unmanaged = {each.resource for every in found.candidates for each in every if each.unmanaged}
     previous = [
@@ -1744,44 +1747,27 @@ def _acquire(
     return _Grant(store, config, granted, leases, previous, created)
 
 
-def _boot(
-    store: Store, config: Config, granted: Sequence[Granted], starts: Collection[str]
-) -> tuple[list[Lease], list[bool]]:
-    """Start and reset the instances of the new leases, and mark the leases ready, as `_prepare`
-    does. Return the leases with the serials that discovery finds after a reset, and for each
-    whether the request started its instance."""
-    leases, created = _prepare(store, config, granted, starts)
-    reset = [
-        lease
-        for grant, lease in zip(granted, leases)
-        if not grant.kept and config.kinds[lease.kind].on_acquire is not None
-    ]
-    if reset:
-        # The hook can restart the instance, and a restarted emulator can get another serial.
-        seen: list[SerialSeen] = []
-        for name in sorted({lease.kind for lease in reset}):
-            kind = config.kinds[name]
-            if not kind.discovered:
-                continue
-            started = store.system.clock()
-            after = serials_seen(discover(kind, config), started)
-            seen.extend(after)
-            # The serial from before the reset can name another instance now, so an instance
-            # that discovery does not find with a serial now, also because it fails, has none.
-            known = {each.resource for each in after if each.serial is not None}
-            seen.extend(
-                SerialSeen(lease.resource, name, None, started)
-                for lease in reset
-                if lease.kind == name and lease.resource not in known
-            )
-        now = store.observe(seen)
-        leases = [
-            now[lease.resource]
-            if lease.resource in now and now[lease.resource].lease_id == lease.lease_id
-            else lease
-            for lease in leases
-        ]
-    return leases, created
+def _seen_after_resets(
+    store: Store, config: Config, reset: Sequence[Lease]
+) -> list[SerialSeen]:
+    """Return what discovery finds now about the serials of the instances that were reset."""
+    seen: list[SerialSeen] = []
+    for name in sorted({lease.kind for lease in reset}):
+        kind = config.kinds[name]
+        if not kind.discovered:
+            continue
+        started = store.system.clock()
+        after = serials_seen(discover(kind, config), started)
+        seen.extend(after)
+        # The serial from before the reset can name another instance now, so an instance that
+        # discovery does not find with a serial now, also because it fails, has none.
+        known = {each.resource for each in after if each.serial is not None}
+        seen.extend(
+            SerialSeen(lease.resource, name, None, started)
+            for lease in reset
+            if lease.kind == name and lease.resource not in known
+        )
+    return seen
 
 
 # How long acquire --no-wait waits until the process that continues its start has taken the
@@ -1885,7 +1871,7 @@ def _continue_start(
         handed = [
             replace(grant, lease=by_id.get(grant.lease.lease_id, grant.lease)) for grant in granted
         ]
-        _boot(store, config, handed, starts)
+        _prepare(store, config, handed, starts)
     except BaseException:
         # A start that fails gives its leases back. Its error reaches nobody: the caller has
         # gone, and banksman wait reports the holding as lost.
@@ -2108,6 +2094,10 @@ def _prepare(
     new leases with the on_acquire hooks of their kinds, and then mark every new lease ready.
     Return the leases, and for each whether the request started its instance.
 
+    The hook can restart an instance, and a restarted emulator can get another serial, so
+    discovery runs again after the resets, and each lease gets what it found when it becomes
+    ready, in the same write: nobody sees a ready lease with the serial from before its reset.
+
     A request gets all its parts or none: if a start or a reset fails, or a new lease is lost
     meanwhile, every new lease of the request is given back.
     """
@@ -2135,8 +2125,14 @@ def _prepare(
             # The resets run one after another. A check keeps the other leases of the holding
             # from becoming idle meanwhile.
             store.check(lease.resource, lease.lease_id)
+        reset = [
+            leases[index]
+            for index in new
+            if config.kinds[leases[index].kind].on_acquire is not None
+        ]
+        seen = _seen_after_resets(store, config, reset)
         for index in new:
-            leases[index] = store.ready(leases[index].resource, leases[index].lease_id)
+            leases[index] = store.ready(leases[index].resource, leases[index].lease_id, seen)
     except NotHeld as exc:
         for grant in granted:
             if not grant.kept:

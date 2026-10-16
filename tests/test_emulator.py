@@ -656,17 +656,26 @@ def test_a_release_stops_a_start_that_continues(capsys, config_path, sdk, starte
     assert leases() == {}
 
 
-def test_no_wait_refuses_a_request_that_keeps_leases_of_its_holding(capsys, config_path, sdk):
+@pytest.mark.parametrize(
+    "request_",
+    [
+        # The request keeps the phone, and adds the tablet.
+        ["--as", "phone", "--where", "avd=qa_phone", "--as", "tablet", "--where", "avd=qa_tablet"],
+        # The request names only the tablet, which joins the holding of the phone all the same.
+        ["--where", "avd=qa_tablet"],
+    ],
+)
+def test_no_wait_refuses_a_request_that_joins_a_holding_with_other_leases(
+    capsys, config_path, sdk, request_
+):
     configure(config_path, sdk)
     status, _, err = acquire(capsys, "--holding", "ui", "--where", "avd=qa_phone", *ME)
     assert status == 0, err
     status, values, err = acquire(
-        capsys,
-        "--holding", "ui", "--as", "phone", "--where", "avd=qa_phone",
-        "--as", "tablet", "--where", "avd=qa_tablet", "--start", "--no-wait", *ME,
-    )  # fmt: skip
+        capsys, "--holding", "ui", *request_, "--start", "--no-wait", *ME
+    )
     assert (status, values) == (1, {})
-    assert "acquire --no-wait starts a holding of its own" in err
+    assert "this request joins a holding that has other leases: qa_phone" in err
     assert "the new lease is given back" in err
     assert set(leases()) == {"qa_phone"}
     assert sdk.emulator_calls() == []

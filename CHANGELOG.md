@@ -431,8 +431,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it has ended, so a start that dies frees the instance at the next command. A start of an
   emulator ends early, and ends the emulator, when its lease is no longer booting, so a release
   of the holding stops it; this also applies to a start in a waiting `acquire`. `--no-wait`
-  needs `--start`, and a request that keeps leases of its holding and adds a lease that boots is
-  refused. The grant prints `STARTED=true` for a part whose instance the request starts. The new
+  needs `--start`, and a request whose new booting leases would join a holding that has other
+  leases is refused. The grant prints `STARTED=true` for a part whose instance the request starts. The new
   command `banksman wait --holding <label>`, or `--lease <id>`, exits with 0 when every lease of
   the holding is ready, and then touches the holding and prints its leases as `held` does, with
   4 while a lease boots, and with 3 when the holding is lost; `--wait` looks again every second.

@@ -750,8 +750,14 @@ class Store:
             return True
         return current is not None and current.lease_id == lease_id and current.state == BOOTING
 
-    def ready(self, resource: str, lease_id: str) -> Lease:
-        """End the boot or the reset of an instance: the holder may use it now."""
+    def ready(self, resource: str, lease_id: str, seen: Iterable[SerialSeen] = ()) -> Lease:
+        """End the boot or the reset of an instance: the holder may use it now.
+
+        `seen` is what a discovery after a reset found about serials, as for `observe`. It
+        applies in the same lock, also where a booting lease would keep its serial, so that
+        nobody sees the lease ready with a serial from before the reset.
+        """
+        seen = tuple(seen)
         with self._lock():
             lease = self._held(resource, lease_id)
             if lease.state == READY:
@@ -763,7 +769,14 @@ class Store:
                 reaper_pid=None,
                 reaper_started=None,
             )
-            return self._write(ready)
+            if not seen:
+                return self._write(ready)
+            entries = [
+                ready if isinstance(entry, Lease) and entry.resource == resource else entry
+                for entry in self._scan()
+            ]
+            _, serials = self._see(entries, seen)
+            return self._write(serials.get(resource, ready))
 
     def touch(
         self,

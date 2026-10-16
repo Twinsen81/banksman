@@ -599,8 +599,8 @@ holdings apart (section 9).
   void, it ends the emulator that it started and gives the lease back. So a release of the
   holding stops the start. The owner process stays the agent, so a ready lease that the caller
   does not come back to ends by the owner rule or by the idle timeout; the end of the boot
-  touches the lease. `--no-wait` needs `--start`. A request that keeps leases of its holding and
-  adds a lease that boots is refused, because `banksman wait` could not tell such a holding,
+  touches the lease. `--no-wait` needs `--start`. A request whose new booting leases would join a
+  holding that has other leases is refused, because `banksman wait` could not tell such a holding,
   after its new lease was lost, from one that is ready. `STARTED=true` says that the request
   starts the instance: the grant comes before the start ends, so it cannot know yet that a start
   of a remote device adopts a reservation. A start that fails gives its leases back, and its
@@ -658,8 +658,9 @@ holdings apart (section 9).
   time of a hook, for each reset of the request. At the end, every new lease must still be
   held; otherwise all of them are given back. A lease that the caller
   keeps with `--lease` is not reset again. The hook can restart the instance, so `acquire`
-  reads its facts again after the reset, and records and prints the serial that discovery finds
-  then. An instance that discovery does not find with a serial then, also because discovery
+  reads its facts again after the resets, before the leases are ready, and records the serial
+  that discovery finds then in the same write that makes each lease ready, so that nobody sees a
+  ready lease with the serial from before its reset. An instance that discovery does not find with a serial then, also because discovery
   fails, has no serial.
 - **No other process acts on the instance during a start or a reset.** The lease names the
   `acquire` that starts the instance or runs the hook, and a hook never outlives that process
