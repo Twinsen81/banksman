@@ -243,6 +243,12 @@ banksman acquire --holding ui-tests --where form=phone --start --for "UI tests" 
   during the boot, the lease is void at once: the next command ends the emulator if it still
   runs, and a new request of the same holding starts the boot again. While `acquire` runs in
   the background, a new request of the same holding waits for it.
+- An agent can also add `--no-wait`: `acquire` then prints the grant as soon as it has the
+  AVD, with `STATE=booting`, and a banksman process of its own continues the start, which the
+  tool of the agent does not stop. `banksman wait --holding ui-tests --wait 5m` exits with 0
+  when the emulator is ready, with 4 while it still boots, and with 3 when the start failed or
+  was stopped. A script that needs the device at once has no use for it: it waits in
+  `acquire`.
 - A release leaves the emulator running, so the next request gets it without a boot. The
   reaper ends an emulator that banksman started when its lease becomes void, and, with the
   `free_timeout` of the kind, when no lease of its AVD has existed for that time. So a script

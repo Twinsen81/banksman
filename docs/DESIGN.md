@@ -86,8 +86,10 @@ leases instead.
   that is still starting always has a lease, and cannot be mistaken for an orphan. banksman
   starts an instance only on `--start`, and only for a kind that it can start (section 6). A
   lease is `booting` only while banksman starts the instance, or the kind's `on_acquire` hook
-  resets it (section 5). The lease names the `acquire` that does it, and only that process
-  marks it ready, so a caller that ends in the middle frees the resource at the next command.
+  resets it (section 5). The lease names the banksman process that does it: the `acquire`, or,
+  with `acquire --no-wait`, a process of its own that continues the start (section 6). Only that
+  process marks it ready, so a process that ends in the middle frees the resource at the next
+  command.
 - **Void triggers.** A lease is void when any of these is true. The defaults are starting
   values, to be tuned by measurement. The operator can change each of them in the
   configuration, for all kinds or for one kind (section 5). A lease keeps the values that
@@ -96,7 +98,7 @@ leases instead.
   | Trigger | Default | Catches |
   |---|---|---|
   | the machine restarted after the lease was written | n/a | leases that describe an earlier boot |
-  | `booting`, and the `acquire` that it names has ended | n/a | starts and resets that a stopped command left |
+  | `booting`, and the banksman process that it names has ended | n/a | starts and resets that a stopped command left |
   | `booting` past its boot deadline | 5 min | starts and resets that never complete |
   | held longer than the hard cap | 3 h | runs that are alive but loop |
   | owner process ended, and no touch for a grace period | 5 min | crashed or killed runs |
@@ -115,9 +117,9 @@ leases instead.
   session of its own, such as an emulator that `acquire` started. Nothing marks the lease
   ready after that, so the lease does not wait for its boot deadline: it is void as soon as
   its `acquire` has ended, and the next command takes it back as any void lease. The retry
-  then starts the instance again. banksman does not continue the start in a detached process:
-  such a process would have to leave the process tree of the caller, so it would also
-  continue after a stop that the user asked for.
+  then starts the instance again. With `acquire --no-wait`, the start continues in a process
+  that has left the process tree of the caller (section 6), so the tool cannot stop it, and a
+  release of the holding stops it instead.
 - **Owner death alone is not proof that a resource is idle.** Some agents keep a session's
   background commands running across a restart of the session process. Those commands keep
   touching the lease, and a touch can record the new owner process. So a restarted run
@@ -582,6 +584,34 @@ holdings apart (section 9).
   with `--lease` is not started again. The starts and the resets of one request run one after
   another, so the boot deadline of each new lease also counts the boot timeout of every other
   start of the request.
+- **A start that continues.** With `--start --no-wait`, `acquire` prints the grant at once, with
+  `STATE=booting`, and the start continues in a banksman process of its own. The shell tool of
+  an agent can stop every process below its command by parent pid, also one in a session of its
+  own, so `acquire` forks twice: its child starts a new session, forks the process that
+  continues the start, and ends at once, so that the init process adopts that process. Under
+  the lock, that process takes the booting leases over: they name it in the fields of a reaper
+  in place of the `acquire`, but only while each of them is valid and names that `acquire`.
+  Only then does `acquire` print the grant and end. The process starts and resets the instances
+  as `acquire` does, also with the `on_acquire` hook, marks the leases ready, and ends. The
+  leases are void as soon as it has ended, so a start that dies still frees the instance at the
+  next command. While it waits for the boot of an emulator, it reads the lease file each second,
+  and when the lease is no longer booting, because the holder released it or a reaper found it
+  void, it ends the emulator that it started and gives the lease back. So a release of the
+  holding stops the start. The owner process stays the agent, so a ready lease that the caller
+  does not come back to ends by the owner rule or by the idle timeout; the end of the boot
+  touches the lease. `--no-wait` needs `--start`. A request whose new booting leases would join a
+  holding that has other leases is refused, because `banksman wait` could not tell such a holding,
+  after its new lease was lost, from one that is ready. `STARTED=true` says that the request
+  starts the instance: the grant comes before the start ends, so it cannot know yet that a start
+  of a remote device adopts a reservation. A start that fails gives its leases back, and its
+  error reaches nobody.
+- **`banksman wait`** is a command for holders: `banksman wait --holding <label>`, or `--lease
+  <id>`, exits with 0 when every lease of the holding is ready, and then touches the holding and
+  prints its leases as `held` does. It exits with 4 while a lease of the holding boots, and with
+  3 when the holding has no held lease, or a lease that an earlier look saw is no longer held.
+  With `--wait`, it looks again every second until the wait ends. Each look reaps first, so a
+  start that died frees its instance. `run --holding` still refuses a booting lease, with exit
+  status 4, and names `wait`.
 - **`STARTED`** says whether this request started the instance: `true` for an emulator that
   it started, and for the reservation of a remote device that it created. It is `false` for an
   instance that ran already, for a reservation that the start adopted, also one that banksman
@@ -628,8 +658,9 @@ holdings apart (section 9).
   time of a hook, for each reset of the request. At the end, every new lease must still be
   held; otherwise all of them are given back. A lease that the caller
   keeps with `--lease` is not reset again. The hook can restart the instance, so `acquire`
-  reads its facts again after the reset, and records and prints the serial that discovery finds
-  then. An instance that discovery does not find with a serial then, also because discovery
+  reads its facts again after the resets, before the leases are ready, and records the serial
+  that discovery finds then in the same write that makes each lease ready, so that nobody sees a
+  ready lease with the serial from before its reset. An instance that discovery does not find with a serial then, also because discovery
   fails, has no serial.
 - **No other process acts on the instance during a start or a reset.** The lease names the
   `acquire` that starts the instance or runs the hook, and a hook never outlives that process
@@ -1535,8 +1566,10 @@ is a setup of the operator, and a project needs nothing for it.
 ```
 banksman acquire [--as <part>] [--where <attr><op><value> ...] [--accounts <n>] ...
                  [--for <text>] [--expect <duration>] [--wait <duration>]
-                 [--lease <id> | --holding <label>] [--paid] [--start] [--issue <id>]
-                 [--owner-pid <pid>] [--json]
+                 [--lease <id> | --holding <label>] [--paid] [--start [--no-wait]]
+                 [--issue <id>] [--owner-pid <pid>] [--json]
+banksman wait    (--lease <id> | --holding <label>) [--wait <duration>]
+                 [--owner-pid <pid>] [--json]                      # until the holding is ready
 banksman enter   --resource <name> --lease <id> --pid <pid> [--pgid <pgid>]  # check, touch, register
 banksman check   --resource <name> --lease <id>                    # touch; exit 0: yours, 3: lost
 banksman leave   --resource <name> --lease <id> --pid <pid>
@@ -1788,6 +1821,9 @@ Done:
   `BANKSMAN_RESOURCES`, and stops when any of the leases is lost.
 - An emulator that an agent started outside banksman goes to that agent, as one that banksman
   knows, and `status` shows the agent of an unmanaged emulator.
+- A start that continues after its `acquire`: `acquire --start --no-wait` prints the grant at
+  once and continues the start in a process that the shell tool of an agent does not stop, and
+  `banksman wait` waits until the holding is ready.
 
 Next:
 

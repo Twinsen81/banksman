@@ -36,7 +36,8 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
 - Ask for properties with `--where`, such as `form=tablet`, `'api>=33'`, or `avd=<name>`.
   `banksman status` shows the devices that exist, and who holds them.
 - Add `--start` to get a device that runs: banksman then starts a granted emulator that does
-  not run, and prints the grant when its boot has completed. Without `--start`, a granted
+  not run, and prints the grant when its boot has completed. Add `--no-wait` too to get the
+  grant at once, while the boot goes on (see "Time limits"). Without `--start`, a granted
   emulator may not run yet: start it yourself when it does not run. banksman can end an
   emulator that nobody has leased for some time, so use `--start` also for a device that ran
   before.
@@ -91,9 +92,11 @@ banksman release --holding login-tests
 ## Exit statuses
 
 - 4: every matching device is in use. Wait with `--wait`, or do other work. It is not a
-  failure of your change.
+  failure of your change. From `banksman wait`, or from `run` with `--holding`: a device of the
+  holding is still booting.
 - 3: the lease is lost, or your agent process has no holding with that label. Stop using the
-  device, and acquire one again.
+  device, and acquire one again. From `banksman wait` after `acquire --no-wait`: the start
+  failed or was stopped. Run the `acquire` again without `--no-wait` to see why.
 - When `adb` exits with status 3 and banksman says that the call is refused, another holder
   leases the device, your lease of it is lost, or the device is not in your holding. Do not run
   the command again: use a device of your own holding.
@@ -116,12 +119,25 @@ banksman release --holding login-tests
 - Give the tool a timeout that is longer than the `--wait`, for example `--wait 5m` with a
   timeout of 6 minutes, so that you get the result of `acquire` in the same call.
 - With `--start`, the boot of an emulator comes after the wait, and can take some minutes.
-  Keep the wait short, for example `--wait 3m` with a timeout of 10 minutes. When the tool
-  stops the command during the boot, banksman ends what it started, and the request with the
-  same label starts the boot again.
+  Add `--no-wait` so that your tool does not stop the boot:
+
+  ```sh
+  banksman acquire --holding login-tests --where form=phone --start --no-wait --wait 3m
+  banksman wait --holding login-tests --wait 5m
+  ```
+
+  `acquire` then prints the grant as soon as it has a device, with `STATE=booting`, and a
+  banksman process of its own continues the start, also after your tool stops the command.
+  `banksman wait` exits with 0 when every device of the holding is ready, and prints them with
+  their serials, with 4 while one still boots, and with 3 when the start failed or was stopped.
+  Run it again after 4. Use `--no-wait` only for a label that has no device yet: banksman
+  refuses it for a holding that has one. To stop such a start, release the holding.
+- Without `--no-wait`, keep the wait short, for example `--wait 3m` with a timeout of 10
+  minutes. When the tool stops the command during the boot, banksman ends what it started, and
+  the request with the same label starts the boot again.
 - When `acquire` continues in the background, you do not need its output: `banksman held`
   shows your holding and its state. While it boots, a new request with the same label exits
-  with status 4, or waits with `--wait`.
+  with status 4, or waits with `--wait`, and `banksman wait` with the label waits for it.
 - Run a command that takes longer, such as a long test run under `banksman run`, in the
   background of your tool, with a time limit that is long enough. In Claude Code, the timeout
   of a command with `run_in_background` is its time in the background: 10 minutes by default,

@@ -712,8 +712,52 @@ class Store:
                 )
             return self._write(replace(lease, serial=serial, serial_seen=self.system.clock()))
 
-    def ready(self, resource: str, lease_id: str) -> Lease:
-        """End the boot or the reset of an instance: the holder may use it now."""
+    def hand_over(self, leases: Sequence[tuple[str, str]], before: tuple[int, str]) -> list[Lease]:
+        """Name this process in booting leases, given by their resources and ids, in place of the
+        process `before`, by pid and start time: this process starts or resets their instances
+        from now on, and marks them ready.
+
+        Every lease must be valid, booting, and name `before`, or none changes. When `before` has
+        ended before it handed the leases over, they are void.
+        """
+        with self._lock():
+            me = os.getpid()
+            started = self._start_time(me)
+            current = [self._held(resource, lease_id) for resource, lease_id in leases]
+            for lease in current:
+                if lease.state != BOOTING or (lease.reaper_pid, lease.reaper_started) != before:
+                    raise NotHeld(
+                        f"the lease on {lease.resource} is not booting for process {before[0]}"
+                    )
+            return [
+                self._write(replace(lease, reaper_pid=me, reaper_started=started))
+                for lease in current
+            ]
+
+    def still_booting(self, resource: str, lease_id: str) -> bool:
+        """Whether the file of a resource still holds this lease in state booting.
+
+        It reads without the lock, as the adb guard does, because a start asks it every second
+        while it waits for a boot, and only to decide whether to go on. A lease that is released,
+        or that a reaper found void, is no longer booting. A file that cannot be read gives no
+        reason to stop.
+        """
+        try:
+            current = self._read(resource)
+        except (OSError, BanksmanError):
+            return True
+        if isinstance(current, Unreadable):
+            return True
+        return current is not None and current.lease_id == lease_id and current.state == BOOTING
+
+    def ready(self, resource: str, lease_id: str, seen: Iterable[SerialSeen] = ()) -> Lease:
+        """End the boot or the reset of an instance: the holder may use it now.
+
+        `seen` is what a discovery after a reset found about serials, as for `observe`. It
+        applies in the same lock, also where a booting lease would keep its serial, so that
+        nobody sees the lease ready with a serial from before the reset.
+        """
+        seen = tuple(seen)
         with self._lock():
             lease = self._held(resource, lease_id)
             if lease.state == READY:
@@ -725,7 +769,14 @@ class Store:
                 reaper_pid=None,
                 reaper_started=None,
             )
-            return self._write(ready)
+            if not seen:
+                return self._write(ready)
+            entries = [
+                ready if isinstance(entry, Lease) and entry.resource == resource else entry
+                for entry in self._scan()
+            ]
+            _, serials = self._see(entries, seen)
+            return self._write(serials.get(resource, ready))
 
     def touch(
         self,

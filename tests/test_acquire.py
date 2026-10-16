@@ -11,7 +11,7 @@ from helpers import age_lease, hook, table_rows, work_in, write_config
 from banksman import cli
 from banksman.cli import main
 from banksman.inventory import Decisions, Inventory, save_inventory
-from banksman.lease import Holder
+from banksman.lease import Holder, SerialSeen
 from banksman.store import Store
 from banksman.system import Machine
 
@@ -353,6 +353,51 @@ def test_the_serial_is_read_again_after_a_reset(capsys, config_path, tmp_path):
     status, values, _ = acquire(capsys, "--where", "serial=emulator-5554")
     assert (status, values["RESOURCE"], values["SERIAL"]) == (0, "qa_phone", "emulator-5556")
     assert leases()["qa_phone"].serial == "emulator-5556"
+
+
+# What the discover hook writes: the state of the lease on qa_phone when discovery runs.
+WATCH = (
+    "import json, os, sys; "
+    "path = os.path.join(os.environ['BANKSMAN_STATE_DIR'], 'qa_phone.json'); "
+    "os.path.exists(path) and open(sys.argv[2], 'a').write(json.load(open(path))['state'] + '\\n'); "
+    "print(open(sys.argv[1]).read())"
+)
+
+
+def test_a_lease_is_ready_only_with_the_serial_from_after_its_reset(capsys, config_path, tmp_path):
+    found = tmp_path / "found.json"
+    states = tmp_path / "states"
+    before = {"name": "qa_phone", "facts": {"running": True, "serial": "emulator-5554"}}
+    after = {"name": "qa_phone", "facts": {"running": True, "serial": "emulator-5556"}}
+    found.write_text(json.dumps({"schema": 1, "instances": [before]}))
+    moved = json.dumps({"schema": 1, "instances": [after]})
+    restart = f"open({str(found)!r}, 'w').write({moved!r})"
+    write_config(
+        config_path,
+        "[holder]\nagents = []\n[kinds.emulator]\n"
+        f"discover = {json.dumps(hook(WATCH, str(found), str(states)))}\n"
+        f"on_acquire = {json.dumps(hook(restart))}\n",
+    )
+    save_inventory(Inventory(kinds={"emulator": Decisions(allowed=("qa_phone",))}))
+    status, values, _ = acquire(capsys, "--where", "serial=emulator-5554")
+    assert (status, values["SERIAL"]) == (0, "emulator-5556")
+    # The discovery after the reset ran while the lease still booted, so no command saw the
+    # lease ready with the serial from before the reset.
+    assert states.read_text() == "booting\n"
+
+
+def test_ready_records_what_a_discovery_after_the_reset_found(store):
+    holder = Holder("/work/tree-a")
+    lease = store.reserve("phone-1", "emulator", holder)
+    seen = [SerialSeen("phone-1", "emulator", "emulator-5556", store.system.clock())]
+    ready = store.ready("phone-1", lease.lease_id, seen)
+    assert (ready.state, ready.serial) == ("ready", "emulator-5556")
+    other = store.reserve("phone-2", "emulator", holder)
+    store.claim_serial("phone-2", other.lease_id, ["emulator-5558"])
+    store.system.advance(1)
+    # A booting lease keeps its serial when discovery does not find it; a ready one loses it.
+    gone = [SerialSeen("phone-2", "emulator", None, store.system.clock())]
+    assert store.ready("phone-2", other.lease_id, gone).serial is None
 
 
 def test_the_lease_records_the_serial_of_its_instance(capsys, config_path):
