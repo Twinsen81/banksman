@@ -764,11 +764,19 @@ def test_a_run_of_a_paid_holding_takes_paid_and_needs_no_new_one(
     command = ["--", sys.executable, "-c", SHOW, "{serial}", str(shown)]
     by_lease = ["--lease", values["LEASE"], "--resource", "tokay:34"]
     # The guide for agents writes --paid right after run, as after acquire. The leases are held
-    # and paid already, so the flag changes nothing.
-    for options in (["--paid", *holding], holding, ["--paid", *by_lease]):
+    # and paid already, so the flag changes nothing, and a note says to leave it out.
+    for options, way in (
+        (["--paid", *holding], "--holding"),
+        (holding, None),
+        (["--paid", *by_lease], "--lease"),
+    ):
         shown.unlink(missing_ok=True)
-        assert main(["run", *options, *command]) == 0, capsys.readouterr().err
+        status = main(["run", *options, *command])
+        err = capsys.readouterr().err
+        assert status == 0, err
         assert shown.read_text().split() == ["localhost:49522", FIRST]
+        note = f"banksman: note: run {way} needs no --paid, because its leases are held already"
+        assert (note in err) == (way is not None), err
     assert [call for call in cli.calls() if "create" in call] == [
         "device remote create tokay/34 --connect"
     ]

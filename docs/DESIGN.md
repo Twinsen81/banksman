@@ -567,8 +567,9 @@ holdings apart (section 9).
   take part, after every resource that costs nothing. `--paid` is an acknowledgement, not a
   filter: `--where paid=true` asks for a paid resource. A lease that the caller keeps with
   `--lease` or `--holding` needs no new acknowledgement. `run --lease` and `run --holding`
-  lease nothing new, so they accept `--paid` and ignore it: an agent that writes `--paid` after
-  `run` as after `acquire` gets its run, not an error. The store checks the acknowledgement
+  lease nothing new, so they accept `--paid`, run the command, and say on standard error that
+  `--paid` is not needed: an agent that writes `--paid` after `run` as after `acquire` gets its
+  run, not an error, and learns to leave the flag out. The store checks the acknowledgement
   again under its lock, so a kept lease that ends meanwhile cannot let a new paid lease
   through. `status` marks a paid kind as `remote (paid)`, and `status --json` carries `paid`
   for each resource. The permission rules of the agents can ask the user before every `--paid`

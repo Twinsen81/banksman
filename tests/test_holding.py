@@ -541,7 +541,7 @@ def test_agent_guide_prints_a_skill_for_the_installed_version(capsys):
     # It says when the agent can skip the setup of a device, and that a sibling subagent in the
     # same worktree counts as the worktree.
     assert "`PREVIOUS=self` says that your worktree used the device last" in guide
-    assert "also the other subagents of your\n  session" in guide
+    assert "Every agent in your worktree counts as your worktree" in guide
     # It says when the agent ends what it started.
     assert "`STARTED=true` says that this request started the device" in guide
     # It says where the agent finds a refusal of the adb guard that a script hid.

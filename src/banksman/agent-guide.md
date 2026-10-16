@@ -24,8 +24,8 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
   `STATE` (`ready`, or `booting` after `--no-wait`), `KEPT`, `PREVIOUS`, and `STARTED`. It
   also prints `SERIAL` when the device has a serial now, `HANDLE` (the reservation) for a remote
   device, and `ACCOUNTS` with `--accounts`. With `--as <part>`, which names each part of a
-  request for several devices, each key starts with the name of its part in capitals, for
-  example `PHONE_SERIAL`, and there is no `RESOURCE` line.
+  request for several devices, every key starts with the name of its part in capitals, for
+  example `PHONE_RESOURCE` and `PHONE_SERIAL`, and no key is without that prefix.
 - `PREVIOUS=self` says that your worktree used the device last, gave it back with a release,
   and banksman knows of nothing that changed it since. What you installed or signed in can
   still be there: check it quickly, and skip only the setup that is still done. `self` is not a
@@ -168,8 +168,8 @@ banksman release --holding login-tests
   device, `--start` reserves and connects it, which adds about a minute to the command.
 - Only a command that leases a new device needs `--paid`: `acquire`, and `run --where`. A
   holding that you keep or use with `--holding` needs no new `--paid`, so leave it out of
-  `run --holding`. banksman ignores it there, but the permission rules can still ask the user
-  about it.
+  `run --holding`. banksman runs the command anyway, and says that `--paid` is not needed, but
+  the permission rules can still ask the user about it.
 
 ## Other rules
 
