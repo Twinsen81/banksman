@@ -1396,7 +1396,8 @@ is a setup of the operator, and a project needs nothing for it.
   guard follows them: it talks to the console of the emulator whose port is in the serial of
   `-s` or `ANDROID_SERIAL`, and without one, to the only emulator, also when physical devices
   are connected; it ignores `-t`, `-d`, and `-e`. A command that acts on no device, such as
-  `adb devices`, `adb connect`, or `adb forward --list`, always runs.
+  `adb devices`, `adb connect`, or `adb forward --list`, always runs. For an agent's
+  `adb devices`, the guard first says which devices are the agent's own (see below).
 - **The lease of the device.** A held lease that records the serial; a lease in another state
   that records it, while no held lease records it, because discovery keeps the serial up to
   date in held leases only (section 3); and a lease in any state whose resource is the serial,
@@ -1453,6 +1454,50 @@ is a setup of the operator, and a project needs nothing for it.
   localhost:<port>` end the connection of a remote device, so the guard refuses them for the
   devices of other holders as for every device, and `banksman run` connects the caller's own
   device again (section 8).
+- **The note on `adb devices`.** An agent that runs `adb devices` sees every device of the
+  machine, and the list does not say which of them its holding leases. So for `adb devices` and
+  `adb devices -l` of a caller with an agent process, the guard prints one line on standard
+  error before the wrapper runs adb. When held leases of the caller's holdings have devices,
+  through an owner process above the caller or named in its environment, the line names their
+  serials, or the resource while the serial is not known, with the label of the holding:
+
+  ```text
+  banksman: your holding login-tests has emulator-5556. Use only that device; get another with banksman acquire.
+  ```
+
+  When the agent process has several holdings, for example one for each subagent of a session,
+  the line names the devices of each holding after its label, and says to use only the devices
+  of the agent's own holding. Without such a lease, the line is:
+
+  ```text
+  banksman: no device here is yours. Get one with banksman acquire; do not choose a serial from this list.
+  ```
+
+  Standard output stays exactly the output of adb. The line comes before the list, because a
+  line after it would need the wrapper to run adb as a child process, and to start banksman a
+  second time for each call. A person's call gets nothing, and so do `adb track-devices`, which
+  is a stream that does not end, and `adb devices` with other arguments, which adb refuses. The
+  line has no list of free devices: such a list is out of date as soon as it is printed, and two
+  agents that read it would choose the same device, which is why a resource comes only from
+  `acquire` (section 6). It names no other holder and no purpose, because that text comes from
+  other agents and must not reach the agent in the output of adb. The only text from an agent in
+  it is the caller's own label, cleaned as every printed value. The line is not a refusal or a
+  warning, so it adds no event to the log, takes no lock, and touches no lease. When the guard
+  cannot make the line, for example because the sandbox of the agent hides the process list,
+  it leaves the line out and says nothing, because `adb devices` is not checked.
+
+  A command of `banksman run` gets nothing either: when `BANKSMAN_LEASE` is set, the guard reads
+  nothing for `adb devices`. Such a command has its device in `ANDROID_SERIAL`, and a script
+  there often calls `adb devices` in a loop while it waits for a boot. The line is also in the
+  output of a script that merges standard error into what it reads, for example
+  `$(adb devices 2>&1)`, as the line of warn mode is. For a script outside `banksman run` that
+  breaks on it, `devices_note = false` in `[guard]` turns the line off:
+
+  ```toml
+  [guard]
+  devices_note = false
+  ```
+
 - **Strict mode.** With `strict = true` in the `[guard]` table of the configuration, the guard
   also refuses an agent's device command on a device that no lease of its holding has: a free
   device, or a device that the inventory does not allow, such as a personal phone. The refusal
@@ -1532,9 +1577,11 @@ is a setup of the operator, and a project needs nothing for it.
   a call that it refuses or warns about, and for a touch that is due, about once a minute
   for each holding that uses its device. It waits for the lock for half a second at most, and
   does not then clean up or restore the quarantines, as the other commands do. In strict mode and
-  warn mode, a device command on a device without a lease also reads the process list. On the
-  Mac where it was measured, the wrapper and the guard together add about 35 ms to a call that
-  needs no process list, and about 70 ms to one that needs it.
+  warn mode, a device command on a device without a lease also reads the process list. For the
+  note, an `adb devices` outside `banksman run` reads the lease files and the process list, to
+  find out whether an agent is the caller. On the Mac where it was
+  measured, the wrapper and the guard together add about 35 ms to a call that needs no process
+  list, and about 70 ms to one that needs it, also to `adb devices`.
 - **When the guard fails.** When banksman cannot decide, for example because of an error in the
   configuration, a lease file of a newer banksman, or a process list that the sandbox of an
   agent hides, the call runs, and banksman says on standard error that the call is not checked.

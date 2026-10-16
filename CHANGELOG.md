@@ -439,6 +439,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `wait --json` prints the leases with the fields of `held --json`. `run --holding` names `wait`
   when it refuses a booting lease. The guide for agents tells an agent to use `--no-wait` with
   `--start`. The lease schema and the output schema do not change.
+- An agent's `adb devices` through the adb guard now says which devices are its own. For
+  `adb devices` and `adb devices -l` of a caller with an agent process, the guard prints one
+  line on standard error before the wrapper runs adb: the devices that the held leases of the
+  caller's holdings have, by serial, or by resource while the serial is not known, after the
+  label of each holding; or that no device is the caller's, and that `banksman acquire` gets
+  one. Standard output stays the output of adb. The line names no free device, no other
+  holder, and no purpose, adds no event to the log, and takes no lock. A person's call, a call
+  with `BANKSMAN_LEASE` such as a command of `banksman run`, and `adb track-devices` get
+  nothing, and when the guard cannot make the line, it says nothing. The new key
+  `devices_note = false` in `[guard]` turns the line off. Outside `banksman run`, `adb devices`
+  through the guard now reads the lease files and the process list, which adds about 30 ms to
+  the call. The guide for agents names the line. The lease schema and the output schema do not
+  change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

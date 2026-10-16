@@ -168,6 +168,8 @@ class Guard:
     # WARN lets such a call run, but warns the agent and records the call in the log, so that the
     # operator sees which flows still use devices without a lease before turning STRICT on.
     strict: str | None = None
+    # An agent's `adb devices` also says, on standard error, which devices its holdings have.
+    devices_note: bool = True
 
 
 @dataclass(frozen=True)
@@ -320,13 +322,14 @@ def _android(table: dict[str, object]) -> Android:
 
 
 def _guard(table: dict[str, object]) -> Guard:
-    _check_keys(table, "guard", ("strict",))
+    _check_keys(table, "guard", ("strict", "devices_note"))
+    note = _boolean(table.get("devices_note", True), "guard.devices_note")
     strict = table.get("strict", False)
     if strict == WARN:
-        return Guard(strict=WARN)
+        return Guard(strict=WARN, devices_note=note)
     if not isinstance(strict, bool):
         raise _Invalid("guard.strict", f'must be true, false, or "{WARN}"')
-    return Guard(strict=STRICT if strict else None)
+    return Guard(strict=STRICT if strict else None, devices_note=note)
 
 
 def _absolute_path(value: object, where: str) -> Path | None:

@@ -7,7 +7,9 @@ decides from the lease files, without the lock, without reaping, and without dis
 the process list and runs `adb devices` only when a decision needs them, because it runs before
 every adb call, and a UI test makes many. It writes to the log only when it refuses a call, or
 lets a call run with a warning. It takes the lock of the lease store only then, and when a call
-of the holder touches the lease of its device, which is due about once a minute.
+of the holder touches the lease of its device, which is due about once a minute. For
+`adb devices`, it also tells an agent which devices are its own, so it reads the lease files and
+the process list for that call too.
 
 It is a guardrail, not a security boundary: a call through the full path of adb, a tool that
 talks to the adb server itself, and the emulator console do not pass through it. It never
@@ -127,6 +129,8 @@ class Call:
     server: tuple[str, ...] = ()
     # `adb emu` talks to the console of an emulator, which it chooses by rules of its own.
     console: bool = False
+    # `adb devices` or `adb devices -l`, which lists the devices.
+    lists: bool = False
 
 
 @dataclass(frozen=True)
@@ -153,6 +157,8 @@ class Decision:
     # The held leases of the holding whose lease of the device let the call run, also the leases
     # of its other resources. The call is use of the holding, so it touches them.
     used: tuple[Lease, ...] = ()
+    # The line for an agent's `adb devices`: which devices of the list are its own.
+    note: str | None = None
 
 
 RUNS = Decision()
@@ -188,6 +194,8 @@ def main(argv: Sequence[str]) -> int:
         # protection, so the call runs, and the person who reads the output sees why.
         _say(f"adb guard: this adb call is not checked: {_reason(exc)}")
         decision = RUNS
+    if decision.note is not None:
+        _say(decision.note)
     verdict = decision.verdict
     # A touch that fails changes nothing for the call. The guard says nothing about it either,
     # because a script can read standard error with the output of adb, and the next call of the
@@ -220,6 +228,8 @@ def check(
     `listing` lists the devices as `adb devices -l` does; by default it runs adb.
     """
     call = parse(arguments)
+    if call.lists:
+        return Decision(note=devices_note(config, env, system))
     if call.scope == HOST:
         return RUNS
     snapshot = peek(default_state_dir(), default_quarantine_dir())
@@ -291,7 +301,9 @@ def parse(arguments: Sequence[str]) -> Call:
     wait = [rest.pop(0)] if rest and rest[0].startswith("wait-for-") else []
     options = tuple(server)
     if not rest or rest[0] in _HOST_COMMANDS or rest[:2] == ["forward", "--list"]:
-        return Call(HOST, " ".join(wait + rest[:1]))
+        # adb refuses `devices` with other arguments.
+        lists = rest[:1] == ["devices"] and rest[1:] in ([], ["-l"])
+        return Call(HOST, " ".join(wait + rest[:1]), lists=lists)
     if rest[0] == "kill-server":
         return Call(ALL, " ".join(wait + rest[:1]), server=options)
     if rest == ["disconnect"] or rest[:2] in _FOR_EVERY_DEVICE:
@@ -419,6 +431,66 @@ def decide(
         return Decision(Verdict(REFUSED, UNREADABLE, text, call.command, caller, serial))
     used = [lease for lease in leases if lease.state in HELD and lease.holding in caller.holdings]
     return Decision(used=tuple(used))
+
+
+def devices_note(config: Config, env: Mapping[str, str], system: System) -> str | None:
+    """Return the line that tells an agent which devices of `adb devices` are its own, or None
+    for a call without an agent process.
+
+    The line names only the devices of the caller's holdings. A list of free devices is out of
+    date as soon as it is printed, and two agents that read it would choose the same device. It
+    names no other holder, because the text of other agents must not reach the agent in the output
+    of adb.
+    """
+    # A command of banksman run has its device in ANDROID_SERIAL. A script there can call adb
+    # devices in a loop while it waits for a boot, and read standard error with the list.
+    if not config.guard.devices_note or env.get(LEASE_VARIABLE):
+        return None
+    try:
+        snapshot = peek(default_state_dir(), default_quarantine_dir())
+        caller = Caller(env, snapshot.leases, system, config.holder)
+        if not caller.is_agent():
+            return None
+        holdings = caller.holdings
+    except (BanksmanError, OSError):
+        # adb devices is not checked, so a process list that the sandbox hides, or a lease file
+        # of a newer banksman, only leaves the line out.
+        return None
+    own = [
+        lease
+        for lease in _devices(snapshot, config).leases
+        if lease.state in HELD and lease.holding in holdings
+    ]
+    return _own_devices(own)
+
+
+def _own_devices(own: Sequence[Lease]) -> str:
+    if not own:
+        return (
+            "no device here is yours. Get one with banksman acquire; do not choose a serial from"
+            " this list."
+        )
+    holdings: dict[str, list[Lease]] = {}
+    # The holdings with a label first, as held lists them.
+    for lease in sorted(own, key=lambda lease: (lease.label is None, lease.label or "")):
+        holdings.setdefault(lease.holding, []).append(lease)
+    # A device that does not run yet has no serial.
+    named = [
+        (leases[0].label, ", ".join(lease.serial or lease.resource for lease in leases))
+        for leases in holdings.values()
+    ]
+    if len(named) == 1:
+        ((label, names),) = named
+        use = "that device" if len(own) == 1 else "these devices"
+        return (
+            f"your holding{f' {label}' if label else ''} has {names}. Use only {use}; get another"
+            " with banksman acquire."
+        )
+    listed = "; ".join(f"{label or 'without a label'}: {names}" for label, names in named)
+    return (
+        f"your holdings have these devices: {listed}. Use only the devices of your own holding;"
+        " get another with banksman acquire."
+    )
 
 
 def touch(used: Sequence[Lease], system: System) -> list[Lease]:

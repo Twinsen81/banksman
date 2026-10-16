@@ -51,7 +51,9 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
   devices, and serials, and the `adb` calls that banksman refused or warned about in the last
   15 minutes. It also lists the holdings and the calls of the other subagents of your session:
   use only your own label.
-- Never choose a serial from `adb devices` yourself.
+- Never choose a serial from `adb devices` yourself. On a machine with the adb guard,
+  `adb devices` also prints a `banksman:` line that names the devices of your holdings after
+  their labels, or says that no device is yours. Use only the devices of your own label.
 
 ## Use the device
 

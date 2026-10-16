@@ -233,6 +233,13 @@ def test_the_adb_guard_is_strict_or_warns_only_when_the_operator_says_so(
     assert load_config().guard.strict == mode
 
 
+@pytest.mark.parametrize(("value", "on"), [(None, True), ("true", True), ("false", False)])
+def test_the_note_on_adb_devices_is_on_unless_the_operator_turns_it_off(config_path, value, on):
+    if value is not None:
+        write_config(config_path, f'[guard]\nstrict = "warn"\ndevices_note = {value}\n')
+    assert load_config().guard.devices_note is on
+
+
 def test_a_kind_can_get_its_instances_from_discovery(config_path):
     write_config(
         config_path,
@@ -386,6 +393,7 @@ def test_text_that_is_not_a_duration_is_refused(text):
         ("[guard]\nstrict = 'Warn'", "guard.strict"),
         ("[guard]\nstrict = 1", "guard.strict"),
         ("[guard]\nstrictly = true", "guard.strictly"),
+        ("[guard]\ndevices_note = 'no'", "guard.devices_note"),
     ],
 )
 def test_a_configuration_that_is_not_valid_is_refused(config_path, text, key):
