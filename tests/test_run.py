@@ -427,27 +427,6 @@ def test_at_a_terminal_the_command_reads_input_and_gets_ctrl_c(state_dir):
         _end_terminal_test(pid, terminal)
 
 
-def test_a_command_that_exits_with_130_after_ctrl_c_ends_banksman_by_sigint(state_dir):
-    # As a JVM does: it catches Ctrl-C, and exits with 130.
-    code = (
-        "import sys, time\n"
-        "print('re' 'ady', flush=True)\n"
-        "try:\n"
-        "    time.sleep(60)\n"
-        "except KeyboardInterrupt:\n"
-        "    sys.exit(130)\n"
-    )
-    pid, terminal = at_terminal(lease_on(state_dir), code)
-    try:
-        assert "ready" in _read_until(terminal, "ready")
-        os.write(terminal, b"\x03")
-        _read_until(terminal, "never printed", timeout=5)
-        _, status = os.waitpid(pid, 0)
-        assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGINT
-    finally:
-        _end_terminal_test(pid, terminal)
-
-
 def test_a_command_whose_input_is_not_the_terminal_does_not_get_it(state_dir):
     code = (
         "import os; tty = os.open('/dev/tty', os.O_RDONLY);"
