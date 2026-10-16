@@ -6,6 +6,7 @@ import pty
 import select
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -14,6 +15,7 @@ from contextlib import suppress
 import pytest
 from helpers import SRC, FakeSdk, edit_lease, hook, reap_in_child, write_config
 
+from banksman import leader
 from banksman import run as runs
 from banksman.cli import main
 from banksman import hooks
@@ -480,6 +482,61 @@ def test_a_signal_that_the_caller_ignores_stays_ignored(state_dir):
     )
     status, out, _ = finish(process)
     assert (status, out) == (0, "True False\n")
+
+
+def _read_report(sock, timeout=10.0):
+    """Read one newline-terminated JSON message that the leader sent, or None in time."""
+    give_up = time.monotonic() + timeout
+    data = b""
+    while not data.endswith(b"\n"):
+        wait = give_up - time.monotonic()
+        if wait <= 0 or not select.select([sock], [], [], wait)[0]:
+            break
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    return json.loads(data) if data.endswith(b"\n") else None
+
+
+def test_the_leader_forwards_a_signal_to_the_command(tmp_path):
+    # The terminal sends a signal such as Ctrl-C to the whole foreground process group, but a
+    # group member can miss a group signal that the group leader receives. So the leader passes
+    # the signal on to the command. This test signals only the leader, never the group of the
+    # command, so the command reacts to the signal only if the leader forwards it.
+    marker = tmp_path / "started"
+    code = (
+        "import sys, time\n"
+        "open(sys.argv[1], 'w').close()\n"
+        "try:\n"
+        "    time.sleep(30)\n"
+        "except KeyboardInterrupt:\n"
+        "    sys.exit(130)\n"
+    )
+    ours, theirs = socket.socketpair()
+    with ours:
+        leader_process = subprocess.Popen(
+            [sys.executable, "-I", leader.__file__, str(theirs.fileno()),
+             sys.executable, "-c", code, str(marker)],
+            pass_fds=(theirs.fileno(),),
+            process_group=0,
+        )
+        theirs.close()
+        try:
+            ours.sendall(leader.GO)
+            give_up = time.monotonic() + 10
+            while not marker.exists() and time.monotonic() < give_up:
+                time.sleep(0.02)
+            assert marker.exists(), "the command did not start"
+            # Signal the leader alone, not the process group of the command.
+            os.kill(leader_process.pid, signal.SIGINT)
+            assert _read_report(ours) == {"returncode": 130}
+        finally:
+            with suppress(OSError):
+                ours.sendall(leader.DONE)
+            with suppress(ProcessLookupError):
+                os.killpg(leader_process.pid, signal.SIGKILL)
+            leader_process.wait(timeout=10)
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash for job control")

@@ -31,9 +31,25 @@ NOT_FOUND = 127
 CANNOT_RUN = 126
 TERM_WAIT_SECONDS = 10.0
 
+# The forwarded signals. The terminal sends them to the foreground process group, and banksman
+# sends them to the group when it passes on a signal of its own caller.
+_FORWARDED = (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM)
 
-def _ignore(signum, frame):
-    pass
+# The command, once it runs. The signal handler reads it to pass a signal on to the command.
+_command: "subprocess.Popen | None" = None
+
+
+def _forward(signum, frame):
+    # The terminal and banksman send these signals to the whole group, but a group member can
+    # miss a group signal that this process, the group leader, receives: on macOS a command
+    # that was stopped with Ctrl-Z and continued with fg did not always get the next Ctrl-C.
+    # So this program, which does get the signal, sends it on to the command as well. It stays
+    # alive itself and ends only with banksman. Sending the same signal twice does no harm: the
+    # command has reacted to the first before the second arrives, or it has already ended.
+    command = _command
+    if command is not None:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(command.pid, signum)
 
 
 def _receive(channel):
@@ -64,14 +80,15 @@ def _end_group(process):
 
 
 def main():
+    global _command
     channel = socket.socket(fileno=int(sys.argv[1]))
-    # The terminal and banksman send these signals to the whole group. The command decides what
-    # they do, and this program ends only with banksman. A handler, not SIG_IGN: a handled
-    # signal has its default action again in the command. A signal that the caller ignores, as
-    # nohup does, stays ignored, also in the command.
-    for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM):
+    # The terminal and banksman send these signals to the whole group. This program passes each
+    # one on to the command and stays alive itself, so it ends only with banksman. A handler,
+    # not SIG_IGN: a handled signal has its default action again in the command. A signal that
+    # the caller ignores, as nohup does, stays ignored, here and in the command.
+    for signum in _FORWARDED:
         if signal.getsignal(signum) != signal.SIG_IGN:
-            signal.signal(signum, _ignore)
+            signal.signal(signum, _forward)
     if _receive(channel) != GO:
         # banksman has not registered the group, so the command must not start.
         os._exit(0)
@@ -83,6 +100,7 @@ def main():
             status = NOT_FOUND if exc.errno == errno.ENOENT else CANNOT_RUN
             _send(channel, {"returncode": status, "error": exc.strerror or str(exc)})
         else:
+            _command = process
             threading.Thread(target=_report, args=(channel, process), daemon=True).start()
         if _receive(channel) == DONE:
             os._exit(0)
