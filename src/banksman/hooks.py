@@ -151,12 +151,14 @@ def _run(
         # otherwise keep a pipe open, and the command that reads it waiting. Output that banksman
         # does not read is discarded, not inherited, for the same reason.
         output = stack.enter_context(tempfile.TemporaryFile()) if capture else None
-        # While the command is traced, what the hook says: its standard error, and its standard
-        # output when banksman does not read that. It is apart from the standard error of the
-        # supervisor, which says only why the hook could not start.
+        # While the command is traced, the end of what the hook says: its standard error, and its
+        # standard output when banksman does not read that. The supervisor keeps it, at most
+        # TAIL_BYTES, apart from its own standard error, which says only why the hook could not
+        # start.
         said = stack.enter_context(tempfile.TemporaryFile()) if tracing else None
-        stdout = output if output is not None else said if said is not None else subprocess.DEVNULL
-        keep = [] if said is None else [supervisor.KEEP_STDERR, str(said.fileno())]
+        stdout = output if output is not None else subprocess.DEVNULL
+        tail = supervisor.TAIL if capture else supervisor.TAIL_ALL
+        keep = [] if said is None else [tail, str(said.fileno())]
         # No shell and no input. A fixed working directory makes a hook behave the same for
         # every caller.
         process = subprocess.Popen(
@@ -175,7 +177,7 @@ def _run(
             failure, printed = _outcome(process, command, timeout, output)
         finally:
             if said is not None:
-                said.seek(max(0, said.seek(0, os.SEEK_END) - trace.OUTPUT_BYTES))
+                said.seek(0)
                 trace.step(
                     "hook",
                     **traced,  # type: ignore[arg-type]
@@ -183,7 +185,7 @@ def _run(
                     status=process.returncode,
                     failure=failure,
                     seconds=round(time.monotonic() - started, 3),
-                    output=trace.output_tail(said.read()),
+                    output=trace.output_tail(said.read(supervisor.TAIL_BYTES)),
                 )
     return failure, printed
 

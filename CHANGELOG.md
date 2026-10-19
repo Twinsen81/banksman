@@ -497,7 +497,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its own. The trace is off by default, because it keeps full adb command lines and the purposes
   of other agents: the file has mode `0600`, no command reads it, and `banksman admin doctor`
   warns while it is on. A trace that cannot be written does not fail a command or refuse an adb
-  call. The lease schema and the output schema do not change.
+  call. While the trace is on, a hook writes to a pipe of which banksman keeps only the last
+  4 KiB, and a small process reads and discards what a program that the hook leaves running
+  writes there, so that output fills no file and the program gets no SIGPIPE. The lease schema
+  and the output schema do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

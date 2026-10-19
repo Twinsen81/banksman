@@ -5,12 +5,13 @@ import json
 import os
 import signal
 import stat
+import time
 
 import pytest
 import shapes
 from helpers import age_lease, hook, work_in, write_config
 
-from banksman import cli, trace
+from banksman import cli, hooks, trace
 from banksman.trace import TRACE_SCHEMA
 from banksman.cli import main
 from banksman.config import ConfigError, load_config
@@ -235,6 +236,84 @@ def test_a_hook_that_cannot_start_says_why_in_the_trace(config_path, trace_path,
     (run,) = steps(line, "hook")
     assert run["failure"] == f"could not start {missing}: No such file or directory"
     assert (run["status"], run["output"]) == (127, [])
+
+
+# A program that a hook starts and leaves running: it writes to its standard output and error
+# for a second, after the hook has ended, and then says what they are, and in which group it ran.
+WRITER = "\n".join(
+    [
+        "import os, stat, sys, time",
+        "time.sleep(0.5)",
+        "start = time.monotonic()",
+        "while time.monotonic() - start < 1:",
+        "    os.write(1, b'x' * 65536)",
+        "    os.write(2, b'y' * 65536)",
+        "kinds = [stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (1, 2)]",
+        "open(sys.argv[1], 'w').write(f'{os.getpgrp()} {kinds}')",
+    ]
+)
+LEAVES_A_WRITER = "\n".join(
+    [
+        "import subprocess, sys",
+        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])",
+        "print('reset done')",
+    ]
+)
+
+
+def test_a_program_that_a_traced_hook_leaves_running_neither_fills_a_file_nor_ends(
+    config_path, trace_path, tmp_path, capsys
+):
+    # Such a program, for example an emulator that the hook starts, can write for hours. Its
+    # output goes to a pipe that is read and discarded, never to a file, and the program never
+    # gets SIGPIPE, which would end it.
+    report = tmp_path / "report"
+    command = hook(LEAVES_A_WRITER, WRITER, str(report))
+    configure(config_path, f"[kinds.build]\ncount = 1\non_acquire = {json.dumps(command)}\n")
+    started = time.monotonic()
+    assert main(["acquire", "--where", "kind=build"]) == 0
+    assert time.monotonic() - started < 5
+    (line,) = traced(trace_path)
+    (run,) = steps(line, "hook")
+    assert run["output"] == ["reset done"]
+    _wait_for(lambda: report.exists() and report.read_text())
+    group, kinds = report.read_text().split(" ", 1)
+    assert kinds == "[True, True]"
+    # The process that read the pipe ends with the program.
+    _wait_for(lambda: all(each.pgid != int(group) for each in Machine().process_table().values()))
+
+
+def test_a_traced_hook_that_says_more_than_a_pipe_holds_keeps_its_last_lines(
+    config_path, trace_path, capsys
+):
+    code = "for number in range(20000): print(f'line {number}')"
+    configure(config_path, f"[kinds.build]\ncount = 1\non_acquire = {json.dumps(hook(code))}\n")
+    assert main(["acquire", "--where", "kind=build"]) == 0
+    (line,) = traced(trace_path)
+    (run,) = steps(line, "hook")
+    assert run["output"][-1] == "line 19999"
+    assert len(run["output"]) == trace.OUTPUT_LINES
+
+
+def test_a_traced_hook_that_is_killed_at_its_timeout_keeps_what_it_said(trace_path):
+    lease = Store(cli.default_state_dir(), Machine()).acquire(
+        "build-0", "build", Holder("/work/tree-a")
+    )
+    trace.start(["reap"], trace_path)
+    code = "import time; print('waiting for the device', flush=True); time.sleep(60)"
+    failure = hooks.run(hook(code), lease, timeout=2, hook="on_void")
+    trace.finish(0)
+    assert failure == "did not end within 2 s"
+    (line,) = [json.loads(each) for each in trace_path.read_text().splitlines()]
+    (run,) = steps(line, "hook")
+    assert run["output"] == ["waiting for the device"]
+
+
+def _wait_for(condition, seconds=20.0):
+    give_up = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < give_up, "the condition did not come true in time"
+        time.sleep(0.1)
 
 
 def test_a_hook_without_the_trace_shows_nothing(config_path, trace_path, capfd):

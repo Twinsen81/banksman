@@ -434,6 +434,10 @@ not code.
   banksman runs it without a shell, in the directory `/`, with no input, and with
   `BANKSMAN_RESOURCE` and `BANKSMAN_KIND` in its environment, and it discards the output,
   except that the trace keeps its last lines while the operator has turned it on (section 10).
+  The hook then writes to a pipe, of which banksman keeps only the last 4 KiB. A program that
+  the hook leaves running, such as an emulator, keeps the pipe after the hook has ended, so a
+  small banksman process in the group of the hook reads the pipe and discards what it reads
+  until that program closes it: the output fills no file, and the program gets no SIGPIPE.
   `BANKSMAN_SERIAL` is set when the serial of the instance is known, and `BANKSMAN_HANDLE`
   when the lease records the id of a reservation (section 3). A hook of a kind with an
   Android preset also gets `ANDROID_SERIAL`: the serial, or a value that no device has while
@@ -1351,8 +1355,9 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   - `reap`: the void check of each held lease, with its void reason or null, and the free
     instances that the reaper ends.
   - `hook`: the hook, its kind and resource, its command, its exit status, how it failed, how
-    long it ran, and the last 20 lines of what it printed. For a `discover` hook, those are the
-    lines of its standard error, because its standard output is the document.
+    long it ran, and the last 20 lines of what it printed until it ended, from the last 4 KiB.
+    For a `discover` hook, those are the lines of its standard error, because its standard
+    output is the document.
   - `guard`: what the guard did, `runs`, `refused`, `warned`, or `unchecked` when it could not
     decide, why, the serial, the leases of other holders that the refusal names, the leases of
     the caller that the call used and touched, the adb that runs, and the error of a guard that
