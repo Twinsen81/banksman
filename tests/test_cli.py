@@ -503,7 +503,9 @@ def _clean_up(script, work):
     # Only processes that this test started. A script that is not yet waited for keeps its
     # group id; the work group is signalled only while its leader is the same process.
     if script.returncode is None:
-        with suppress(ProcessLookupError):
+        # macOS refuses to signal a group whose processes have all ended but are not waited for
+        # yet, and then nothing in the group runs.
+        with suppress(ProcessLookupError, PermissionError):
             os.killpg(script.pid, signal.SIGKILL)
     script.wait()
     script.stdout.close()
