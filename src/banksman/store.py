@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from banksman import LEASE_SCHEMA, fencing
+from banksman import LEASE_SCHEMA, fencing, trace
 from banksman.assign import Option, Part, assign
 from banksman.errors import BanksmanError
 from banksman.history import (
@@ -68,6 +68,7 @@ STATE_DIR_ENV = "BANKSMAN_STATE_DIR"
 QUARANTINE_DIR_ENV = "BANKSMAN_QUARANTINE_DIR"
 LOG_ENV = "BANKSMAN_LOG"
 ENDED_ENV = "BANKSMAN_ENDED"
+TRACE_ENV = "BANKSMAN_TRACE"
 LOCK_WAIT_SECONDS = 10.0
 RELEASED = "released"
 # A take-back that this many reapers started and none finished is quarantined.
@@ -360,6 +361,17 @@ def default_ended_path() -> Path:
     return lasting_dir(ENDED_ENV) / "ended.json"
 
 
+def default_trace_path() -> Path:
+    override = os.environ.get(TRACE_ENV)
+    if override:
+        return Path(override)
+    state_dir = os.environ.get(STATE_DIR_ENV)
+    if state_dir:
+        return Path(state_dir).with_name(f"{Path(state_dir).name}-trace.jsonl")
+    # Next to the log: a trace that the operator turned on for a test must outlive a restart.
+    return lasting_dir(TRACE_ENV) / "trace.jsonl"
+
+
 def lasting_dir(variable: str) -> Path:
     # The home directory comes from the user database, as for the configuration file, so that
     # every caller of one user finds the same files.
@@ -532,6 +544,7 @@ class Store:
             else:
                 kept = {}
             if any(lease.state == BOOTING for lease in kept.values()):
+                _trace_grant(needs, entries, (), taken, kept, paid, "booting")
                 return None
             ends = self._ends()
             boot_id = self.system.boot_id()
@@ -548,7 +561,11 @@ class Store:
             picks = assign([_part(need, held | ended, taken, kept, paid) for need in needs])
             if picks is None:
                 parts = [_part(need, held, taken, kept, paid) for need in needs]
-                if ended and assign(parts) is not None:
+                outdated = bool(ended) and assign(parts) is not None
+                _trace_grant(
+                    needs, entries, ended, taken, kept, paid, "outdated" if outdated else "busy"
+                )
+                if outdated:
                     raise Outdated(
                         f"a lease on {', '.join(sorted(ended))} ended after the discovery of the"
                         " request started"
@@ -615,6 +632,16 @@ class Store:
                 lease = self._write(serials[lease.resource])
                 granted.append((lease.resource, pick.accounts, False))
                 self._log(ACQUIRE, lease)
+            _trace_grant(
+                needs,
+                entries,
+                ended,
+                taken,
+                kept,
+                paid,
+                "granted",
+                [resource for resource, _, _ in granted],
+            )
             # A later lease of the request can take the serial of an earlier one.
             return [
                 Granted(
@@ -1009,10 +1036,19 @@ class Store:
             # The reaper ends a free instance under a lease of its own, as a take-back: a request
             # waits for the instance meanwhile, and only one reaper ends it.
             mine = [self._write(self._ending(each, me, now)) for each in ending.values()]
+            checked: list[dict[str, object]] = []
             for found in leases:
                 lease = found
                 if lease.state in HELD:
                     reason = void_reason(lease, boot_id=boot_id, now=now, running=running)
+                    checked.append(
+                        {
+                            "resource": lease.resource,
+                            "lease_id": lease.lease_id,
+                            "state": lease.state,
+                            "void": reason,
+                        }
+                    )
                     if reason is None:
                         continue
                     self._log(VOID, lease, reason=reason, **self._spent(lease, final=False))
@@ -1068,6 +1104,15 @@ class Store:
                     reaped.append(self._finish(lease, outcome, users))
                 elif replace(lease, users=users) != found:
                     self._write(replace(lease, users=users))
+            if trace.active():
+                trace.step(
+                    "reap",
+                    leases=checked,
+                    ending=[
+                        {"resource": each.resource, "kind": each.kind, "reason": each.reason}
+                        for each in ending.values()
+                    ],
+                )
         for lease in mine:
             reaped.extend(self._end(lease, me))
         return reaped
@@ -1713,6 +1758,70 @@ def _part(
         if choice.resource not in held and not choice.in_use and (paid or not choice.paid)
     )
     return Part(tuple(options), need.accounts)
+
+
+def _trace_grant(
+    needs: Sequence[Need],
+    entries: Sequence[Lease | Unreadable],
+    ended: Collection[str],
+    taken: Collection[str],
+    kept: Mapping[str, Lease],
+    paid: bool,
+    outcome: str,
+    granted: Sequence[str] = (),
+) -> None:
+    """Record in the trace the resources that matched each part of a request, and why the
+    request could not get each one, as `_part` decides."""
+    if not trace.active():
+        return
+    found = {entry.resource: entry for entry in entries}
+    parts = [
+        [_option(choice, need.accounts, found, ended, taken, kept, paid) for choice in need.choices]
+        for need in needs
+    ]
+    trace.step("grant", outcome=outcome, granted=list(granted), parts=parts)
+
+
+def _option(
+    choice: Choice,
+    accounts: int,
+    found: Mapping[str, Lease | Unreadable],
+    ended: Collection[str],
+    taken: Collection[str],
+    kept: Mapping[str, Lease],
+    paid: bool,
+) -> dict[str, object]:
+    entry = found.get(choice.resource)
+    current = kept.get(choice.resource)
+    free = [
+        account
+        for account in choice.accounts
+        if account not in taken or (current is not None and account in current.accounts)
+    ]
+    lease = None
+    skipped: str | None = None
+    if current is not None:
+        if current.state == BOOTING:
+            skipped = BOOTING
+    elif isinstance(entry, Unreadable):
+        skipped = "unreadable"
+    elif entry is not None:
+        skipped, lease = "in_use", entry
+    elif choice.resource in ended:
+        skipped = "ended"
+    elif choice.in_use:
+        skipped = "unmanaged"
+    elif choice.paid and not paid:
+        skipped = "paid"
+    if skipped is None and len(free) < accounts:
+        skipped = "accounts"
+    return {
+        "resource": choice.resource,
+        "kept": current is not None,
+        "skipped": skipped,
+        "lease_id": None if lease is None else lease.lease_id,
+        "state": None if lease is None else lease.state,
+    }
 
 
 def _used(lease: Lease) -> bool:

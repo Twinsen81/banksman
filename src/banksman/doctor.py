@@ -4,10 +4,10 @@ Every file that banksman prints for the operator to save drifts after an upgrade
 compares each saved copy with what this banksman prints, and checks the configuration, the
 inventory, the Android SDK, the PATH, and the directories of banksman.
 
-It changes nothing: it does not reap, it creates no directory, and it writes no log. It reads the
-lease files as the adb guard does, and it runs discovery without the accounts, `adb version`,
-`adb devices -l`, and `launchctl print` or `crontab -l` for the reap job. It never calls the
-network.
+It changes nothing: it does not reap, it creates no directory, and it writes no log and no
+trace. It reads the lease files as the adb guard does, and it runs discovery without the
+accounts, `adb version`, `adb devices -l`, and `launchctl print` or `crontab -l` for the reap
+job. It never calls the network.
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ from banksman.store import (
     default_log_path,
     default_quarantine_dir,
     default_state_dir,
+    default_trace_path,
     peek,
 )
 from banksman.system import Machine
@@ -132,6 +133,7 @@ def run(shell: Shell) -> list[Check]:
         _guarded("quarantine-dir", _place, "quarantine-dir", default_quarantine_dir),
         _guarded("log", _place, "log", default_log_path, False),
         _guarded("lease-ends", _place, "lease-ends", default_ended_path, False),
+        _guarded("trace", _trace, config, config_path),
         _guarded("quarantine", _quarantine),
         _guarded("holder", _holder, config),
     ]
@@ -575,6 +577,28 @@ def _place(name: str, where: Callable[[], Path], directory: bool = True) -> Chec
     if not os.access(path, os.W_OK | (os.X_OK if directory else 0)):
         return Check(name, FAIL, f"this user cannot write to {path}", f"chmod u+w {_quoted(path)}")
     return Check(name, OK, str(path))
+
+
+def _trace(config: Config | None, config_path: Path | None) -> Check:
+    name = "trace"
+    if config is None:
+        return Check(name, SKIP, _NO_CONFIG)
+    if not config.log.trace:
+        return Check(name, OK, "the trace is off")
+    off = f"after the test, set trace = false in [log] of {config_path}"
+    place = _place(name, default_trace_path, False)
+    if place.status == FAIL:
+        return Check(name, FAIL, f"the trace is on, but {place.detail}", place.fix or off)
+    # An operator turns the trace on for a test, and must not leave it on by accident: it keeps
+    # what the log keeps out on purpose.
+    return Check(
+        name,
+        WARN,
+        f"the trace is on: {default_trace_path()} gets a line for every banksman command and every"
+        " adb call through the guard, with full adb command lines and the purposes of other"
+        " agents",
+        off,
+    )
 
 
 def _quarantine() -> Check:

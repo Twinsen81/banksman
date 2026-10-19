@@ -132,6 +132,19 @@ Every program of the user can change it, an agent too, so banksman checks each l
 reads it, as it checks a lease file, and leaves out a line that is not a valid event. The JSON
 of `banksman log` carries the purpose only with `--verbose`, as `status` does.
 
+**The trace holds what the log keeps out.** The operator turns the trace on for a test with
+`trace = true` in `[log]` (DESIGN.md, section 10), and turns it off after the test;
+`banksman admin doctor` warns while it is on. `~/.local/state/banksman/trace.jsonl` then keeps
+every command with its arguments, every adb call through the adb guard with its full command
+line, which can carry tokens, each line that a command printed on standard error, which can name
+the purposes and labels of other agents, the last lines of the output of each hook, and the
+notes of discovery, which can name an instance that agents may not use. So it is off by default,
+and banksman creates it with mode `0600` in a directory with mode `0700`, sets the mode back to
+`0600` when group or others can read it, and refuses a file that another user owns or that group
+or others can write to. No command reads it, and no command for agents prints it. banksman
+removes control characters from every text in it. It keeps neither the accounts that discovery
+finds, which can be personal, nor the environment of a process.
+
 **The record of the ends of leases is a hint.** `~/.local/state/banksman/ended.json` keeps,
 for each resource, when its last lease ended, and the worktree, label, and issue of the last
 holder that used it. It orders the free instances and gives `PREVIOUS` (DESIGN.md, section 6),

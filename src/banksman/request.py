@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from banksman import android, remote
+from banksman import android, remote, trace
 from banksman.config import Config, Kind
 from banksman.discovery import (
     ACCOUNT,
@@ -176,6 +176,8 @@ def search(
     absent: list[tuple[str, str]] = []
     resources: list[Candidate] = []
     serials: list[SerialSeen] = []
+    # The instances that discovery found and no request may get, for the trace.
+    left_out: list[dict[str, str]] = []
     for kind in config.kinds.values():
         if kind.name not in wanted:
             continue
@@ -203,8 +205,14 @@ def search(
             found_facts[kind.name].update(instance.facts)
             # A name has one lease file, so a name that another kind declares is not this kind's.
             if declared.get(instance.name, kind.name) != kind.name:
+                left_out.append(
+                    {"resource": instance.name, "kind": kind.name, "reason": "other_kind"}
+                )
                 continue
             if not inventory.allows(kind.name, instance.name):
+                left_out.append(
+                    {"resource": instance.name, "kind": kind.name, "reason": "not_permitted"}
+                )
                 continue
             facts = dict(instance.facts)
             accounts = None
@@ -270,7 +278,50 @@ def search(
             )
         )
         candidates.append(tuple(matching))
+    if trace.active():
+        trace.step(
+            "search",
+            parts=[
+                _traced_part(part, {kind.name for kind in kinds}, resources, matching)
+                for part, kinds, matching in zip(parts, kinds_of, candidates)
+            ],
+            left_out=left_out,
+            absent=[{"resource": name, "kind": kind} for kind, name in absent],
+        )
     return Search(tuple(candidates), tuple(notes), tuple(absent), tuple(serials))
+
+
+def _traced_part(
+    part: Part,
+    kinds: Collection[str],
+    resources: Sequence[Candidate],
+    matching: Sequence[Candidate],
+) -> dict[str, object]:
+    """Return a part of a request for the trace: the permitted resources that match it in the
+    order of choice, and for each other permitted resource of its kinds, the first clause that it
+    does not meet, or None when it lacks the accounts."""
+    matched = {candidate.resource for candidate in matching}
+    return {
+        "part": part.name,
+        "where": [str(clause) for clause in part.clauses],
+        "accounts": part.accounts,
+        "matches": [candidate.resource for candidate in matching],
+        "no_match": [
+            {
+                "resource": candidate.resource,
+                "clause": next(
+                    (
+                        str(clause)
+                        for clause in part.clauses
+                        if not matches(clause, candidate.facts, candidate.tags)
+                    ),
+                    None,
+                ),
+            }
+            for candidate in resources
+            if candidate.kind in kinds and candidate.resource not in matched
+        ],
+    }
 
 
 def _shown_notes(found: Found) -> list[str]:

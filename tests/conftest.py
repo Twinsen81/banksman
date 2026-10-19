@@ -9,7 +9,14 @@ from banksman.config import CONFIG_ENV
 from banksman.identity import PID_VARIABLES
 from banksman.inventory import INVENTORY_ENV
 from banksman.lease import LEASE_VARIABLE
-from banksman.store import ENDED_ENV, LOG_ENV, QUARANTINE_DIR_ENV, STATE_DIR_ENV, Store
+from banksman.store import (
+    ENDED_ENV,
+    LOG_ENV,
+    QUARANTINE_DIR_ENV,
+    STATE_DIR_ENV,
+    TRACE_ENV,
+    Store,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +48,14 @@ def ended_path(tmp_path, monkeypatch):
     # No test may write into the real record of the ends of leases.
     path = tmp_path / "home" / ".local" / "state" / "banksman" / "ended.json"
     monkeypatch.setenv(ENDED_ENV, str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
+def trace_path(tmp_path, monkeypatch):
+    # No test may write into the real trace.
+    path = tmp_path / "home" / ".local" / "state" / "banksman" / "trace.jsonl"
+    monkeypatch.setenv(TRACE_ENV, str(path))
     return path
 
 

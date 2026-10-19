@@ -483,6 +483,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what banksman prints, and warns when a kind has `free_timeout` or `unused_timeout` and no job
   is saved, or when launchd has not loaded the job. The lease schema is now 12 for the new void
   reason, and banksman also reads lease files of schema 11. The output schema stays 6.
+- An opt-in trace for the operator. With `trace = true` in the new `[log]` table of the
+  configuration, every banksman command, and the adb guard for every adb call, adds one line of
+  JSON to `~/.local/state/banksman/trace.jsonl`: the arguments, the caller, the exit status, the
+  duration, each line that the command printed on standard error, and the steps on the way. The
+  steps are what discovery found, which permitted resources matched each part of a request and
+  the first clause that each other one did not meet, why the request could not get each resource
+  (in use, unreadable, ended after the discovery, unmanaged, paid without `--paid`, accounts, or
+  booting), the void checks of the reaper, each hook run with its exit status and the last lines
+  of its output, and each decision of the adb guard, also for a call that runs, with the full
+  command line. The process that continues the start of `acquire --no-wait` writes a line of its
+  own, which is the only place where the error of such a start is kept. A line has schema 1 of
+  its own. The trace is off by default, because it keeps full adb command lines and the purposes
+  of other agents: the file has mode `0600`, no command reads it, and `banksman admin doctor`
+  warns while it is on. A trace that cannot be written does not fail a command or refuse an adb
+  call. The lease schema and the output schema do not change.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

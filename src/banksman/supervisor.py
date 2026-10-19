@@ -7,7 +7,9 @@ group. Without it, a hook would outlive a reaper that its caller stopped, and th
 would start a second copy of the hook.
 
 The hook gets the standard output of this program, so that banksman decides whether to read
-it. When the hook cannot start, this program writes the reason on its standard error.
+it. When the hook cannot start, this program writes the reason on its standard error. While the
+operator traces the commands, banksman gives `--stderr FD` before the program, and the hook
+writes its standard error to that descriptor, so that the reason stays apart from it.
 
 It runs in isolated mode, so it uses the standard library only.
 """
@@ -20,6 +22,8 @@ import sys
 import threading
 
 COULD_NOT_START = 127
+# A program of a hook is an absolute path, so it is never this option.
+KEEP_STDERR = "--stderr"
 
 
 def _end_with_banksman() -> None:
@@ -28,12 +32,12 @@ def _end_with_banksman() -> None:
 
 
 def main() -> None:
+    command = sys.argv[1:]
+    errors = subprocess.DEVNULL
+    if command[:1] == [KEEP_STDERR]:
+        errors, command = int(command[1]), command[2:]
     try:
-        hook = subprocess.Popen(
-            sys.argv[1:],
-            stdin=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        hook = subprocess.Popen(command, stdin=subprocess.DEVNULL, stderr=errors)
     except OSError as exc:
         sys.stderr.write(exc.strerror or str(exc))
         sys.stderr.flush()

@@ -11,9 +11,11 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping, Sequence
+from typing import BinaryIO
 
-from banksman import supervisor
+from banksman import supervisor, trace
 from banksman.config import PRESETS, Kind
 from banksman.lease import Lease
 
@@ -55,7 +57,7 @@ def take_back(
     # A kind that the configuration no longer declares has no hook to run either.
     if kind is None or kind.on_void is None:
         return None
-    failure = run(kind.on_void, lease, timeout=timeout, android=is_android(kind))
+    failure = run(kind.on_void, lease, timeout=timeout, android=is_android(kind), hook="on_void")
     return None if failure is None else f"the on_void hook {failure}"
 
 
@@ -69,7 +71,9 @@ def reset(
     kind = kinds.get(lease.kind)
     if kind is None or kind.on_acquire is None:
         return None
-    failure = run(kind.on_acquire, lease, timeout=timeout, android=is_android(kind))
+    failure = run(
+        kind.on_acquire, lease, timeout=timeout, android=is_android(kind), hook="on_acquire"
+    )
     return None if failure is None else f"the on_acquire hook {failure}"
 
 
@@ -77,18 +81,30 @@ def discover(kind: Kind, *, timeout: float = HOOK_TIMEOUT_SECONDS) -> tuple[str 
     """Run the `discover` hook of a kind. Return how it failed, or None, and what it printed."""
     if kind.discover is None:
         raise ValueError(f"kind {kind.name} has no discover hook")
-    failure, output = _run(kind.discover, {"BANKSMAN_KIND": kind.name}, timeout, capture=True)
+    failure, output = _run(
+        kind.discover,
+        {"BANKSMAN_KIND": kind.name},
+        timeout,
+        capture=True,
+        traced={"hook": "discover", "kind": kind.name, "resource": None},
+    )
     return (None if failure is None else f"the discover hook {failure}"), output
 
 
 def run(
-    command: Sequence[str], lease: Lease, *, timeout: float, android: bool = False
+    command: Sequence[str],
+    lease: Lease,
+    *,
+    timeout: float,
+    android: bool = False,
+    hook: str | None = None,
 ) -> str | None:
     """Run a hook for the resource of a lease. Return None when it succeeded, or how it failed.
 
-    With `android`, the hook also gets ANDROID_SERIAL.
+    With `android`, the hook also gets ANDROID_SERIAL. `hook` names it in the trace.
     """
-    return _run(command, variables(lease, android=android), timeout)[0]
+    traced = {"hook": hook, "kind": lease.kind, "resource": lease.resource}
+    return _run(command, variables(lease, android=android), timeout, traced=traced)[0]
 
 
 def variables(lease: Lease, *, android: bool) -> dict[str, str]:
@@ -113,7 +129,12 @@ def is_android(kind: Kind | None) -> bool:
 
 
 def _run(
-    command: Sequence[str], variables: Mapping[str, str], timeout: float, *, capture: bool = False
+    command: Sequence[str],
+    variables: Mapping[str, str],
+    timeout: float,
+    *,
+    capture: bool = False,
+    traced: Mapping[str, str | None] | None = None,
 ) -> tuple[str | None, bytes]:
     # A hook runs in the environment of whichever command reaps, for example a command that
     # banksman run started with the ANDROID_SERIAL of another lease.
@@ -123,44 +144,78 @@ def _run(
         if key not in VARIABLES and key != ANDROID_SERIAL
     }
     env.update(variables)
+    tracing = traced is not None and trace.active()
+    started = time.monotonic()
     with contextlib.ExitStack() as stack:
         # The output goes to a file, not a pipe: a program that the hook leaves running would
         # otherwise keep a pipe open, and the command that reads it waiting. Output that banksman
         # does not read is discarded, not inherited, for the same reason.
         output = stack.enter_context(tempfile.TemporaryFile()) if capture else None
+        # While the command is traced, what the hook says: its standard error, and its standard
+        # output when banksman does not read that. It is apart from the standard error of the
+        # supervisor, which says only why the hook could not start.
+        said = stack.enter_context(tempfile.TemporaryFile()) if tracing else None
+        stdout = output if output is not None else said if said is not None else subprocess.DEVNULL
+        keep = [] if said is None else [supervisor.KEEP_STDERR, str(said.fileno())]
         # No shell and no input. A fixed working directory makes a hook behave the same for
         # every caller.
         process = subprocess.Popen(
-            [sys.executable, "-I", supervisor.__file__, *command],
+            [sys.executable, "-I", supervisor.__file__, *keep, *command],
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL if output is None else output,
+            stdout=stdout,
             stderr=subprocess.PIPE,
             cwd="/",
             env=env,
             start_new_session=True,
+            pass_fds=() if said is None else (said.fileno(),),
         )
-        with process.stdin, process.stderr:  # type: ignore[union-attr]
-            try:
-                status = process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                _kill(process)
-                return f"did not end within {timeout:g} s", b""
-            except BaseException:
-                _kill(process)
-                raise
-            if status == supervisor.COULD_NOT_START:
-                written = process.stderr.read(_MAX_REASON)  # type: ignore[union-attr]
-                reason = written.decode(errors="replace")
-                if reason:
-                    return f"could not start {command[0]}: {reason}", b""
-        if status < 0:
-            return f"was ended by signal {-status}", b""
-        if status > 0:
-            return f"failed with exit status {status}", b""
-        if output is None:
-            return None, b""
-        output.seek(0)
-        printed = output.read(MAX_OUTPUT + 1)
+        failure: str | None = "was interrupted"
+        printed = b""
+        try:
+            failure, printed = _outcome(process, command, timeout, output)
+        finally:
+            if said is not None:
+                said.seek(max(0, said.seek(0, os.SEEK_END) - trace.OUTPUT_BYTES))
+                trace.step(
+                    "hook",
+                    **traced,  # type: ignore[arg-type]
+                    command=list(command),
+                    status=process.returncode,
+                    failure=failure,
+                    seconds=round(time.monotonic() - started, 3),
+                    output=trace.output_tail(said.read()),
+                )
+    return failure, printed
+
+
+def _outcome(
+    process: subprocess.Popen[bytes],
+    command: Sequence[str],
+    timeout: float,
+    output: BinaryIO | None,
+) -> tuple[str | None, bytes]:
+    with process.stdin, process.stderr:  # type: ignore[union-attr]
+        try:
+            status = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill(process)
+            return f"did not end within {timeout:g} s", b""
+        except BaseException:
+            _kill(process)
+            raise
+        if status == supervisor.COULD_NOT_START:
+            written = process.stderr.read(_MAX_REASON)  # type: ignore[union-attr]
+            reason = written.decode(errors="replace")
+            if reason:
+                return f"could not start {command[0]}: {reason}", b""
+    if status < 0:
+        return f"was ended by signal {-status}", b""
+    if status > 0:
+        return f"failed with exit status {status}", b""
+    if output is None:
+        return None, b""
+    output.seek(0)
+    printed = output.read(MAX_OUTPUT + 1)
     if len(printed) > MAX_OUTPUT:
         return f"printed more than {MAX_OUTPUT} bytes", b""
     return None, printed

@@ -214,6 +214,128 @@ SHAPES: dict[str, Any] = {
     "log line": {"schema": int, **EVENT},
 }
 
+# A line of the trace has a schema of its own, TRACE_SCHEMA: no command prints it.
+_TRACED_LEASE = {"resource": str, "lease_id": str, "state": str}
+TRACE_STEPS = {
+    "discovery": {
+        "step": str,
+        "kind": str,
+        "accounts": bool,
+        "seconds": NUMBER,
+        "instances": [
+            {
+                "name": str,
+                "running": (bool, None),
+                "serial": TEXT,
+                "input_age": (int, None),
+                "unmanaged": bool,
+                "started_by": (int, None),
+            }
+        ],
+        "notes": [str],
+        "failure": TEXT,
+    },
+    "search": {
+        "step": str,
+        "parts": [
+            {
+                "part": TEXT,
+                "where": [str],
+                "accounts": int,
+                "matches": [str],
+                "no_match": [{"resource": str, "clause": TEXT}],
+            }
+        ],
+        "left_out": [{"resource": str, "kind": str, "reason": str}],
+        "absent": [{"resource": str, "kind": str}],
+    },
+    "grant": {
+        "step": str,
+        "outcome": str,
+        "granted": [str],
+        "parts": [
+            [
+                {
+                    "resource": str,
+                    "kept": bool,
+                    "skipped": TEXT,
+                    "lease_id": TEXT,
+                    "state": TEXT,
+                }
+            ]
+        ],
+    },
+    "reap": {
+        "step": str,
+        "leases": [{**_TRACED_LEASE, "void": TEXT}],
+        "ending": [{"resource": str, "kind": str, "reason": str}],
+    },
+    "hook": {
+        "step": str,
+        "hook": TEXT,
+        "kind": str,
+        "resource": TEXT,
+        "command": [str],
+        "status": (int, None),
+        "failure": TEXT,
+        "seconds": NUMBER,
+        "output": [str],
+    },
+    "guard": {
+        "step": str,
+        "action": str,
+        "reason": TEXT,
+        "serial": TEXT,
+        "leases": [{**_TRACED_LEASE, "holding": str}],
+        "used": [str],
+        "touched": [str],
+        "adb": TEXT,
+        "error": TEXT,
+    },
+}
+TRACE_LINE = {
+    "schema": int,
+    "version": str,
+    "at": NUMBER,
+    "pid": int,
+    "continues": (int, None),
+    "command": [str],
+    "caller": (
+        {
+            "owner": str,
+            "owner_pid": (int, None),
+            "agent": TEXT,
+            "issue": TEXT,
+            "session": TEXT,
+        },
+        None,
+    ),
+    "status": (int, None),
+    "error": TEXT,
+    "seconds": NUMBER,
+    "stderr": [str],
+    "stderr_left_out": int,
+    "steps": [tuple(TRACE_STEPS.values())],
+    "steps_left_out": int,
+}
+
+
+def check_trace_line(line: object) -> None:
+    """Fail when a line of the trace does not have its recorded shape, also each of its steps."""
+    problems = _problems(TRACE_LINE, line, "trace line")
+    assert isinstance(line, dict)
+    for index, step in enumerate(line.get("steps", [])):
+        name = step.get("step") if isinstance(step, dict) else None
+        if name not in TRACE_STEPS:
+            problems.append(f"trace line.steps[{index}] has no recorded step {name!r}")
+        else:
+            problems += _problems(TRACE_STEPS[name], step, f"trace line.steps[{index}]")
+    assert not problems, (
+        f"A line of the trace does not match its shape in tests/shapes.py: {problems}. Record a"
+        " new field there. A field that is gone, renamed, or of another type breaks readers:"
+        " change its shape, and also raise TRACE_SCHEMA."
+    )
+
 
 def check(name: str, document: object) -> None:
     """Fail when *document*, as a reader gets it, does not have the recorded shape *name*."""

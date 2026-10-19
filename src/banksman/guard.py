@@ -7,9 +7,10 @@ decides from the lease files, without the lock, without reaping, and without dis
 the process list and runs `adb devices` only when a decision needs them, because it runs before
 every adb call, and a UI test makes many. It writes to the log only when it refuses a call, or
 lets a call run with a warning. It takes the lock of the lease store only then, and when a call
-of the holder touches the lease of its device, which is due about once a minute. For
-`adb devices`, it also tells an agent which devices are its own, so it reads the lease files and
-the process list for that call too.
+of the holder touches the lease of its device, which is due about once a minute. While the
+operator has turned the trace on, it adds a line to the trace for every call, without the lock.
+For `adb devices`, it also tells an agent which devices are its own, so it reads the lease files
+and the process list for that call too.
 
 It is a guardrail, not a security boundary: a call through the full path of adb, a tool that
 talks to the adb server itself, and the emulator console do not pass through it. It never
@@ -27,7 +28,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 
-from banksman import android
+from banksman import android, trace
 from banksman.android import Transport
 from banksman.config import STRICT, Android, Config, HolderRules, load_config
 from banksman.errors import BanksmanError
@@ -167,6 +168,9 @@ class Decision:
     used: tuple[Lease, ...] = ()
     # The line for an agent's `adb devices`: which devices of the list are its own.
     note: str | None = None
+    # The device that adb chooses for a call that runs, when the decision needed it, for the
+    # trace.
+    serial: str | None = None
 
 
 RUNS = Decision()
@@ -191,25 +195,47 @@ def main(argv: Sequence[str]) -> int:
     # default SDK can be missing, or have an adb of another version, which would restart the adb
     # server.
     adb = fallback or android.adb_path(Android())
-    system = Machine()
+    status = None
+    try:
+        status = _decide(argv, arguments, fallback, adb, Machine())
+        return status
+    finally:
+        # A trace that cannot be written changes no decision.
+        with contextlib.suppress(Exception):
+            trace.finish(status)
+
+
+def _decide(
+    argv: Sequence[str], arguments: list[str], fallback: str | None, adb: str, system: System
+) -> int:
+    failure = None
+    rules = HolderRules()
     try:
         config = load_config()
+        rules = config.holder
+        if config.log.trace:
+            trace.start(["guard", *argv])
         if config.android.sdk is not None or fallback is None:
             adb = android.adb_path(config.android)
         decision = check(arguments, config, os.environ, system)
     except Exception as exc:
         # A broken guard that blocks every device is worse than a short time without
         # protection, so the call runs, and the person who reads the output sees why.
-        _say(f"adb guard: this adb call is not checked: {_reason(exc)}")
+        failure = _reason(exc)
+        _say(f"adb guard: this adb call is not checked: {failure}")
         decision = RUNS
     if decision.note is not None:
         _say(decision.note)
     verdict = decision.verdict
+    touched: list[Lease] = []
     # A touch that fails changes nothing for the call. The guard says nothing about it either,
     # because a script can read standard error with the output of adb, and the next call of the
     # holder tries again.
     with contextlib.suppress(Exception):
-        touch(decision.used, system)
+        touched = touch(decision.used, system)
+    if trace.active():
+        with contextlib.suppress(Exception):
+            _trace(decision, touched, adb, failure, rules)
     if verdict is not None:
         _say(verdict.text)
         try:
@@ -221,6 +247,41 @@ def main(argv: Sequence[str]) -> int:
             return EXIT_REFUSED
     print(adb)
     return 0
+
+
+def _trace(
+    decision: Decision, touched: Sequence[Lease], adb: str, failure: object, rules: HolderRules
+) -> None:
+    if not trace.has_caller():
+        # Without the process list, which the decision did not need: the guard runs before
+        # every adb call.
+        trace.caller(find_holder({}, rules))
+    verdict = decision.verdict
+    if failure is not None:
+        action = "unchecked"
+    elif verdict is None:
+        action = "runs"
+    else:
+        action = verdict.action
+    trace.step(
+        "guard",
+        action=action,
+        reason=None if verdict is None else verdict.reason,
+        serial=decision.serial if verdict is None else verdict.serial,
+        leases=[
+            {
+                "resource": lease.resource,
+                "lease_id": lease.lease_id,
+                "state": lease.state,
+                "holding": lease.holding,
+            }
+            for lease in ([] if verdict is None else verdict.leases)
+        ],
+        used=sorted(lease.resource for lease in decision.used),
+        touched=sorted(lease.resource for lease in touched),
+        adb=None if verdict is not None and verdict.action == REFUSED else adb,
+        error=None if failure is None else str(failure),
+    )
 
 
 def check(
@@ -249,13 +310,16 @@ def check(
     decision = decide(
         call, caller, _devices(snapshot, config), config.guard.strict, listing or adb_devices
     )
+    if trace.active():
+        with contextlib.suppress(Exception):
+            trace.caller(caller.known_holder())
     if not decision.used:
         return decision
     # The other leases of the holding, such as a port, are not leases of a device, and their
     # idle timeout can be shorter than the one of the device.
     holdings = {lease.holding for lease in decision.used}
     held = [lease for lease in snapshot.leases if lease.state in HELD and lease.holding in holdings]
-    return Decision(used=tuple(held))
+    return Decision(used=tuple(held), serial=decision.serial)
 
 
 def parse(arguments: Sequence[str]) -> Call:
@@ -354,6 +418,12 @@ class Caller:
         """Return the caller as acquire would record it: the worktree, the agent, and the issue."""
         return find_holder(self._table, self.rules, env=self.env, pid=self.pid)
 
+    def known_holder(self) -> Holder:
+        """Return the caller as `holder` does, but without the agent when no question so far has
+        read the process list."""
+        table = self.__dict__.get("_table", {})
+        return find_holder(table, self.rules, env=self.env, pid=self.pid)
+
     def void(self, lease: Lease) -> str | None:
         """Return why a lease that its file shows as held is void by the rules of the reaper, or
         None while it is valid.
@@ -447,18 +517,18 @@ def decide(
     if not leases and not unreadable:
         if strict and caller.is_agent():
             return Decision(_not_leased(call, caller, serial, refuse=strict == STRICT))
-        return RUNS
+        return Decision(serial=serial)
     # The lease id that `banksman run` gives its command decides without the process list.
     token = caller.token_holding()
     if not unreadable and all(
         lease.state in HELD and lease.holding == token and caller.void(lease) is None
         for lease in leases
     ):
-        return Decision(used=tuple(leases))
+        return Decision(used=tuple(leases), serial=serial)
     # A call without an agent process is a person's: it may use any device, and it is no
     # use by the holder.
     if not caller.is_agent():
-        return RUNS
+        return Decision(serial=serial)
     for lease in leases:
         mine = lease.holding in caller.holdings
         void = caller.void(lease) if mine and lease.state in HELD else None
@@ -476,7 +546,7 @@ def decide(
         )
         return Decision(Verdict(REFUSED, UNREADABLE, text, call.command, caller, serial))
     used = [lease for lease in leases if lease.state in HELD and lease.holding in caller.holdings]
-    return Decision(used=tuple(used))
+    return Decision(used=tuple(used), serial=serial)
 
 
 def devices_note(config: Config, env: Mapping[str, str], system: System) -> str | None:
@@ -497,6 +567,9 @@ def devices_note(config: Config, env: Mapping[str, str], system: System) -> str 
         caller = Caller(env, snapshot.leases, system, config.holder)
         if not caller.is_agent():
             return None
+        if trace.active():
+            with contextlib.suppress(Exception):
+                trace.caller(caller.holder())
         # The next banksman command takes a void lease back, so the line does not name it.
         own = [
             lease

@@ -432,7 +432,8 @@ not code.
   program is an absolute path, because a hook runs in the environment of whichever command
   reaps, and a program that one caller's `PATH` finds can be missing for another caller.
   banksman runs it without a shell, in the directory `/`, with no input, and with
-  `BANKSMAN_RESOURCE` and `BANKSMAN_KIND` in its environment, and it discards the output.
+  `BANKSMAN_RESOURCE` and `BANKSMAN_KIND` in its environment, and it discards the output,
+  except that the trace keeps its last lines while the operator has turned it on (section 10).
   `BANKSMAN_SERIAL` is set when the serial of the instance is known, and `BANKSMAN_HANDLE`
   when the lease records the id of a reservation (section 3). A hook of a kind with an
   Android preset also gets `ANDROID_SERIAL`: the serial, or a value that no device has while
@@ -634,7 +635,7 @@ holdings apart (section 9).
   after its new lease was lost, from one that is ready. `STARTED=true` says that the request
   starts the instance: the grant comes before the start ends, so it cannot know yet that a start
   of a remote device adopts a reservation. A start that fails gives its leases back, and its
-  error reaches nobody.
+  error reaches only the trace, when the operator turned it on (section 10).
 - **`banksman wait`** is a command for holders: `banksman wait --holding <label>`, or `--lease
   <id>`, exits with 0 when every lease of the holding is ready, and then touches the holding and
   prints its leases as `held` does. It exits with 4 while a lease of the holding boots, and with
@@ -1323,6 +1324,60 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   earlier output schema whose events it knows, so an upgrade does not hide the history.
   `BANKSMAN_LOG` changes the path for tests; when only `BANKSMAN_STATE_DIR` is set, the log is
   next to that directory.
+- **The trace** is for the operator: it shows, after the fact, what banksman saw and decided,
+  which the log does not keep. For example, when an agent reports that banksman gave it nothing,
+  the log shows the leases, but not what discovery found or why the request skipped each
+  resource. With `trace = true` in the `[log]` table of the configuration, which is off by
+  default, every command adds one line of JSON to `~/.local/state/banksman/trace.jsonl`, and so
+  does the adb guard for every adb call, also for a call that it lets run (section 12).
+  `banksman admin doctor` adds no line, because it changes nothing. A line has a schema of its
+  own (section 14), in `schema`, and these fields: `version`; `at`, the wall time of the start;
+  `pid`; `command`, the arguments; `caller`, the holder that the command would record, with
+  `owner`, `owner_pid`, `agent`, `issue`, and `session`; `status`, the exit status, or null when
+  the command ended by an exception, which `error` then names; `seconds`; `stderr`, each line
+  that the command printed on standard error; and `steps`. Each step has its name in `step`:
+  - `discovery`: the kind, each instance with `running`, `serial`, `input_age`, `unmanaged`, and
+    `started_by`, the notes, why the discovery failed, and how long it took. The trace does not
+    keep the accounts on an instance, which can be personal.
+  - `search`: for each part of a request, its clauses, the permitted resources that match it in
+    the order of choice, and for each other permitted resource of its kinds the first clause
+    that it does not meet, or null when it lacks the accounts; the instances that no request may
+    get, with the reason `not_permitted` or `other_kind`; and the allowed instances that are
+    absent.
+  - `grant`: the outcome, `granted`, `busy`, `outdated`, or `booting`, and for each resource that
+    matches each part, why the request could not get it: `in_use`, with the lease id and the
+    state of the lease, `unreadable`, `ended` after the discovery started, `unmanaged`, `paid`
+    without `--paid`, `accounts`, or `booting` for a lease of a kept holding.
+  - `reap`: the void check of each held lease, with its void reason or null, and the free
+    instances that the reaper ends.
+  - `hook`: the hook, its kind and resource, its command, its exit status, how it failed, how
+    long it ran, and the last 20 lines of what it printed. For a `discover` hook, those are the
+    lines of its standard error, because its standard output is the document.
+  - `guard`: what the guard did, `runs`, `refused`, `warned`, or `unchecked` when it could not
+    decide, why, the serial, the leases of other holders that the refusal names, the leases of
+    the caller that the call used and touched, the adb that runs, and the error of a guard that
+    could not decide. The full command line is in `command`.
+
+  A command that waits, such as `acquire --wait` or `watch`, takes steps for each look, so a
+  line keeps the first 50 and the last 50 steps, and says in `steps_left_out` how many it left
+  out between them; `stderr` keeps 100 lines in the same way. `continues` is null, except in the
+  line of the process that continues the start of `acquire --no-wait` (section 6): that process
+  writes a line of its own, with the pid of its `acquire` in `continues`, and its `error` is the
+  only place where the error of such a start is kept. Every text in a line has no control
+  characters. banksman adds a line with one write call, without the lock of the lease store,
+  because the guard writes a line before every adb call and its fast path takes no lock. At
+  10 MB, banksman starts a new file under the lock and keeps the earlier one as
+  `trace.jsonl.1`. A trace that cannot be written changes nothing: the command still does its
+  work, and the guard still decides, and the command says once on standard error that it is not
+  in the trace. No command reads the trace, so a person reads it with `jq`, for example
+  `jq 'select(.status != 0)' ~/.local/state/banksman/trace.jsonl`. A reader that shows the
+  commands of the last minutes with their steps can come later, when the use shows what an
+  operator looks for most. When the trace is off, a command only reads the configuration once
+  more. When it is on, a command also reads the process list once more, for its caller, which
+  took about 35 ms on the Mac where it was measured. The guard does not: its caller has the
+  agent only when its decision read the process list, and on that Mac, the trace added no
+  measurable time to an adb call. `BANKSMAN_TRACE` changes the path for tests; when only
+  `BANKSMAN_STATE_DIR` is set, the trace is next to that directory.
 - `banksman admin doctor` checks an install for the operator, and changes nothing. Each check is
   `ok`, `warn`, `fail`, or `skip`, and the command exits with status 1 when a check fails. It
   checks the Python version; which banksman runs, and whether it is the first `banksman` in an
@@ -1338,7 +1393,9 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   the banksman that it runs, that this program exists, that it is the banksman that runs the
   doctor, and that launchd has loaded it, or, when no job is saved, a warning when a kind has
   `free_timeout` or `unused_timeout`; that the state directory, the quarantine directory, the
-  log, and the record of lease ends belong to the user and can be written; the quarantined
+  log, and the record of lease ends belong to the user and can be written; whether the trace is
+  on, as a warning, so that an operator does not leave it on by accident, and then that its file
+  can be written; the quarantined
   leases, as a warning, with the command that releases them; and the holder that `whoami`
   shows in this shell. The doctor is the place where the operator finds that command: the
   notice of the reaper gives it only to a person (section 4). It compares the
@@ -1351,8 +1408,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   empty: the redirection of a save empties the file before banksman runs, so a save that failed
   leaves an empty `adb`, which does nothing. For a failure or a warning, the doctor gives the
   command or the step that repairs it, such as `banksman admin discover --kind <kind>` when the
-  discovery of a remote kind fails. It does not reap, creates no directory, writes no log,
-  and calls no network. It runs discovery without the accounts, `adb version`, `adb devices
+  discovery of a remote kind fails. It does not reap, creates no directory, writes no log and
+  no trace, and calls no network. It runs discovery without the accounts, `adb version`, `adb devices
   -l`, and `launchctl print` on macOS or `crontab -l` elsewhere, and none of them changes
   anything. The doctor sees the `PATH` and the home directory of
   its own shell, which can differ from those of the agents. `--json` prints each check with
@@ -1702,7 +1759,9 @@ is a setup of the operator, and a project needs nothing for it.
   note, an `adb devices` outside `banksman run` reads the lease files and the process list, to
   find out whether an agent is the caller. On the Mac where it was
   measured, the wrapper and the guard together add about 35 ms to a call that needs no process
-  list, and about 70 ms to one that needs it, also to `adb devices`.
+  list, and about 70 ms to one that needs it, also to `adb devices`. While the trace is on
+  (section 10), the guard adds a line to it for every call, with one write and without the lock,
+  and it reads no process list for the line.
 - **When the guard fails.** When banksman cannot decide, for example because of an error in the
   configuration, a lease file of a newer banksman, or a process list that the sandbox of an
   agent hides, the call runs, and banksman says on standard error that the call is not checked.
@@ -1713,7 +1772,7 @@ is a setup of the operator, and a project needs nothing for it.
   `banksman` on the `PATH`, the wrapper runs the saved adb, and says the same. Ctrl-C during the
   check ends the call. When the event of a refused or warned call cannot go to the log, for
   example because the lock is held for too long, the decision stands, and banksman says that
-  the call is not in the log.
+  the call is not in the log. The same is true for a line of the trace.
 - **Limits.** The guard is a guardrail, not a security boundary. These do not pass through it: a
   call through the full path of adb, such as the adb of Android Studio; a tool that talks to the
   adb server itself, such as the connected tests of the Android Gradle plugin, for which the
@@ -1820,7 +1879,8 @@ permission rules can refuse all of them with one pattern, including ones added l
   when no lease of each AVD has existed; banksman also reads schema 1, without that time. The
   record of the ends of leases (section 3) has schema 2, which added the last lease that a
   holder used, and the boot id of each entry; a record of schema 1 counts as empty. It is not
-  part of the lease schema, because no lease file changes with it.
+  part of the lease schema, because no lease file changes with it. The lines of the trace
+  (section 10) have schema 1. No command prints them, so they are not part of the output schema.
 - The surfaces treated as public API are the CLI (commands, flags, exit codes, `KEY=value`
   output), the JSON output, the lease file format, the log file format, the configuration
   files, and the hook contract.
@@ -1999,6 +2059,8 @@ Done:
 - Emulators without input: the fact `input_age`, the unused timeout, which ends an emulator
   that banksman started or whose agent has ended after a set time without input, and the reap
   job, which runs `banksman reap` every 5 minutes.
+- The trace: when the operator turns it on, a line for every command and every adb call
+  through the guard, with what banksman saw and decided on the way.
 
 Next:
 
