@@ -149,7 +149,8 @@ leases instead.
   names that process in the same way (section 6): when the lease becomes void during the start
   or the reset, it drains, and it is taken back only after that process has ended. So a
   take-back never runs next to a start or a reset. The reaper also ends a free emulator that
-  banksman started, after the free timeout of its kind: under the lock, it first writes a
+  banksman started, after the free timeout of its kind, and `banksman reap` ends an emulator
+  without input after the unused timeout of its kind: under the lock, the reaper first writes a
   `draining` lease of its own for the emulator, and then takes that lease back in the same way
   (section 8). A release with `--end` takes the instance of the lease back in the same way too,
   with the releasing command as the reaper (section 4).
@@ -332,6 +333,8 @@ minutes, and its lease can become void in the middle.
   of them, or a group that holds one of them. It does not signal a group whose leader has
   ended, because the system can give that group id to a new group.
 - **Reaping** runs at the start of every command, and whenever a caller runs `banksman reap`.
+  Only `banksman reap` also looks for emulators without input (section 8), and the reap job
+  runs it every 5 minutes.
 
 ## 5. Kinds are configuration
 
@@ -385,6 +388,7 @@ not code.
   preselect = ["qa_*"]
   boot_timeout = "8m"
   free_timeout = "30m"
+  unused_timeout = "3h"
   on_acquire = ["/usr/local/bin/reset-avd"]
   on_void = ["/usr/local/bin/stop-avd"]
 
@@ -405,8 +409,9 @@ not code.
 - **`on_void`** is a command that ends a void instance, for example one that kills an
   emulator. The reaper runs it when it takes back a void lease of the kind. Only a declared
   hook lets the reaper end an instance: banksman ships no such command, and without one the
-  reaper ends nothing, with one exception: the reaper ends an emulator, or the reservation of a
-  remote device, that banksman itself started with `--start` (section 8), and then runs the
+  reaper ends nothing, with two exceptions: the reaper ends an emulator, or the reservation of
+  a remote device, that banksman itself started with `--start`, and, with the unused timeout of
+  the kind, an emulator without input whose agent has ended (section 8), and then runs the
   hook. If the hook exits with status 0, the instance is gone. If it fails,
   does not end in time, or cannot start, the lease is quarantined. The reaper reads the hook
   from the current configuration, not from the lease, so when the operator removes a hook,
@@ -460,6 +465,11 @@ not code.
   emulator then runs until a void lease of its AVD ends it, or the machine restarts. Like the
   hook, the reaper reads it from the current configuration, so a change applies at once, also
   to the emulators that run now.
+- **`unused_timeout`** is how long a running emulator without a lease can have no input, for
+  example `"3h"`, counted in the awake time of the emulator. `banksman reap` then ends it
+  (section 8) when banksman started it, or when an agent started it and that agent has ended,
+  and the next request with `--start` starts the AVD again. It is valid only with the
+  `android-emulator` preset, `[defaults]` cannot set it, and it is `"off"` by default.
 - **`affinity = false`** turns off, for one kind, the preference for the instance that the
   caller's worktree used last (section 6). It is on by default for every kind, because it only
   chooses among free instances that are otherwise equal. The paid kind needs it most: a request
@@ -663,8 +673,8 @@ holdings apart (section 9).
   agent process counts, not its owner process, so `run --where` of that agent gets it too. For
   every other request, it stays unmanaged. The grant prints `STARTED=false` and
   `PREVIOUS=other`, and the end of the lease records the emulator as for any emulator that ran
-  under a lease, so from then on every request can get it. banksman still ends no emulator that
-  it did not start, also when the agent that started it has ended (section 17).
+  under a lease, so from then on every request can get it. When the agent that started it has
+  ended, only the unused timeout of the kind ends it, after a time without input (section 8).
 - **The agent can choose.** `acquire` grants one resource for each part of the request and
   names it. It does not return a list, because two callers that choose from the same list
   choose the same resource. An agent that needs a specific resource asks for it, for example
@@ -856,8 +866,8 @@ holdings apart (section 9).
   shows a name that is not valid. A name can belong to only one kind.
 - **Presets.** `preset = "android-emulator"` finds the AVDs, with the facts `avd`,
   `display_name` (the name that the AVD manager shows), `manufacturer`, `api`, `image`,
-  `abi`, `form`, and `running`, and, for an emulator that runs, its `serial` and its
-  accounts. When adb cannot list the running emulators, `running` is left out. An emulator that
+  `abi`, `form`, and `running`, and, for an emulator that runs, its `serial`, its accounts,
+  and `input_age`, the whole seconds since its last input (see the unused timeout below). When adb cannot list the running emulators, `running` is left out. An emulator that
   adb lists as `offline`, because the adb daemon in it has not started yet, for example while
   it boots, runs too: its console gives its AVD name, so its serial is known from the start,
   and its accounts are not known yet. An AVD also runs when a process has the arguments
@@ -948,11 +958,61 @@ holdings apart (section 9).
   The end can still finish after the discovery of a request saw the emulator run and before the
   grant. The end of the reaper's lease then makes the request look again (section 3), and the
   next look starts the AVD on `--start`.
-  The reaper never ends an emulator that banksman did not start. The log records the end as a
-  `reap` event with the reason `free_timeout`, and `status` shows no planned end: the reaper
-  runs only at the start of a command, so a free emulator ends at the first command after its
-  free timeout. To end free emulators also while no agent works, for example at night, run
-  `banksman reap` at a fixed interval, for example every 5 minutes with launchd or cron.
+  The free timeout never ends an emulator that banksman did not start. The log records the end
+  as a `reap` event with the reason `free_timeout`, and `status` shows no planned end: the
+  reaper runs only at the start of a command, so a free emulator ends at the first command
+  after its free timeout. To end free emulators also while no agent works, for example at
+  night, install the reap job (below).
+
+  **The input age.** The power manager of Android records the time of its last input event in
+  the uptime of the device, and prints it in `dumpsys power` as `mLastUserActivityTime`, in
+  newer versions with the suffix `(excludingAttention)`. Every input passes through it: the taps
+  of a person in the emulator window, `adb shell input`, UI Automator, and Espresso. For each
+  emulator that runs and that adb lists as `device`, the full discovery, the one that also reads
+  the accounts, runs `adb shell 'cat /proc/uptime; dumpsys power'` under the adb timeout, and
+  the fact `input_age` is the uptime minus the time of the input, in whole seconds. When the
+  power manager also prints how long ago the input was, that value counts, because the uptime
+  also counts the time in which the device itself slept. The uptime of the emulator stops while
+  the machine sleeps, so the input age counts awake time, as the leases do (section 3). The
+  output is not a stable interface: an output without a value that banksman knows, an emulator
+  that boots, and an emulator that adb cannot reach give no fact, and a missing fact never
+  counts as no input. The fact does not see adb use without input, such as an install,
+  `logcat`, a file copy, or a screenshot. Under a lease, the lease covers that use, and an
+  emulator that a person only watches looks unused. The discovery of `run` does not read the
+  fact, so it costs nothing more there.
+
+  **The unused timeout.** With `unused_timeout` (section 5), `banksman reap` ends a running
+  emulator of an allowed AVD when no lease of the AVD exists in any state, its input age is at
+  least the timeout, and banksman started it, or an agent started it outside banksman and that
+  agent process has ended (section 6), also when the emulator ran under a lease since. An
+  emulator whose environment names no agent, such as one that a person started, stays, and so
+  does one whose agent still runs, and one whose input age is not known. An AVD that runs as
+  several emulators has no serial, so it stays too. The look runs adb, about 100 ms for each
+  emulator, so only `banksman reap` makes it, never the reap at the start of every other
+  command, and it asks adb nothing while no emulator of an allowed AVD runs, so that it does
+  not start the adb server. It looks before it takes the lock of the lease store. Under the
+  lock, it checks that the AVD still has no lease file and that the same emulator process runs,
+  by pid and start time, records that process in the record of the emulators, and writes a
+  `draining` lease of its own as for the free timeout, with the void reason `unused`. The
+  take-back ends the recorded process, also when banksman did not start it, and runs the
+  `on_void` hook of the kind. So a reaper that takes the lease over after another reaper ended
+  in the middle ends that process and no other. The log records the end as a `reap` event
+  with the reason `unused`. `status` shows no planned end, because any input moves it.
+  `free_timeout` does not look at the input: it only reads a file, so it stays in every
+  command, and a banksman-started emulator that a person uses through its window is rare.
+
+  **The reap job.** The reaper runs only inside a banksman command, so on a quiet machine the
+  free timeout ends nothing, and the unused timeout needs `banksman reap`.
+  `banksman admin reap-agent` prints a job of the system that runs `banksman reap` every 5
+  minutes with the absolute path of the banksman that printed it, as the adb wrapper records
+  the adb that it runs (section 12). On macOS it is a launchd job with the label
+  `banksman.reap`, which the operator saves as `~/Library/LaunchAgents/banksman.reap.plist` and
+  loads with `launchctl bootstrap gui/$(id -u) <file>`; it sets `AbandonProcessGroup`, so that
+  an adb server that the reap starts outlives the job. On other systems it is a crontab line.
+  banksman installs neither, and the operator saves the job again after an upgrade. The job
+  runs `on_void` hooks with the `PATH` of launchd or cron, so a hook names its programs by
+  their full paths (section 5). `banksman admin doctor` checks the saved job (section 10). A
+  runner that reaps on its own schedule can run the job too: a second reap costs nothing.
 - **Remote devices.** `preset = "android-remote"` offers the physical devices of Android
   Device Streaming, a service that reserves a real device in a lab and forwards it to the
   local adb server as `localhost:<port>`. The `android` command line tool does that, and
@@ -1196,7 +1256,9 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
 - `banksman status` prints one table with every resource that agents may use, free ones
   included, and every resource that has a lease file: resource, kind, serial, form and API level,
   state, since, last use, the three "free by" values, the accounts of the lease, and the
-  holder. The state is `free`, `unmanaged` for an instance without a lease that runs but that
+  holder. The last use of a resource without a lease is the time of the last input of an
+  emulator that runs (section 8), as the time of day that it was if the machine did not sleep
+  since. The state is `free`, `unmanaged` for an instance without a lease that runs but that
   banksman did not start (section 6), with the agent process that started it in the holder
   column when banksman finds one, `booting`, `ready`, `draining`, `quarantined`, `absent` for an
   allowed instance that discovery does not find now, or `unreadable` for a lease file that
@@ -1215,8 +1277,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   refresh reaps, reads the configuration again, and runs discovery. An error is shown in
   place of the table, and the next refresh tries again.
 - `banksman status --json` carries the same data for agents and other tools: for each
-  resource its kind, its state, whether it is present now, its serial, the facts `form` and
-  `api`, and its lease. The purpose only with `--verbose` (section 9).
+  resource its kind, its state, whether it is present now, its serial, the facts `form`, `api`,
+  and `input_age`, and its lease. The purpose only with `--verbose` (section 9).
 - **"Free by"** cannot be known, so it shows three labeled values:
   1. expected: the holder's `--expect`, only a hint, or unknown;
   2. at the latest: the hard cap, which the reaper enforces;
@@ -1246,7 +1308,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   drain deadline and whether stopping was on for the kind, so that an operator can see what
   the reaper would have stopped before turning `stop = true` on (section 4). The end of a free
   emulator after its free timeout is a reap with the reason `free_timeout` and the holder
-  `banksman` (section 8). A release says with `end` whether banksman ends the instance, and that
+  `banksman`, and the end of an emulator after its unused timeout is a reap with the reason
+  `unused` (section 8). A release says with `end` whether banksman ends the instance, and that
   end is a reap with the reason `released_end` (section 4).
 - **The log file** is `~/.local/state/banksman/log.jsonl`, with the home directory from the
   user database. It is outside `/tmp`, as the quarantines are, because the history must
@@ -1271,7 +1334,10 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   preset; that the first `adb` on the `PATH` is the adb wrapper, when one is saved (section 12);
   that the saved adb wrapper, the two Gradle files (section 11), and the guide for agents saved
   as a skill in `~/.claude/skills/banksman/SKILL.md` and `~/.codex/skills/banksman/SKILL.md` are
-  what the installed banksman prints; that the state directory, the quarantine directory, the
+  what the installed banksman prints; that the reap job (section 8) is what banksman prints for
+  the banksman that it runs, that this program exists, that it is the banksman that runs the
+  doctor, and that launchd has loaded it, or, when no job is saved, a warning when a kind has
+  `free_timeout` or `unused_timeout`; that the state directory, the quarantine directory, the
   log, and the record of lease ends belong to the user and can be written; the quarantined
   leases, as a warning, with the command that releases them; and the holder that `whoami`
   shows in this shell. The doctor is the place where the operator finds that command: the
@@ -1286,8 +1352,9 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   leaves an empty `adb`, which does nothing. For a failure or a warning, the doctor gives the
   command or the step that repairs it, such as `banksman admin discover --kind <kind>` when the
   discovery of a remote kind fails. It does not reap, creates no directory, writes no log,
-  and calls no network. It runs discovery, as `status` does, `adb version`, and `adb devices
-  -l`, and none of them changes a device. The doctor sees the `PATH` and the home directory of
+  and calls no network. It runs discovery without the accounts, `adb version`, `adb devices
+  -l`, and `launchctl print` on macOS or `crontab -l` elsewhere, and none of them changes
+  anything. The doctor sees the `PATH` and the home directory of
   its own shell, which can differ from those of the agents. `--json` prints each check with
   `check`, `status`, `detail`, and `fix`.
 - Not implemented yet: `banksman explain --where ...` answers the question "can I get one
@@ -1700,6 +1767,7 @@ banksman admin discover [--kind <kind>] [--all] [--json] [--yes]
 banksman admin release --force --resource <name>
 banksman admin gradle-init [--build-slot]                          # optional build slots
 banksman admin adb-shim                                            # optional adb guard
+banksman admin reap-agent                                          # optional reap job
 banksman admin doctor [--json]                                     # check the install
 ```
 
@@ -1736,9 +1804,10 @@ permission rules can refuse all of them with one pattern, including ones added l
   command (section 3). A new value of a field, such as a new void reason, changes it too,
   because an earlier banksman refuses the file. banksman also reads the files of an earlier
   lease schema when each of them is a valid file of its own schema: schema 9 only added the
-  void reason `free_timeout`, schema 10 only added the void reason `acquire_gone`, and schema
-  11 only added the void reason `released_end`, so banksman reads lease files of schemas 8, 9,
-  and 10, and an upgrade does not lose the leases that are held.
+  void reason `free_timeout`, schema 10 only added the void reason `acquire_gone`, schema 11
+  only added the void reason `released_end`, and schema 12 only added the void reason `unused`,
+  so banksman reads lease files of schemas 8 to 11, and an upgrade does not lose the leases that
+  are held.
 - The output schema is the version of the JSON that the commands print and of the lines of
   the log. A new field does not change it, so a reader ignores the fields that it does not
   know. It changes when a field is removed or renamed, or changes its type or its meaning. A
@@ -1927,6 +1996,9 @@ Done:
   `banksman wait` waits until the holding is ready.
 - Notices for the operator go only to a person: an agent, a build, or a scheduled job gets no
   command of the operator, and nothing about the quarantines of other holders.
+- Emulators without input: the fact `input_age`, the unused timeout, which ends an emulator
+  that banksman started or whose agent has ended after a set time without input, and the reap
+  job, which runs `banksman reap` every 5 minutes.
 
 Next:
 
@@ -1935,10 +2007,6 @@ Next:
 
 ## 17. Open questions
 
-- How many emulators that an agent started outside banksman stay without a lease after the
-  agent has ended? banksman does not end them, and `status` shows them as unmanaged, started
-  by an agent that has ended. If there are many, a key of the kind, off by default, could let
-  the reaper end them under a lease of its own, as for the free timeout.
 - Does each agent run its shell commands in their own process group? That decides how a
   script isolates the group that the reaper signals. Checked for Claude Code and Codex, both
   as command-line tools and in their Mac apps: each shell command has its own process

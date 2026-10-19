@@ -13,6 +13,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
+from banksman.android import INPUT_AGE
 from banksman.discovery import ENDS, FactValue, handle_of, serial_of
 from banksman.history import (
     ACQUIRE,
@@ -34,6 +35,7 @@ from banksman.lease import (
     DRAINING,
     FREE_TIMEOUT,
     RELEASED_END,
+    UNUSED,
     VOID_REASONS,
     Lease,
     User,
@@ -50,8 +52,10 @@ UNMANAGED = "unmanaged"
 # An allowed instance that discovery does not find now, for example an unplugged phone.
 ABSENT = "absent"
 UNREADABLE = "unreadable"
-# The facts that the console shows. The others are for requests.
-SHOWN_FACTS = ("form", "api")
+# The facts that the console shows, and those of them that the table shows in columns of their
+# own. The others are for requests.
+SHOWN_FACTS = ("form", "api", INPUT_AGE)
+COLUMN_FACTS = ("form", "api")
 NONE = "-"
 
 
@@ -313,7 +317,7 @@ def status_rows(
     rows = []
     for item in items:
         lease = item.lease
-        facts = [str(item.facts[name]) if name in item.facts else NONE for name in SHOWN_FACTS]
+        facts = [str(item.facts[name]) if name in item.facts else NONE for name in COLUMN_FACTS]
         serial = item.serial or NONE
         kind = item.kind or NONE
         if item.paid:
@@ -324,7 +328,11 @@ def status_rows(
                 holder = f"lease file: {item.error}"
             elif item.started_by is not None:
                 holder = started_text(item.started_by)
-            rows.append([item.name, kind, serial, *facts, item.state, *[NONE] * 6, holder])
+            rows.append(
+                [item.name, kind, serial, *facts, item.state, NONE, _last_input(item, clock)]
+                + [NONE] * 4
+                + [holder]
+            )
             continue
         ends = free_by(lease, running)
         times = [NONE, NONE, NONE]
@@ -349,6 +357,15 @@ def status_rows(
             ]
         )
     return rows
+
+
+def _last_input(item: Resource, clock: Clock) -> str:
+    # The input age counts the awake time of the device, so after the machine slept, the time of
+    # day is later than the real one, as for the deadlines.
+    age = item.facts.get(INPUT_AGE)
+    if not isinstance(age, int) or isinstance(age, bool):
+        return NONE
+    return _time(clock.wall_time(clock.awake - age), clock)
 
 
 def started_text(started: StartedBy) -> str:
@@ -586,6 +603,11 @@ def _details(event: Event) -> str:
         return text
     if event.reason == FREE_TIMEOUT:
         return "banksman ended the instance, which had no lease for the free timeout of its kind"
+    if event.reason == UNUSED:
+        return (
+            "banksman ended the instance, which had no lease, and no input for the unused timeout"
+            " of its kind"
+        )
     if event.reason == RELEASED_END:
         return "banksman ended the instance, as its holder asked at the release"
     # A reap frees the resource of a void or released lease.

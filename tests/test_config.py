@@ -192,6 +192,23 @@ def test_an_emulator_kind_can_end_its_free_emulators_after_a_free_timeout(config
     ]
 
 
+def test_an_emulator_kind_can_end_its_emulators_without_input_after_an_unused_timeout(
+    config_path,
+):
+    write_config(
+        config_path,
+        '[kinds.emulator]\npreset = "android-emulator"\nunused_timeout = "3h"\n'
+        '[kinds.shared]\npreset = "android-emulator"\nunused_timeout = "off"\n'
+        '[kinds.plain]\npreset = "android-emulator"\n',
+    )
+    kinds = load_config().kinds
+    assert [kinds[name].unused_timeout for name in ("emulator", "shared", "plain")] == [
+        3 * 60 * 60,
+        None,
+        None,
+    ]
+
+
 def test_a_remote_kind_without_the_path_of_the_tool_says_how_to_find_it(config_path):
     write_config(config_path, '[kinds.remote]\npreset = "android-remote"\nproject = "p"\n')
     with pytest.raises(ConfigError, match="android.cli: .* Run `command -v android`"):
@@ -387,6 +404,14 @@ def test_text_that_is_not_a_duration_is_refused(text):
         ),
         ("[kinds.build]\ncount = 1\nfree_timeout = '30m'", "kinds.build.free_timeout"),
         ("[defaults]\nfree_timeout = '30m'", "defaults.free_timeout"),
+        ("[kinds.e]\npreset = 'android-emulator'\nunused_timeout = 3", "kinds.e.unused_timeout"),
+        ("[kinds.e]\npreset = 'android-emulator'\nunused_timeout = '0s'", "kinds.e.unused_timeout"),
+        (
+            "[kinds.device]\npreset = 'android-device'\nunused_timeout = '3h'",
+            "kinds.device.unused_timeout",
+        ),
+        ("[kinds.build]\ncount = 1\nunused_timeout = '3h'", "kinds.build.unused_timeout"),
+        ("[defaults]\nunused_timeout = '3h'", "defaults.unused_timeout"),
         ("[android]\nadb = '/opt/adb'", "android.adb"),
         ("[guard]\nstrict = 'yes'", "guard.strict"),
         ("[guard]\nstrict = 'strict'", "guard.strict"),

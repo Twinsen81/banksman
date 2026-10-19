@@ -1,6 +1,7 @@
 """Fakes and helpers that the tests share."""
 
 import contextlib
+import fcntl
 import json
 import os
 import signal
@@ -327,6 +328,23 @@ class FakeSdk:
     def calls(self) -> list[str]:
         path = self.sdk / "platform-tools" / "calls"
         return path.read_text().splitlines() if path.exists() else []
+
+    def last_input(self, serial: str, seconds: int | None) -> None:
+        """Answer as an emulator whose last input was `seconds` ago, or None to answer nothing."""
+        tools = self.sdk / "platform-tools"
+        key = f"-s {serial} shell cat /proc/uptime; dumpsys power"
+        # The fake emulator changes the answers too, under this lock.
+        with open(tools / "answers.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            answers = json.loads((tools / "answers.json").read_text())
+            answers.pop(key, None)
+            if seconds is not None:
+                answers[key] = (
+                    f"{1000 + seconds}.25 0.00\n"
+                    "  mLastUserActivityTime(excludingAttention)=1000000\n"
+                )
+            (tools / "answers.json.tmp").write_text(json.dumps(answers))
+            os.replace(tools / "answers.json.tmp", tools / "answers.json")
 
     def config(self) -> str:
         return f'[android]\nsdk = "{self.sdk}"\navd_home = "{self.avd_home}"\n'

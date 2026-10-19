@@ -37,7 +37,11 @@ FACTS = (
     "form",
     "serial",
     "running",
+    "input_age",
 )
+# The whole seconds since the last input on a running emulator, in the awake time of the
+# emulator: the time of its own clock, which stops while the machine sleeps.
+INPUT_AGE = "input_age"
 _MAX_OUTPUT = 1024 * 1024
 _MAX_INI_FILE = 64 * 1024
 _EMULATOR_PREFIX = "emulator-"
@@ -48,6 +52,16 @@ _PROPERTY = re.compile(r"^\[([^\]]+)\]: \[(.*)\]$")
 _ACCOUNTS_HEADER = re.compile(r"^\s*Accounts: [0-9]+\s*$")
 _ACCOUNT = re.compile(r"^\s*Account \{name=(?P<name>.*), type=(?P<type>[^,}]*)\}\s*$")
 _API = re.compile(r"android-([0-9]+)(?![0-9])")
+# The time of the last input in the uptime of the device, in milliseconds, as the power manager
+# prints it. Newer versions add "(excludingAttention)" to the name, and many add how long ago it
+# was, in the same clock.
+_LAST_INPUT = re.compile(
+    r"^\s*mLastUserActivityTime(?:\(excludingAttention\))?=(?P<at>[0-9]{1,15})"
+    r"(?:\s+\((?:(?P<ago>[0-9]{1,15}) ms ago|(?P<now>now|in [0-9]{1,15} ms))\))?"
+)
+_UPTIME = re.compile(r"^\s*(?P<seconds>[0-9]{1,12}(?:\.[0-9]+)?)\s+[0-9]{1,12}(?:\.[0-9]+)?\s*$")
+# Prints the uptime first, so that an input during the call makes the age smaller, never larger.
+_INPUT_AGE_COMMAND = "cat /proc/uptime; dumpsys power"
 
 # Runs a program with a timeout and returns what it printed, or raises AndroidError.
 Run = Callable[[Sequence[str], float], str]
@@ -73,8 +87,15 @@ class Transport:
     transport_id: str = ""
 
 
-def emulators(settings: Android, run: Run | None = None, *, accounts: bool = True) -> Document:
-    """Find the AVDs, with the serial and the accounts of each one that runs."""
+def emulators(
+    settings: Android,
+    run: Run | None = None,
+    *,
+    accounts: bool = True,
+    input_age: bool | None = None,
+) -> Document:
+    """Find the AVDs, with the serial and the accounts of each one that runs, and how long ago
+    its last input was. `input_age` is as `accounts` when it is not given."""
     run = run_program if run is None else run
     adb = adb_path(settings)
     notes: list[str] = []
@@ -119,6 +140,11 @@ def emulators(settings: Android, run: Run | None = None, *, accounts: bool = Tru
             # The accounts of an emulator that boots cannot be read yet, so they are not known.
             if accounts and serial not in booting:
                 instance.update(_accounts(run, adb, serial))
+            age = None
+            if (accounts if input_age is None else input_age) and serial not in booting:
+                age = _input_age(run, adb, serial)
+            if age is not None:
+                instance["facts"][INPUT_AGE] = age
         instances.append(instance)
     return {"schema": DISCOVER_SCHEMA, "instances": instances, "notes": notes}
 
@@ -297,6 +323,34 @@ def parse_accounts(text: str) -> tuple[list[str] | None, str | None]:
     return names, None
 
 
+def parse_input_age(text: str) -> int | None:
+    """Return the whole seconds since the last input in the output of `cat /proc/uptime;
+    dumpsys power`, or None.
+
+    The output is not a stable interface, so an output without a value that this knows gives
+    None, never a guess: an emulator whose input age is not known is never idle. When the power
+    manager says how long ago the last input was, that counts, because it uses the clock of the
+    input. Otherwise the age is the uptime minus the time of the input; the uptime also counts
+    the time in which the device slept, so the age can then be too large.
+    """
+    lines = text.splitlines()
+    uptime = _UPTIME.match(lines[0]) if lines else None
+    ages = []
+    for line in lines[1:]:
+        match = _LAST_INPUT.match(line)
+        if match is None:
+            continue
+        if match["ago"] is not None:
+            ages.append(int(match["ago"]) // 1000)
+        elif match["now"] is not None:
+            ages.append(0)
+        elif uptime is not None:
+            ages.append(max(0, int(float(uptime["seconds"]) - int(match["at"]) / 1000)))
+    # The power manager of a device with several displays can print a time for each of them.
+    # The latest input counts.
+    return min(ages) if ages else None
+
+
 def parse_properties(text: str) -> dict[str, str]:
     properties = {}
     for line in text.splitlines():
@@ -373,6 +427,14 @@ def _accounts(run: Run, adb: str, serial: str) -> Document:
         return {"accounts": None, "note": f"cannot read the accounts: {exc}"}
     accounts, note = parse_accounts(output)
     return {"accounts": accounts} if note is None else {"accounts": accounts, "note": note}
+
+
+def _input_age(run: Run, adb: str, serial: str) -> int | None:
+    try:
+        output = run(_adb(adb, serial, "shell", _INPUT_AGE_COMMAND), ADB_TIMEOUT_SECONDS)
+    except AndroidError:
+        return None
+    return parse_input_age(output)
 
 
 def _device_facts(getprop: str, form: str | None = "phone") -> Document:

@@ -461,6 +461,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for them only when a rule needs a process, so a call with `BANKSMAN_LEASE` still decides
   without the process list while its lease is touched. The lease schema and the output schema
   do not change.
+- The input age, the unused timeout, and the reap job. The `android-emulator` preset now gives
+  the fact `input_age` for a running emulator: the whole seconds since its last input, from
+  `dumpsys power` and the uptime of the device, in one `adb shell` call. `status`, `watch`, and
+  `acquire` read it; the discovery of `run` does not. A clause such as
+  `--where 'input_age>=3600'` uses it, `status --json` has it in `facts`, and for a resource
+  without a lease, the LAST USE column of `status` shows the time of the last input. An output
+  without a value that banksman knows gives no fact. With the new kind key `unused_timeout`,
+  for example `"3h"`, valid only for the `android-emulator` preset and off by default,
+  `banksman reap` ends a running emulator of an allowed AVD when no lease of the AVD exists,
+  the emulator has had no input for that time, and banksman started it, or an agent started it
+  and that agent process has ended. An emulator whose environment names no agent, such as one
+  that a person started outside the session of an agent, an emulator whose agent still runs,
+  and an emulator whose input age is not known keep running. The look runs adb, so
+  only `banksman reap` makes it, before it takes the lock of the lease store. Under the lock,
+  the reaper checks that the AVD still has no lease and that the same emulator runs, records
+  that emulator, and ends it under a lease of its own with the new void reason `unused`, as for
+  the free timeout. The log records a `reap` with the reason `unused`. The new command
+  `banksman admin reap-agent` prints a launchd job that runs `banksman reap` every 5 minutes on
+  macOS, or a crontab line on other systems. `banksman admin doctor` compares the saved job with
+  what banksman prints, and warns when a kind has `free_timeout` or `unused_timeout` and no job
+  is saved, or when launchd has not loaded the job. The lease schema is now 12 for the new void
+  reason, and banksman also reads lease files of schema 11. The output schema stays 6.
 - [docs/PROJECTS.md](docs/PROJECTS.md): how a project uses banksman. A POSIX `sh` helper that
   a project copies into its repository and that does nothing without banksman, a stub of
   `banksman` for the tests of the project's scripts, deny rules for Claude Code and Codex

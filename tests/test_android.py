@@ -8,6 +8,7 @@ from banksman.android import (
     AndroidError,
     Transport,
     parse_accounts,
+    parse_input_age,
     parse_properties,
     parse_transports,
 )
@@ -438,3 +439,109 @@ def test_the_devices_come_from_the_adb_server_that_the_call_names():
     found = android.transports(Android(sdk=SDK), ("-P", "5038"), run=adb)
     assert found == [Transport("emulator-5556", "device")]
     assert adb.commands == [["-P", "5038", "devices", "-l"]]
+
+
+# The input age: the uptime of the device, then what the power manager says.
+
+INPUT_AGE_CALL = "-s emulator-5554 shell cat /proc/uptime; dumpsys power"
+# As Android 16 prints it, measured on an emulator: 24879 s of uptime, and the last input
+# 14171.127 s after the boot.
+POWER_NEW = """\
+24879.42 98112.07
+POWER MANAGER (dumpsys power)
+
+Power Manager State:
+  mDirty=0x0
+  mWakefulness=Asleep
+  mLastUserActivityTime(excludingAttention)=14171127
+  mLastUserActivityTimeNoChangeLights=0
+"""
+# As earlier versions print it, with how long ago the input was in the clock of the input.
+POWER_AGO = """\
+1100.00 4000.00
+Power Manager State:
+  mLastWakeTime=1084416 (11011 ms ago)
+  mLastUserActivityTime=1090322 (5105 ms ago)
+  mLastUserActivityTimeNoChangeLights=0 (1095427 ms ago)
+"""
+
+
+def test_the_input_age_is_the_uptime_minus_the_time_of_the_last_input():
+    assert parse_input_age(POWER_NEW) == 10708
+    # Earlier versions print the name without the suffix.
+    assert parse_input_age(POWER_NEW.replace("(excludingAttention)", "")) == 10708
+
+
+def test_the_input_age_that_the_power_manager_gives_counts_first():
+    # 1100 s of uptime would give 9 s; the time that the device slept does not count.
+    assert parse_input_age(POWER_AGO) == 5
+    assert parse_input_age(POWER_AGO.replace("(5105 ms ago)", "(now)")) == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "24879.42 98112.07\n",
+        "24879.42 98112.07\n  mLastUserActivityTimeNoChangeLights=0\n",
+        "24879.42 98112.07\n  mLastUserActivityTime=soon\n",
+        "cat: /proc/uptime: Permission denied\n  mLastUserActivityTime=14171127\n",
+        "Can't find service: power\n",
+    ],
+)
+def test_an_output_without_a_known_value_gives_no_input_age(text):
+    assert parse_input_age(text) is None
+
+
+def test_an_input_during_the_call_and_several_displays_give_the_latest_input():
+    text = (
+        "100.00 300.00\n"
+        "  mLastUserActivityTime=40000\n"
+        "  mLastUserActivityTime=100500\n"
+    )
+    assert parse_input_age(text) == 0
+
+
+def test_a_running_emulator_has_its_input_age(tmp_path):
+    home = tmp_path / "avd"
+    write_avd(home, "qa_phone_api35", PHONE)
+    answers = {
+        "devices": "List of devices attached\nemulator-5554\tdevice\n",
+        "-s emulator-5554 emu avd name": "qa_phone_api35\r\nOK\r\n",
+        "-s emulator-5554 shell dumpsys account": "  Accounts: 0\n",
+        INPUT_AGE_CALL: POWER_NEW,
+    }
+    settings = Android(sdk=SDK, avd_home=home)
+    (instance,) = android.emulators(settings, run=FakeAdb(answers))["instances"]
+    assert instance["facts"]["input_age"] == 10708
+    # Without the accounts, the input age is left out too, unless the caller asks for it.
+    adb = FakeAdb(answers)
+    (instance,) = android.emulators(settings, run=adb, accounts=False)["instances"]
+    assert "input_age" not in instance["facts"]
+    assert ["-s", "emulator-5554", "shell", "cat /proc/uptime; dumpsys power"] not in adb.commands
+    adb = FakeAdb(answers)
+    (instance,) = android.emulators(settings, run=adb, accounts=False, input_age=True)[
+        "instances"
+    ]
+    assert (instance["facts"]["input_age"], "accounts" in instance) == (10708, False)
+
+
+def test_an_emulator_that_boots_or_does_not_answer_has_no_input_age(tmp_path):
+    home = tmp_path / "avd"
+    write_avd(home, "qa_phone_api35", PHONE)
+    adb = FakeAdb(
+        {
+            "devices": "List of devices attached\nemulator-5554\toffline\n",
+            "-s emulator-5554 emu avd name": "qa_phone_api35\r\nOK\r\n",
+            INPUT_AGE_CALL: POWER_NEW,
+        }
+    )
+    settings = Android(sdk=SDK, avd_home=home)
+    (instance,) = android.emulators(settings, run=adb)["instances"]
+    assert "input_age" not in instance["facts"]
+    assert ["-s", "emulator-5554", "shell", "cat /proc/uptime; dumpsys power"] not in adb.commands
+    adb.answers["devices"] = "List of devices attached\nemulator-5554\tdevice\n"
+    del adb.answers[INPUT_AGE_CALL]
+    (instance,) = android.emulators(settings, run=adb)["instances"]
+    assert instance["facts"]["serial"] == "emulator-5554"
+    assert "input_age" not in instance["facts"]

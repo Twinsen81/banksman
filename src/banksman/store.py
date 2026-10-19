@@ -270,13 +270,16 @@ class Granted:
 
 @dataclass(frozen=True)
 class Unused:
-    """A free instance that banksman started, and that the reaper ends because no lease of it
-    has existed for the free timeout of its kind."""
+    """A free instance that the reaper ends: banksman started it and no lease of it has existed
+    for the free timeout of its kind, or nobody has used it for the unused timeout of its
+    kind."""
 
     resource: str
     kind: str
     # Its address, for `status` and the adb guard while the reaper ends it.
     serial: str | None = None
+    # The void reason of the reaper's lease: FREE_TIMEOUT or UNUSED.
+    reason: str = FREE_TIMEOUT
 
 
 @dataclass(frozen=True)
@@ -1073,7 +1076,7 @@ class Store:
         holder = Holder(REAPER_OWNER)
         check_names(unused.resource, unused.kind, holder)
         lease = self._new_lease(unused.resource, unused.kind, holder, READY, Timeouts(), None)
-        lease = _drained(replace(lease, serial=unused.serial), FREE_TIMEOUT, now)
+        lease = _drained(replace(lease, serial=unused.serial), unused.reason, now)
         return replace(lease, attempts=1, reaper_pid=me[0], reaper_started=me[1])
 
     def _end(self, lease: Lease, me: tuple[int, str]) -> list[Reaped]:

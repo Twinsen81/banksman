@@ -31,6 +31,9 @@ RELEASED_END = "released_end"
 # The reason of the lease that the reaper writes for a free instance that it ends. No holder had
 # that lease.
 FREE_TIMEOUT = "free_timeout"
+# The reason of the lease that the reaper writes for a running emulator without a lease and
+# without input for the unused timeout of its kind. No holder had that lease.
+UNUSED = "unused"
 VOID_REASONS = {
     REBOOTED: "the machine restarted after the lease was written",
     BOOT_TIMEOUT: "the resource was not ready by its boot deadline",
@@ -42,6 +45,7 @@ VOID_REASONS = {
     RELEASE: "the holder released the lease while its scripts still ran",
     RELEASED_END: "the holder released the lease, and asked banksman to end its instance",
     FREE_TIMEOUT: "the instance had no lease for the free timeout of its kind",
+    UNUSED: "the instance had no lease, and no input for the unused timeout of its kind",
 }
 
 RESOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}")

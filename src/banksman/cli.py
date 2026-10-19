@@ -26,6 +26,7 @@ from banksman import (
     fencing,
     guard,
     hooks,
+    job,
     printed,
     remote,
 )
@@ -69,6 +70,7 @@ from banksman.lease import (
     QUARANTINED,
     READY,
     RELEASED_END,
+    UNUSED,
     VOID_REASONS,
     Lease,
     SerialSeen,
@@ -535,6 +537,13 @@ def _build_parser() -> argparse.ArgumentParser:
         " directory that is first on the PATH of the agents",
         allow_abbrev=False,
     )
+    admin_commands.add_parser(
+        "reap-agent",
+        help="print the optional job that runs banksman reap every 5 minutes: on macOS a launchd"
+        f" job, to save as ~/{job.LAUNCH_AGENT} and load with launchctl bootstrap; elsewhere a"
+        " crontab line",
+        allow_abbrev=False,
+    )
     doctor_command = admin_commands.add_parser(
         "doctor",
         help="check the install, the configuration, and the files that the operator saved, and"
@@ -765,7 +774,9 @@ def _stderr_is_terminal() -> bool:
     return sys.stderr.isatty()
 
 
-def _open_store(config: Config, audience: _Audience) -> Store:
+def _open_store(
+    config: Config, audience: _Audience, idle: Sequence[tuple[Kind, emulator.Idle]] = ()
+) -> Store:
     machine = Machine()
     return Store(
         default_state_dir(),
@@ -773,7 +784,7 @@ def _open_store(config: Config, audience: _Audience) -> Store:
         take_back=_take_back(config, audience),
         stopping=_stopping(config),
         record=_recorder(),
-        unused=_unused(config, machine),
+        unused=_unused(config, machine, idle),
         hooked=_hooked(config),
         warn=_warn_once(),
     )
@@ -841,7 +852,7 @@ def _failed_take_back(config: Config, lease: Lease) -> str | None:
     if kind is not None and kind.preset == ANDROID_REMOTE and lease.handle is not None:
         failure = remote.take_back(kind, config.android, lease.resource, lease.handle)
     elif kind is not None and kind.preset == ANDROID_EMULATOR:
-        failure = emulator.take_back(kind, lease.resource)
+        failure = emulator.take_back(kind, lease.resource, unused=lease.void_reason == UNUSED)
     if failure is not None:
         return failure
     if kind is not None and kind.on_void is not None:
@@ -869,7 +880,13 @@ def _released_as_it_is(config: Config, lease: Lease) -> bool:
     return kept is not None
 
 
-def _unused(config: Config, system: System) -> FindUnused:
+def _unused(
+    config: Config, system: System, idle: Sequence[tuple[Kind, emulator.Idle]] = ()
+) -> FindUnused:
+    """Find the free instances that the reaper ends: the emulators after the free timeout of
+    their kind, and of `idle`, the emulators that `_idle_emulators` found before the lock, those
+    that still have no lease and still run."""
+
     # Read from the current configuration, as the on_void hook: when the operator turns the free
     # timeout off, it is off at once.
     def unused(leased: frozenset[str], now: float) -> list[Unused]:
@@ -884,9 +901,51 @@ def _unused(config: Config, system: System) -> FindUnused:
                     Unused(entry.resource, kind.name, entry.serial)
                     for entry in emulator.unused(kind, leased, now, system)
                 )
+        chosen = {each.resource for each in found}
+        for kind, entry in idle:
+            if entry.resource in leased or entry.resource in chosen:
+                continue
+            with contextlib.suppress(BanksmanError, OSError):
+                if emulator.ending(kind, entry, system):
+                    found.append(Unused(entry.resource, kind.name, entry.serial, UNUSED))
         return found
 
     return unused
+
+
+def _idle_emulators(config: Config) -> list[tuple[Kind, emulator.Idle]]:
+    """Find the emulators that the unused timeout of their kind ends, before the reap takes the
+    lock of the lease store. Only allowed AVDs count, as for a request."""
+    kinds = [
+        kind
+        for kind in config.kinds.values()
+        if kind.preset == ANDROID_EMULATOR and kind.unused_timeout is not None
+    ]
+    if not kinds:
+        return []
+    try:
+        inventory = load_inventory()
+    except BanksmanError:
+        # Without the inventory, no AVD is allowed, and status says why.
+        return []
+    declared = {name: kind.name for kind in config.kinds.values() for name in kind.instances()}
+    machine = Machine()
+    found: list[tuple[Kind, emulator.Idle]] = []
+    for kind in kinds:
+
+        def allowed(name: str, kind: Kind = kind) -> bool:
+            # A name that another kind declares has its lease file under that kind.
+            return declared.get(name, kind.name) == kind.name and inventory.allows(kind.name, name)
+
+        # As for the free timeout, a look that fails ends nothing, and must not fail the reap.
+        with contextlib.suppress(BanksmanError, OSError):
+            found.extend(
+                (kind, each)
+                for each in emulator.idle(
+                    kind, config.android, allowed, agents=config.holder.agents, system=machine
+                )
+            )
+    return found
 
 
 def _serial_found(config: Config, kind: Kind, lease: Lease) -> str | None:
@@ -905,11 +964,17 @@ def _stopping(config: Config) -> Stopping:
     return stopping
 
 
-def _reaped_store(config: Config | None = None) -> tuple[Store, list[Reaped]]:
-    """Open the store and reap first, as every command that reads or changes leases does."""
+def _reaped_store(
+    config: Config | None = None, idle: Sequence[tuple[Kind, emulator.Idle]] = ()
+) -> tuple[Store, list[Reaped]]:
+    """Open the store and reap first, as every command that reads or changes leases does.
+
+    `idle` has the emulators that the unused timeout of their kind ends, when they still have
+    no lease (see `_idle_emulators`).
+    """
     config = load_config() if config is None else config
     audience = _Audience(config.holder.agents)
-    store = _open_store(config, audience)
+    store = _open_store(config, audience, idle)
     reaped = store.reap()
     for item in reaped:
         if item.outcome != QUARANTINED:
@@ -1255,7 +1320,10 @@ def _cmd_agent_guide(args: argparse.Namespace) -> int:
 
 
 def _cmd_reap(args: argparse.Namespace) -> int:
-    _, reaped = _reaped_store()
+    config = load_config()
+    # Only this command looks for emulators without input: the look runs adb, and every command
+    # reaps first, also those that must be fast, such as check and touch. The reap job runs it.
+    _, reaped = _reaped_store(config, _idle_emulators(config))
     if args.json:
         _print_json({"schema": OUTPUT_SCHEMA, "reaped": [_reaped_json(item) for item in reaped]})
         return 0
@@ -2751,6 +2819,13 @@ def _cmd_admin_adb_shim(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_admin_reap_agent(args: argparse.Namespace) -> int:
+    # banksman does not install the job itself: ~/Library/LaunchAgents and the crontab belong to
+    # the operator.
+    sys.stdout.write(job.printed(job.program(sys.argv[0])))
+    return 0
+
+
 def _cmd_admin_doctor(args: argparse.Namespace) -> int:
     shell = doctor.Shell(doctor.home_directory(), os.environ.get("PATH", ""), sys.argv[0])
     checks = doctor.run(shell)
@@ -3146,6 +3221,7 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "admin discover": _cmd_admin_discover,
     "admin gradle-init": _cmd_admin_gradle_init,
     "admin adb-shim": _cmd_admin_adb_shim,
+    "admin reap-agent": _cmd_admin_reap_agent,
     "admin doctor": _cmd_admin_doctor,
 }
 

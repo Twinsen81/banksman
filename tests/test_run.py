@@ -513,7 +513,9 @@ def test_the_leader_forwards_a_signal_to_the_command(tmp_path):
         finally:
             with suppress(OSError):
                 ours.sendall(leader.DONE)
-            with suppress(ProcessLookupError):
+            # macOS refuses to signal a group whose processes have all ended but are not waited
+            # for yet, and then nothing in the group runs.
+            with suppress(ProcessLookupError, PermissionError):
                 os.killpg(leader_process.pid, signal.SIGKILL)
             leader_process.wait(timeout=10)
 
@@ -594,7 +596,8 @@ def _clean_up(process, command):
     # Only processes that this test started: banksman leads its own session, and the command
     # is signalled only while it is the same process.
     if process.poll() is None:
-        with suppress(ProcessLookupError):
+        # The process can end after the poll: see test_the_leader_forwards_a_signal_to_the_command.
+        with suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, signal.SIGKILL)
         process.wait()
     for stream in (process.stdout, process.stderr):
