@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from banksman import android, emulator, hooks, remote
+from banksman import android, emulator, hooks, remote, trace
 from banksman.config import ANDROID_DEVICE, ANDROID_EMULATOR, ANDROID_REMOTE, Config, Kind
 from banksman.errors import BanksmanError
 from banksman.identity import StartedBy
@@ -92,6 +93,35 @@ def discover(kind: Kind, config: Config, *, accounts: bool = True) -> Found:
     Without `accounts`, the presets do not read the accounts, which takes the most time, and
     the accounts are not known.
     """
+    started = time.monotonic()
+    found = _discover(kind, config, accounts=accounts)
+    if trace.active():
+        trace.step(
+            "discovery",
+            kind=kind.name,
+            accounts=accounts,
+            seconds=round(time.monotonic() - started, 3),
+            instances=[_traced(instance) for instance in found.instances],
+            notes=list(found.notes),
+            failure=found.failure,
+        )
+    return found
+
+
+def _traced(instance: Instance) -> dict[str, object]:
+    """Return what the trace keeps of an instance: not its accounts, which can be personal."""
+    started = instance.started_by
+    return {
+        "name": instance.name,
+        "running": instance.facts.get(RUNNING),
+        "serial": instance.facts.get(SERIAL),
+        "input_age": instance.facts.get(android.INPUT_AGE),
+        "unmanaged": instance.unmanaged,
+        "started_by": None if started is None else started.pid,
+    }
+
+
+def _discover(kind: Kind, config: Config, *, accounts: bool) -> Found:
     try:
         if kind.preset == ANDROID_EMULATOR:
             document, unmanaged = emulator.discover(

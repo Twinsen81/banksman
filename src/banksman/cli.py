@@ -29,6 +29,7 @@ from banksman import (
     job,
     printed,
     remote,
+    trace,
 )
 from banksman.assign import MAX_ACCOUNTS, MAX_PARTS
 from banksman.config import (
@@ -1659,6 +1660,8 @@ def _run_status(outcome: Outcome, command: Sequence[str]) -> int:
 
 def _end_by(signum: int, group: int | None) -> None:
     """End banksman by a signal, together with its process group when one is given."""
+    # The shell sees the end by the signal as this status.
+    trace.finish(128 + signum)
     sys.stdout.flush()
     sys.stderr.flush()
     if signum != signal.SIGKILL:
@@ -2022,6 +2025,9 @@ def _continue_start(
 ) -> NoReturn:
     """In the child of acquire: fork again, and continue the starts and the resets of the new
     leases in the grandchild. Neither process returns."""
+    # The steps of the acquire are in its own line of the trace, and the start gets a line of its
+    # own, which is the only place where its error reaches anybody.
+    trace.restart(os.getppid())
     try:
         # A session of its own: no terminal and no process group of the caller reaches it.
         os.setsid()
@@ -2034,6 +2040,7 @@ def _continue_start(
             taken = store.hand_over([(lease.resource, lease.lease_id) for lease in new], before)
         except BaseException as exc:
             _tell(answer, {"error": str(exc)})
+            trace.finish(1, trace.error_text(exc))
             os._exit(1)
         _tell(answer, {"pid": taken[0].reaper_pid, "started": taken[0].reaper_started})
         by_id = {lease.lease_id: lease for lease in taken}
@@ -2041,10 +2048,12 @@ def _continue_start(
             replace(grant, lease=by_id.get(grant.lease.lease_id, grant.lease)) for grant in granted
         ]
         _prepare(store, config, handed, starts)
-    except BaseException:
-        # A start that fails gives its leases back. Its error reaches nobody: the caller has
-        # gone, and banksman wait reports the holding as lost.
+    except BaseException as exc:
+        # A start that fails gives its leases back. Its error reaches nobody but the trace: the
+        # caller has gone, and banksman wait reports the holding as lost.
+        trace.finish(1, trace.error_text(exc))
         os._exit(1)
+    trace.finish(0)
     os._exit(0)
 
 
@@ -3230,6 +3239,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments[:1] == ["guard"]:
         return guard.main(arguments[1:])
+    _start_trace(arguments)
+    status = None
+    error = None
+    try:
+        status = _main(arguments)
+        return status
+    except SystemExit as exc:
+        # argparse exits on a usage error, after it printed the error.
+        status = exc.code if isinstance(exc.code, int) else 0 if exc.code is None else 1
+        raise
+    except BaseException as exc:
+        error = trace.error_text(exc)
+        raise
+    finally:
+        trace.finish(status, error)
+
+
+def _start_trace(arguments: Sequence[str]) -> None:
+    """Start the trace of the command when the operator turned it on.
+
+    A configuration that does not load turns nothing on: the command says why it fails itself.
+    """
+    try:
+        config = load_config()
+    except (BanksmanError, OSError):
+        return
+    if not config.log.trace:
+        return
+    trace.start(arguments)
+    with contextlib.suppress(BanksmanError, OSError):
+        trace.caller(find_holder(Machine().process_table(), config.holder))
+
+
+def _main(arguments: list[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(arguments)
     if args.command == "version":
@@ -3239,6 +3282,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command is None:
         parser.print_help()
         return 2
+    if name == "admin doctor":
+        # The doctor changes nothing, and creates no file: it only shows whether the trace is on.
+        trace.cancel()
     try:
         return command(args)
     except NotHeld as exc:

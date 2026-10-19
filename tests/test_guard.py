@@ -18,12 +18,14 @@ import time
 from importlib import resources
 
 import pytest
+import shapes
 from helpers import NOT_ENDED, SRC, FakeSystem, drain, edit_lease, write_config
 
 from banksman import android, cli, guard
 from banksman import store as store_module
 from banksman.android import Transport
 from banksman.config import load_config
+from banksman.errors import BanksmanError
 from banksman.guard import ALL, DEVICE, HOST, Call, parse
 from banksman.history import (
     COMMAND,
@@ -774,6 +776,93 @@ def test_without_the_adb_of_the_wrapper_the_guard_gives_the_adb_of_the_default_s
 ):
     assert guarded("devices") == 0
     assert capsys.readouterr().out.startswith(str(tmp_path / "home"))
+
+
+def traced_lines(path):
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    for line in lines:
+        shapes.check_trace_line(line)
+    return lines
+
+
+def test_the_trace_has_every_decision_of_the_guard_with_the_command_line(
+    machine, store, system, config_path, trace_path, capsys
+):
+    write_config(config_path, "[log]\ntrace = true\n")
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    assert guarded("devices", fallback="/opt/adb") == 0
+    assert guarded("-s", "emulator-5554", "shell", "am", "start", "token=abc") == 3
+    listed, refused = traced_lines(trace_path)
+    assert listed["command"] == ["guard", "adb", "--fallback-adb", "/opt/adb", "--", "devices"]
+    assert (listed["status"], listed["steps"][0]["action"]) == (0, "runs")
+    assert listed["steps"][0]["adb"] == "/opt/adb"
+    # The full command line, which the log never keeps.
+    assert refused["command"][-4:] == ["shell", "am", "start", "token=abc"]
+    assert refused["status"] == guard.EXIT_REFUSED
+    (step,) = refused["steps"]
+    held = store.snapshot().leases[0]
+    assert step == {
+        "step": "guard",
+        "action": "refused",
+        "reason": OTHER_HOLDER,
+        "serial": "emulator-5554",
+        "leases": [
+            {
+                "resource": "e2e_phone",
+                "lease_id": held.lease_id,
+                "state": "ready",
+                "holding": held.holding,
+            }
+        ],
+        "used": [],
+        "touched": [],
+        "adb": None,
+        "error": None,
+    }
+    # The decision read the process list, so the caller has its agent.
+    assert (refused["caller"]["agent"], refused["caller"]["owner_pid"]) == ("claude", AGENT)
+    assert refused["stderr"][0].startswith("banksman: adb shell: refused: another holder")
+
+
+def test_the_trace_has_a_call_that_runs_on_the_device_of_the_caller(
+    machine, store, system, config_path, trace_path, capsys
+):
+    write_config(config_path, "[log]\ntrace = true\n")
+    own = lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    system.advance(2 * guard.TOUCH_EVERY)
+    assert guarded("-s", "emulator-5554", "shell", "ls", fallback="/opt/adb") == 0
+    (line,) = traced_lines(trace_path)
+    (step,) = line["steps"]
+    assert (step["action"], step["serial"], step["adb"]) == ("runs", "emulator-5554", "/opt/adb")
+    assert (step["used"], step["touched"]) == ([own.resource], [own.resource])
+
+
+def test_a_guard_that_fails_records_the_failure_in_the_trace(
+    machine, config_path, trace_path, capsys, monkeypatch
+):
+    write_config(config_path, "[log]\ntrace = true\n")
+
+    def broken(*arguments, **options):
+        raise BanksmanError("the lease files cannot be read")
+
+    monkeypatch.setattr(guard, "check", broken)
+    assert guarded("-s", "emulator-5554", "shell", fallback="/opt/adb") == 0
+    (line,) = traced_lines(trace_path)
+    (step,) = line["steps"]
+    assert (step["action"], step["error"]) == ("unchecked", "the lease files cannot be read")
+    # Without the process list, which the guard did not read, the caller has no agent.
+    assert line["caller"]["agent"] is None
+
+
+def test_a_trace_that_cannot_be_written_refuses_no_call(
+    machine, config_path, trace_path, capsys
+):
+    write_config(config_path, "[log]\ntrace = true\n")
+    trace_path.mkdir(parents=True)
+    assert guarded("-s", "emulator-5554", "shell", fallback="/opt/adb") == 0
+    printed = capsys.readouterr()
+    assert printed.out == "/opt/adb\n"
+    assert "this command is not in the trace" in printed.err
 
 
 def test_the_guard_knows_only_adb(capsys):

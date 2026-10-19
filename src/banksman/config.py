@@ -178,6 +178,16 @@ class Guard:
 
 
 @dataclass(frozen=True)
+class Log:
+    """What banksman records besides the history of the leases."""
+
+    # Every command, and every adb call through the guard, adds a line to the trace, with what it
+    # saw and decided. Off unless the operator turns it on for a test: the trace holds full adb
+    # command lines and the purposes of other agents.
+    trace: bool = False
+
+
+@dataclass(frozen=True)
 class Config:
     defaults: Timeouts = Timeouts()
     kinds: Mapping[str, Kind] = field(default_factory=dict)
@@ -186,6 +196,7 @@ class Config:
     account_preselect: tuple[str, ...] = ()
     android: Android = Android()
     guard: Guard = Guard()
+    log: Log = Log()
 
 
 def default_config_path() -> Path:
@@ -257,7 +268,9 @@ class _Invalid(Exception):
 
 
 def _config(data: dict[str, object]) -> Config:
-    _check_keys(data, None, ("defaults", "kinds", "holder", "accounts", "android", "guard"))
+    _check_keys(
+        data, None, ("defaults", "kinds", "holder", "accounts", "android", "guard", "log")
+    )
     table = _table(data.get("defaults", {}), "defaults")
     _check_keys(table, "defaults", _TIMEOUT_KEYS)
     defaults = _timeouts(table, "defaults", Timeouts())
@@ -282,6 +295,7 @@ def _config(data: dict[str, object]) -> Config:
         account_preselect=_patterns(accounts.get("preselect"), "accounts.preselect"),
         android=android,
         guard=_guard(_table(data.get("guard", {}), "guard")),
+        log=_log(_table(data.get("log", {}), "log")),
     )
 
 
@@ -335,6 +349,11 @@ def _guard(table: dict[str, object]) -> Guard:
     if not isinstance(strict, bool):
         raise _Invalid("guard.strict", f'must be true, false, or "{WARN}"')
     return Guard(strict=STRICT if strict else None, devices_note=note)
+
+
+def _log(table: dict[str, object]) -> Log:
+    _check_keys(table, "log", ("trace",))
+    return Log(trace=_boolean(table.get("trace", False), "log.trace"))
 
 
 def _absolute_path(value: object, where: str) -> Path | None:

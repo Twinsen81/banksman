@@ -155,10 +155,12 @@ def test_a_complete_setup_passes(
         "quarantine-dir": "ok",
         "log": "ok",
         "lease-ends": "ok",
+        "trace": "ok",
         "reap-job": "skip",
         "quarantine": "ok",
         "holder": "ok",
     }
+    assert found["trace"]["detail"] == "the trace is off"
     assert found["kind:lab"]["detail"] == "discovery finds 1 of 2 allowed: rack-1"
     assert found["android-sdk"]["detail"].endswith(
         "Android Debug Bridge version 1.0.41, Version 99.0.0-test"
@@ -166,13 +168,36 @@ def test_a_complete_setup_passes(
     assert all(check["fix"] is None for check in found.values())
 
 
-def test_the_doctor_changes_nothing(capsys, state_dir, quarantine_dir, log_path, ended_path):
+def test_the_doctor_changes_nothing(
+    capsys, state_dir, quarantine_dir, log_path, ended_path, trace_path
+):
     found = checks(capsys)
     assert found["config"]["status"] == "warn"
     # Without a configuration, nothing optional is installed, and nothing fails.
     assert {status for status in statuses(found).values()} == {"ok", "warn", "skip"}
-    for path in (state_dir, quarantine_dir, log_path, ended_path):
+    for path in (state_dir, quarantine_dir, log_path, ended_path, trace_path):
         assert not path.exists()
+
+
+def test_a_trace_that_is_on_is_a_warning(capsys, config_path, trace_path):
+    configure(config_path, "[log]\ntrace = true\n")
+    found = checks(capsys)["trace"]
+    assert found["status"] == "warn"
+    assert found["detail"].startswith(f"the trace is on: {trace_path} gets a line for every")
+    assert found["fix"] == f"after the test, set trace = false in [log] of {config_path}"
+    # The doctor itself adds no line.
+    assert not trace_path.exists()
+
+
+def test_a_trace_that_is_on_and_cannot_be_written_fails(capsys, config_path, trace_path):
+    configure(config_path, "[log]\ntrace = true\n")
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_text("")
+    trace_path.chmod(0o666)
+    found = checks(capsys, status=1)["trace"]
+    assert found["status"] == "fail"
+    assert found["detail"] == f"the trace is on, but group or others can write to {trace_path}"
+    assert found["fix"] == f"chmod go-w {trace_path}"
 
 
 def test_the_text_shows_each_check_its_fix_and_the_counts(capsys, home, config_path):

@@ -11,6 +11,7 @@ import sys
 import time
 
 import pytest
+import shapes
 from helpers import (
     SRC,
     FakeSdk,
@@ -622,6 +623,30 @@ def test_a_start_that_continues_and_dies_frees_the_instance(capsys, config_path,
     assert not runs(emulator_pid)
     assert leases() == {}
     assert known() == {}
+
+
+def test_a_start_that_continues_writes_its_error_into_a_line_of_its_own_in_the_trace(
+    config_path, sdk, starters, trace_path
+):
+    # Its standard error goes nowhere, so the trace is the only place where its error is kept.
+    configure(config_path, sdk, keys="[log]\ntrace = true\n")
+    sdk.emulator_behaves(exit=1, say="ERROR | the AVD is broken")
+    done = no_wait_in_child(*NO_WAIT)
+    assert done.returncode == 0, done.stderr
+    pid = starter(starters, done.stderr)
+    wait_for(lambda: not runs(pid))
+    wait_for(lambda: len(trace_path.read_text().splitlines()) == 2)
+    lines = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    for line in lines:
+        shapes.check_trace_line(line)
+    (acquire_line,) = [line for line in lines if line["continues"] is None]
+    (start_line,) = [line for line in lines if line["continues"] is not None]
+    assert (acquire_line["command"][0], acquire_line["status"]) == ("acquire", 0)
+    assert start_line["continues"] == acquire_line["pid"]
+    assert (start_line["pid"], start_line["status"]) == (pid, 1)
+    assert "ERROR | the AVD is broken" in start_line["error"]
+    # The steps of the acquire stay in its own line.
+    assert [step["step"] for step in start_line["steps"]].count("search") == 0
 
 
 def test_a_start_that_continues_and_fails_gives_its_lease_back(capsys, config_path, sdk, starters):
