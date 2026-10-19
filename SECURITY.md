@@ -47,8 +47,10 @@ there that another user owns or that group or others can write to, because that 
 which emulators the reaper ends. The reaper signals only that one process, and only while the
 pid has the recorded start time on the same boot, so it never signals a process that the
 system gave the pid to later. It never signals a process group: other emulators use the
-`netsimd` daemon that an emulator can start in its group. An emulator that a person started is
-never ended. An emulator that the holder or an agent started outside banksman is ended only
+`netsimd` daemon that an emulator can start in its group. An emulator that banksman did not
+start and whose environment names no agent, such as one that a person started outside the
+session of an agent, is never ended. An emulator that the holder, an agent, or a person in the
+session of an agent started outside banksman is ended only
 with the `unused_timeout` of its kind, by `banksman reap`, and only when it is an emulator of
 an allowed AVD, no lease of the AVD exists, the agent process that its environment names has
 ended, and `dumpsys power` on the emulator says that it has had no input for that time. The

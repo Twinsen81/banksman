@@ -471,8 +471,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for example `"3h"`, valid only for the `android-emulator` preset and off by default,
   `banksman reap` ends a running emulator of an allowed AVD when no lease of the AVD exists,
   the emulator has had no input for that time, and banksman started it, or an agent started it
-  and that agent process has ended. An emulator that a person started, an emulator whose agent
-  still runs, and an emulator whose input age is not known keep running. The look runs adb, so
+  and that agent process has ended. An emulator whose environment names no agent, such as one
+  that a person started outside the session of an agent, an emulator whose agent still runs,
+  and an emulator whose input age is not known keep running. The look runs adb, so
   only `banksman reap` makes it, before it takes the lock of the lease store. Under the lock,
   the reaper checks that the AVD still has no lease and that the same emulator runs, records
   that emulator, and ends it under a lease of its own with the new void reason `unused`, as for

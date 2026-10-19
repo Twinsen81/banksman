@@ -23,6 +23,8 @@ def test_reap_agent_prints_a_launchd_job_on_macos(capsys, monkeypatch):
         "AbandonProcessGroup": True,
         "ProcessType": "Background",
     }
+    # The directory exists only after a program has saved a job of its own there.
+    assert "mkdir -p ~/Library/LaunchAgents\n" in out
     assert "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/banksman.reap.plist" in out
 
 

@@ -497,7 +497,8 @@ def test_without_a_reap_job_the_timeouts_of_the_kinds_end_less(capsys, config_pa
         " runs"
     )
     assert check["fix"] == (
-        f"banksman admin reap-agent > {path} && launchctl bootstrap gui/{os.getuid()} {path}"
+        f"mkdir -p {path.parent} && banksman admin reap-agent > {path} &&"
+        f" launchctl bootstrap gui/{os.getuid()} {path}"
     )
 
 

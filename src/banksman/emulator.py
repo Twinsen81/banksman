@@ -358,7 +358,8 @@ def idle(
 
     `allowed` tells whether agents may use an AVD of the kind: an emulator of any other AVD,
     such as a personal one, is never ended. An emulator that banksman did not start ends only
-    when the agent process that started it has ended, so one that a person started stays. This
+    when its environment names an agent process that has ended, so one that a person started
+    outside the session of an agent stays. This
     runs adb, about 100 ms for each emulator, so the reaper runs it before it takes the lock of
     the lease store, and checks the rest under the lock (see `ending`).
     """

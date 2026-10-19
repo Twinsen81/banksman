@@ -471,7 +471,9 @@ def _reap_job(shell: Shell, config: Config | None) -> Check:
         path = shell.home / job.LAUNCH_AGENT
         domain = f"gui/{os.getuid()}"
         load = f"launchctl bootstrap {domain} {_quoted(path)}"
-        fix = f"banksman admin reap-agent > {_quoted(path)} && {load}"
+        # The directory exists only after a program has saved a job of its own there.
+        save = f"mkdir -p {_quoted(path.parent)} && banksman admin reap-agent > {_quoted(path)}"
+        fix = f"{save} && {load}"
         try:
             text = _read(path)
         except _Unreadable as exc:

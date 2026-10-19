@@ -41,6 +41,7 @@ _HEAD = """\
 
   Save it, and load it:
 
+      mkdir -p ~/Library/LaunchAgents
       banksman admin reap-agent > ~/Library/LaunchAgents/banksman.reap.plist
       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/banksman.reap.plist
 
