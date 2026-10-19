@@ -500,4 +500,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller; `banksman admin doctor` gives the command that fetches the catalogue. The guide for
   agents says to tell the user when only the operator can do something. The lease schema and
   the output schema do not change.
+- Each background session of Claude Code is now its own holder. Claude Code gives the process
+  of a background session a title, such as `claude bg-spare`, which the process list shows in
+  place of the program, so the walk up the process tree passed the session and stopped at the
+  service above it, the plain `claude` program that hosts every background session of the user.
+  Every background session was one holder: sessions with the same holding label shared a
+  device, `release --all` in one session released the leases of the others, the adb guard could
+  not tell them apart, and the leases ended only with the service. In the walk, the process that
+  `CLAUDE_PID` names now counts as an agent, and the nearest agent wins, so a command of the
+  session gets the session. A program whose name is the agent's name, a space, and more text now
+  counts as that agent for the process that the variable names, also for a command that has
+  left the process tree of its agent and for an emulator that the session started. The lease
+  schema and the output schema do not change.
 
