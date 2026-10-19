@@ -181,6 +181,72 @@ def test_the_nearest_agent_above_the_caller_wins_over_the_variable():
     assert find_agent(table, ("claude", "codex"), 500, {"CLAUDE_PID": "300"}) == (400, "codex")
 
 
+def in_pid_order(table):
+    """Return a process table in which each process started at the clock tick of its pid, so
+    that a parent, which has a lower pid in these tables, started first."""
+    return {pid: replace(process, started=str(pid)) for pid, process in table.items()}
+
+
+# The session of a background agent, with a title in place of the program, below a host of the
+# session's terminal, which has a title too, and the service of the agent, which hosts every
+# background session of the user.
+SESSION_AND_SERVICE = (
+    (300, "claude bg-spare"),
+    (200, "claude bg-pty-host"),
+    (100, CLAUDE_IN_AN_APP),
+)
+# A command that a shell of the session runs.
+BACKGROUND_SESSION = in_pid_order(
+    processes((500, "/opt/python/bin/python3"), (400, "/bin/sh"), *SESSION_AND_SERVICE)
+)
+
+
+def test_the_variable_names_an_agent_above_the_caller_that_the_walk_passes():
+    assert find_agent(BACKGROUND_SESSION, ("claude",), 500, {"CLAUDE_PID": "300"}) == (
+        300,
+        "claude",
+    )
+    # Without the variable, the walk stops at the service.
+    assert find_agent(BACKGROUND_SESSION, ("claude",), 500, {}) == (100, "claude")
+
+
+def test_the_holder_of_a_background_session_is_the_session(tmp_path):
+    holder = find_holder(
+        BACKGROUND_SESSION,
+        HolderRules(),
+        cwd=str(repository(tmp_path / "tree")),
+        env={"CLAUDE_PID": "300"},
+        pid=500,
+    )
+    assert (holder.owner_pid, holder.agent) == (300, "claude")
+
+
+def test_a_known_agent_below_the_process_that_the_variable_names_is_nearer():
+    table = in_pid_order(
+        processes((600, "/bin/sh"), (550, "/usr/local/bin/codex"), *SESSION_AND_SERVICE)
+    )
+    assert find_agent(table, ("claude", "codex"), 600, {"CLAUDE_PID": "300"}) == (550, "codex")
+
+
+@pytest.mark.parametrize(
+    ("program", "agents"),
+    [
+        ("/bin/sh", ("claude",)),
+        ("claude-helper bg-spare", ("claude",)),
+        ("claudette", ("claude",)),
+        ("claude bg-spare", ("codex",)),
+    ],
+)
+def test_an_ancestor_that_the_variable_names_counts_only_when_it_is_the_agent(program, agents):
+    table = in_pid_order(processes((500, "/bin/sh"), (400, program), (300, "/usr/local/bin/codex")))
+    assert find_agent(table, (*agents, "codex"), 500, {"CLAUDE_PID": "400"}) == (300, "codex")
+
+
+def test_a_detached_command_of_an_agent_with_a_title_finds_the_agent_by_the_variable():
+    table = detached(agent_program="claude bg-spare")
+    assert find_agent(table, ("claude",), 500, {"CLAUDE_PID": "300"}) == (300, "claude")
+
+
 def emulator_outside(agent_program=CLAUDE_IN_AN_APP, agent_started="1000", agent=True):
     """Return a process table with an emulator that the init process adopted, and its process:
     an agent started it in the background, and the shell between them has ended."""
@@ -198,6 +264,13 @@ def emulator_outside(agent_program=CLAUDE_IN_AN_APP, agent_started="1000", agent
 def test_the_agent_that_started_an_emulator_outside_its_tree_is_found_by_the_variable():
     table, emulator = emulator_outside()
     assert started_by(table, ("claude",), emulator, {}) is None
+    assert started_by(table, ("claude",), emulator, {"CLAUDE_PID": "300"}) == StartedBy(
+        "claude", 300
+    )
+
+
+def test_an_agent_with_a_title_that_started_an_emulator_outside_its_tree_is_found():
+    table, emulator = emulator_outside(agent_program="claude bg-spare")
     assert started_by(table, ("claude",), emulator, {"CLAUDE_PID": "300"}) == StartedBy(
         "claude", 300
     )

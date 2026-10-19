@@ -1,10 +1,10 @@
 """Holder identity: who asks for a lease, found from facts that every caller has.
 
 The owner is the worktree. The agent is the nearest ancestor process whose program is a known
-agent, otherwise the agent process that the environment names, and that process decides
-liveness. The issue comes from the caller, otherwise from the branch name or the worktree
-directory name. It works the same for any agent and for a person at a terminal, and the caller
-types none of it.
+agent or that the environment names as the agent process, otherwise the agent process that the
+environment names, and that process decides liveness. The issue comes from the caller,
+otherwise from the branch name or the worktree directory name. It works the same for any agent
+and for a person at a terminal, and the caller types none of it.
 """
 
 from __future__ import annotations
@@ -143,29 +143,37 @@ def find_agent(
     table: Mapping[int, Process], agents: Sequence[str], pid: int, env: Mapping[str, str]
 ) -> tuple[int | None, str | None]:
     """Return the agent process of a process and the name of its program: the nearest ancestor
-    whose program is a known agent, otherwise the agent process that `env`, the environment of
-    the process, names."""
+    whose program is a known agent or that `env`, the environment of the process, names as the
+    agent process, otherwise the agent process that `env` names.
+
+    An agent can give its processes a title, which the process list shows in place of the
+    program, so the walk alone can pass the agent and stop at a process above it, such as a
+    service that hosts the sessions of the agent. When one agent runs another, the variable names
+    the outer one, and the nearest one runs the command.
+    """
+    caller = table.get(pid)
+    if caller is None:
+        return None, None
+    named_pid, named = named_agent(table, agents, env, caller)
     for ancestor in fencing.ancestors(table, pid):
         process = table.get(ancestor)
         if process is None:
             break
+        if ancestor == named_pid:
+            return named_pid, named
         name = agent_name(process, agents)
         if name is not None:
             return ancestor, name
-    caller = table.get(pid)
-    return (None, None) if caller is None else named_agent(table, agents, env, caller)
+    return named_pid, named
 
 
 def named_agent(
     table: Mapping[int, Process], agents: Sequence[str], env: Mapping[str, str], caller: Process
 ) -> tuple[int | None, str | None]:
     """Return the agent process that the environment of a process names, and the name of its
-    program, when that process runs, is the known agent that sets the variable, and started no
-    later than each process of the branch of the caller (see `caller_branch`).
-
-    The walk up the process tree comes first: when one agent runs another, the variable names the
-    outer one, and the nearest one runs the command.
-    """
+    program, when that process runs, is the known agent that sets the variable, also under a
+    title (see `_is_agent`), and started no later than each process of the branch of the caller
+    (see `caller_branch`)."""
     for agent, variable in PID_VARIABLES.items():
         pid = _pid_value(env.get(variable, ""))
         if pid is None:
@@ -174,7 +182,8 @@ def named_agent(
         if (
             process is not None
             and process.pid != caller.pid
-            and agent_name(process, agents) == agent
+            and agent in agents
+            and _is_agent(process, agent)
             and all(
                 started_no_later(process.started, each.started)
                 for each in caller_branch(table, caller, process)
@@ -245,6 +254,13 @@ def agent_name(process: Process, agents: Sequence[str]) -> str | None:
     # "Claude", and it is not the agent.
     name = os.path.basename(process.program)
     return name if name in agents else None
+
+
+def _is_agent(process: Process, agent: str) -> bool:
+    """Whether the program of a process is an agent, also when the agent gave the process a title
+    such as "claude bg-spare"."""
+    name = os.path.basename(process.program)
+    return name == agent or name.startswith(agent + " ")
 
 
 def purpose_text(text: str) -> str | None:

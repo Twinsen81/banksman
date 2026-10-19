@@ -657,8 +657,9 @@ holdings apart (section 9).
   machine restarts, because banksman ends only what it started. So for a request whose agent
   process started the emulator, it is not unmanaged: the request gets it as one that banksman
   knows. Discovery finds that agent process as for a caller (section 9): the nearest agent above
-  the emulator, otherwise the agent process that the pid variable in the environment of the
-  emulator names, which the emulator keeps also after the init process adopts it. The caller's
+  the emulator, where the agent process that the pid variable in the environment of the emulator
+  names counts as an agent, otherwise that agent process, because the emulator keeps the
+  variable also after the init process adopts it. The caller's
   agent process counts, not its owner process, so `run --where` of that agent gets it too. For
   every other request, it stays unmanaged. The grant prints `STARTED=false` and
   `PREVIOUS=other`, and the end of the lease records the emulator as for any emulator that ran
@@ -1065,22 +1066,23 @@ for any agent and for a person at a terminal.
 |---|---|
 | owner | the worktree: the nearest directory, from the caller's working directory up, that has a `.git` entry; outside a repository, the working directory |
 | issue | `--issue`, otherwise the first match of `issue_pattern` in the branch name, then in the name of the worktree directory |
-| agent | the nearest ancestor process whose program is in `agents`: the last part of its executable path, with case; otherwise the agent process that the agent's pid variable names, `CLAUDE_PID` for `claude` |
+| agent | the nearest ancestor process whose program is in `agents`, the last part of its executable path, with case, or that the agent's pid variable names, `CLAUDE_PID` for `claude`; otherwise the agent process that the pid variable names |
 | owner process | that process's pid and start time, used for liveness |
 | session | an agent-specific extra when the environment has one, never required: `CLAUDE_CODE_SESSION_ID` for `claude` |
 
 A command can leave the process tree of its agent: a script that starts a test runner with
 `nohup` or in a session of its own, or a background job whose shell has ended. The init process
 adopts it, and no agent is in its ancestry. But it keeps the environment that it got from the
-agent, and an agent can give the pid of its agent process there. So when no known agent is in
-the ancestry, banksman reads the pid variable of the agent from its own environment, and takes
-the process that it names as the agent process when that process runs, its program is the agent
-that sets the variable and is in `agents`, and it started no later than the caller and each of
-its ancestors below the nearest ancestor that they share. The walk comes first: when one agent
-runs another, the variable names the outer one, and the nearest agent runs the command. Acquire,
-`touch`, `release --all`, `held`, `whoami`, and the adb guard (section 12) find the agent
-process in the same way. The map of variables is built in, as for the session: only `claude`
-sets one, and Codex does not.
+agent, and an agent can give the pid of its agent process there. So banksman reads the pid
+variable of the agent from its own environment, and the process that it names counts as the
+agent process when that process runs, its program is the agent that sets the variable and is in
+`agents`, and it started no later than the caller and each of its ancestors below the nearest
+ancestor that they share. In the walk up the process tree, that process is an agent too, and the
+nearest agent wins: when one agent runs another, the variable names the outer one, and the
+nearest agent runs the command. When no agent is in the ancestry, the process that the variable
+names is the agent process. Acquire, `touch`, `release --all`, `held`, `whoami`, and the adb
+guard (section 12) find the agent process in the same way. The map of variables is built in, as
+for the session: only `claude` sets one, and Codex does not.
 
 - The process list that banksman reads already has the process, so the variable costs no more
   reads, and a person at a terminal, who has no such variable, gets the same result as before.
@@ -1099,6 +1101,16 @@ sets one, and Codex does not.
   environment of the emulator in place of the caller's (section 6). When the variable names a
   known agent whose process no longer runs, or a process that started after the emulator and
   so got the pid after the agent ended, `status` shows that this agent has ended.
+- An agent can give a process a title, which the process list shows in place of the program.
+  Claude Code runs each background session in a process with the title `claude bg-spare`,
+  below a process with the title `claude bg-pty-host` and a service, the plain `claude`
+  program, that hosts every background session of the user. The walk alone passes the session
+  and stops at the service: every background session of the user would be one holder, and its
+  leases would end only with the service. So for the process that the variable names, a program
+  whose name is the name of the agent, a space, and more text counts as that agent. The walk
+  does not take a title by itself, because the agent can change its titles in any release, and
+  the variable names the exact process. A command of a background session that has lost the
+  variable still gets the service as its agent process.
 
 If no agent process is found, the owner is the worktree, and only the touch-based expiry
 applies, unless the caller passes `--owner-pid`.
