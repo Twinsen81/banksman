@@ -78,6 +78,8 @@ _CONNECTION = re.compile(
 )
 _ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _FORMS = (
+    # Such as Pixel Fold, Galaxy Z Fold5, or Galaxy Z Flip6, but not Galaxy Folder.
+    (re.compile(r"\b(fold|flip)[0-9]*\b", re.IGNORECASE), android.FOLDABLE),
     (re.compile(r"\b(tab|tablet)\b", re.IGNORECASE), "tablet"),
     (re.compile(r"\bwatch\b", re.IGNORECASE), "watch"),
 )
@@ -571,10 +573,12 @@ def discover(
         instance: Document = {"name": name, "facts": facts}
         if name in running:
             serial, handle, found = running[name]
-            # The codename and the API level name the model in the catalogue, so they stay.
-            facts.update(
-                {key: value for key, value in found.items() if key not in ("codename", "api")}
-            )
+            # The codename and the API level name the model in the catalogue, so they stay. The
+            # properties of a foldable can name it a tablet, and it stays a foldable.
+            kept = {"codename", "api"}
+            if facts.get("form") == android.FOLDABLE:
+                kept.add("form")
+            facts.update({key: value for key, value in found.items() if key not in kept})
             facts.update(serial=serial, handle=handle)
             session = sessions.get(handle)
             if session is not None and session.ends is not None:

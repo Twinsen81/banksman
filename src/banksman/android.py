@@ -39,6 +39,7 @@ FACTS = (
     "running",
     "input_age",
 )
+FOLDABLE = "foldable"
 # The whole seconds since the last input on a running emulator, in the awake time of the
 # emulator: the time of its own clock, which stops while the machine sleeps.
 INPUT_AGE = "input_age"
@@ -530,6 +531,10 @@ def _avd_form(config: dict[str, str]) -> str | None:
         return "watch"
     if "tv" in tags:
         return "tv"
+    # Unfolded, a foldable is as wide as a tablet, and folded as narrow as a phone. Each test
+    # that gets one must expect both, so it is neither.
+    if config.get("hw.sensor.hinge") == "yes":
+        return FOLDABLE
     try:
         width, height, density = (
             int(config[key]) for key in ("hw.lcd.width", "hw.lcd.height", "hw.lcd.density")

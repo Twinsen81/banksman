@@ -36,8 +36,9 @@ _TIMEOUT_SECONDS = 10.0
 _MAX_OUTPUT = 1024 * 1024
 _HEAD = """\
 <!--
-  banksman reap job: runs banksman reap every 5 minutes, so that the free timeout and the
-  unused timeout of a kind end emulators also while no other banksman command runs.
+  banksman reap job: runs banksman reap when it is loaded and then every 5 minutes, so that
+  the free timeout and the unused timeout of a kind end emulators also while no other banksman
+  command runs.
 
   Save it, and load it:
 
@@ -88,6 +89,9 @@ def launchd(command: Sequence[str]) -> str:
         "Label": LABEL,
         "ProgramArguments": [*command, "reap"],
         "StartInterval": INTERVAL_SECONDS,
+        # Also at once when it is loaded, so that the operator sees it work without waiting for
+        # the first interval.
+        "RunAtLoad": True,
         # adb starts its server when it does not run, and launchd would end the server with the
         # job. Other programs use that server.
         "AbandonProcessGroup": True,
