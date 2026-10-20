@@ -42,6 +42,8 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
   device, ask for it with `--where`, for example `avd=<name>`.
 - Ask for properties with `--where`, such as `form=tablet`, `'api>=33'`, or `avd=<name>`.
   `banksman status` shows the devices that exist, and who holds them.
+- `form` is `phone`, `tablet`, `foldable`, `watch`, or `tv`. A foldable is never a phone or a
+  tablet: ask for `form=foldable` to get one.
 - Add `--start` to get a device that runs: banksman then starts a granted emulator that does
   not run, and prints the grant when its boot has completed. Add `--no-wait` too to get the
   grant at once, while the boot goes on (see "Time limits"). Without `--start`, a granted

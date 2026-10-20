@@ -491,12 +491,14 @@ not code.
 A run asks for what it needs, not for a resource by name.
 
 - **Facts** come from the kind's `discover` hook or preset (section 8), and an agent cannot
-  set them: `form` (phone, tablet, watch), `api`, `image`, `abi`, `manufacturer`, `model`,
-  `codename`, `display_name`, `avd`, `serial`, `running` (whether the instance runs now), and,
-  for a remote device, `handle` and `ends`. banksman sets four attributes itself, and a hook
+  set them: `form` (phone, tablet, foldable, watch, tv), `api`, `image`, `abi`,
+  `manufacturer`, `model`, `codename`, `display_name`, `avd`, `serial`, `running` (whether the
+  instance runs now), and, for a remote device, `handle` and `ends`. banksman sets four attributes itself, and a hook
   cannot set them: `kind`; `paid`, from the kind (section 5); `account`, which is true when an
   allowed account is signed in on the instance now, false when its accounts are known and none
-  of them is allowed, and missing when its accounts are not known; and `tag`.
+  of them is allowed, and missing when its accounts are not known; and `tag`. A foldable is
+  as wide as a tablet when it is unfolded, and as narrow as a phone when it is folded, so it is
+  neither: `form=tablet` and `form=phone` never get one, and `form=foldable` asks for one.
 - **Tags** come from the operator, who assigns them in the inventory with name patterns
   (section 8). A tag gives no access.
 - A request is an AND of `--where` clauses. The operators are `=`, `!=`, `~` (a glob, with `*`
@@ -802,9 +804,11 @@ holdings apart (section 9).
 - **Pre-selection.** The `preselect` patterns of a kind, and `preselect` in the `[accounts]`
   table, name what discover selects at first. `*` matches any text, `?` matches one
   character, and case matters. banksman ships no default pattern. Anything outside the
-  patterns starts unselected, and a selected name outside them is shown again as a warning.
-  `--all` selects everything at first. A pattern gives no access by itself: only the
-  inventory does.
+  patterns starts unselected, and a name that the run selects outside them, with `--all` or
+  by hand, is shown again as a warning. A name that was allowed before, and a kind or an
+  `[accounts]` table without patterns, gives no such warning: the inventory, or the person,
+  selected it, so the warning would say nothing new. `--all` selects everything at first. A
+  pattern gives no access by itself: only the inventory does.
 
   ```toml
   [kinds.device]
@@ -818,7 +822,20 @@ holdings apart (section 9).
   allowed or refused as a whole, wherever it is signed in, because two runs that use one
   account on two devices interfere through the account (section 7). discover warns when one
   selected account is signed in on several selected instances. An instance whose accounts
-  are not known is not offered for work that needs an account.
+  are not known is not offered for work that needs an account. discover also warns when an
+  account that agents may not use is signed in on a selected instance: the inventory keeps
+  banksman from leasing that account, but an agent that holds the instance can still open the
+  apps in which it is signed in. The warning names the instance and the number of such
+  accounts, not their addresses.
+- **Output for a terminal.** discover shows one table for each kind, with the facts that a
+  decision needs in columns (`form`, `api`, `image`, and `model` with its manufacturer), the
+  number of accounts or `?` when they are not known, and the other facts as details. It
+  leaves out the facts that repeat the name or a column, or that say what the instance does
+  now (`avd`, `serial`, `display_name`, `manufacturer`, `codename`, `running`, `input_age`,
+  `handle`, `ends`). A fact that every instance of the kind has with one value is named once,
+  in the title of the table. The numbers go on from one table to the next. The summary gives
+  one line for each kind, and one note or warning for each group of names, wrapped between
+  names. `--json` shows every fact.
 - **A refusal is a person's decision.** In the interactive mode, a name that the person sees
   and leaves unselected is refused. A refused name stays refused when discover runs again,
   also when a pattern or `--all` matches it, until a person selects it again or edits the
@@ -872,7 +889,10 @@ holdings apart (section 9).
 - **Presets.** `preset = "android-emulator"` finds the AVDs, with the facts `avd`,
   `display_name` (the name that the AVD manager shows), `manufacturer`, `api`, `image`,
   `abi`, `form`, and `running`, and, for an emulator that runs, its `serial`, its accounts,
-  and `input_age`, the whole seconds since its last input (see the unused timeout below). When adb cannot list the running emulators, `running` is left out. An emulator that
+  and `input_age`, the whole seconds since its last input (see the unused timeout below). The
+  `form` comes from the files of the AVD: `watch` or `tv` from the tags of its system image,
+  `foldable` when it has a hinge (`hw.sensor.hinge=yes`), and otherwise `tablet` when its
+  smallest width is 600 dp or more, as for the layouts of Android, and `phone` below that. When adb cannot list the running emulators, `running` is left out. An emulator that
   adb lists as `offline`, because the adb daemon in it has not started yet, for example while
   it boots, runs too: its console gives its AVD name, so its serial is known from the start,
   and its accounts are not known yet. An AVD also runs when a process has the arguments
@@ -892,7 +912,9 @@ holdings apart (section 9).
   is always true, and their accounts. The facts are what the device gives: a Samsung phone
   gives the model `SM-S926B`, not "Galaxy S24+". banksman ships no table of marketing names, and it does
   not read the device name in the settings, which a person can change and which often
-  holds a personal name. A device that is
+  holds a personal name. The `form` is `tablet`, `watch`, or `tv` when the property
+  `ro.build.characteristics` names it, and `phone` otherwise. The preset does not detect the
+  hinge of a physical foldable, so a physical foldable is `phone` or `tablet`. A device that is
   not authorized is reported, not offered. A device whose serial starts with `localhost:` is a
   port forward, such as a remote device, and gets another port on every connection, so this
   preset reports it and does not offer it; the `android-remote` preset offers it. The presets use the SDK in `~/Library/Android/sdk`
@@ -1012,8 +1034,9 @@ holdings apart (section 9).
   minutes with the absolute path of the banksman that printed it, as the adb wrapper records
   the adb that it runs (section 12). On macOS it is a launchd job with the label
   `banksman.reap`, which the operator saves as `~/Library/LaunchAgents/banksman.reap.plist` and
-  loads with `launchctl bootstrap gui/$(id -u) <file>`; it sets `AbandonProcessGroup`, so that
-  an adb server that the reap starts outlives the job. On other systems it is a crontab line.
+  loads with `launchctl bootstrap gui/$(id -u) <file>`. It sets `RunAtLoad`, so that it runs
+  at once when it is loaded, not only after the first 5 minutes, and `AbandonProcessGroup`, so
+  that an adb server that the reap starts outlives the job. On other systems it is a crontab line.
   banksman installs neither, and the operator saves the job again after an upgrade. The job
   runs `on_void` hooks with the `PATH` of launchd or cron, so a hook names its programs by
   their full paths (section 5). `banksman admin doctor` checks the saved job (section 10). A
@@ -1049,10 +1072,11 @@ holdings apart (section 9).
   example `tokay:34`; the tool writes `tokay/34`, but a resource name cannot have `/`. The
   service allows one reservation of a model for each account, so one instance for each model
   loses nothing. The facts are `codename`, `api`, `manufacturer` (the group of the catalogue),
-  `model` (the name in the catalogue), and `form`, from the words of that name: `Tab` or
-  `Tablet` gives `tablet`, `Watch` gives `watch`, and everything else is `phone`. A connected
-  device gives its own facts instead, as for the `android-device` preset, except `codename`
-  and `api`, which name the model. It also has `running`, `serial`, `handle` (the id of its
+  `model` (the name in the catalogue), and `form`, from the words of that name: `Fold` or
+  `Flip`, also with a number such as `Fold5`, gives `foldable`, `Tab` or `Tablet` gives
+  `tablet`, `Watch` gives `watch`, and everything else is `phone`. A connected device gives its
+  own facts instead, as for the `android-device` preset, except `codename` and `api`, which
+  name the model, and the `form` of a foldable, which stays `foldable`. It also has `running`, `serial`, `handle` (the id of its
   reservation), and `ends` (when the reservation ends, as a UTC time, when banksman knows it).
 
   **No network in discovery.** `banksman admin discover --kind <kind>` runs

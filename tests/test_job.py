@@ -20,6 +20,7 @@ def test_reap_agent_prints_a_launchd_job_on_macos(capsys, monkeypatch):
         "Label": "banksman.reap",
         "ProgramArguments": [sys.executable, "-m", "banksman", "reap"],
         "StartInterval": 300,
+        "RunAtLoad": True,
         "AbandonProcessGroup": True,
         "ProcessType": "Background",
     }

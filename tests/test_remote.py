@@ -75,6 +75,14 @@ OPPO_GETPROP = """\
 [ro.product.model]: [CPH2557]
 [ro.build.version.sdk]: [34]
 """
+# A foldable whose properties name it a tablet.
+FOLD_GETPROP = """\
+[ro.product.device]: [felix_camera]
+[ro.product.manufacturer]: [Google]
+[ro.product.model]: [Pixel Fold]
+[ro.build.version.sdk]: [33]
+[ro.build.characteristics]: [tablet]
+"""
 TECNO_GETPROP = """\
 [ro.product.device]: [TECNO-LJ7]
 [ro.product.manufacturer]: [TECNO]
@@ -226,6 +234,11 @@ def test_the_models_tree_can_have_other_tree_characters():
         ("Pixel Tablet", "tablet"),
         ("Pixel Watch", "watch"),
         ("Table Top", "phone"),
+        ("Pixel Fold (Camera-enabled)", "foldable"),
+        ("Pixel 9 Pro Fold", "foldable"),
+        ("Galaxy Z Fold5", "foldable"),
+        ("Galaxy Z Flip6", "foldable"),
+        ("Galaxy Folder2", "phone"),
     ],
 )
 def test_the_form_comes_from_the_words_of_the_model_name(model, form):
@@ -408,6 +421,16 @@ def test_a_connection_that_banksman_did_not_make_is_mapped_by_the_device(sdk, cl
         "handle": SECOND,
     }
     assert oppo["accounts"] == []
+
+
+def test_a_connected_foldable_stays_a_foldable(sdk, cli, config_path):
+    configure(config_path, sdk, cli)
+    save_catalogue()
+    cli.connected({SECOND: 50068})
+    adb_lists(sdk, [50068], {50068: FOLD_GETPROP})
+    document, _ = remote.discover(kind(), Android(sdk=sdk.sdk, cli=cli.path, cli_state=cli.state))
+    fold = next(each for each in document["instances"] if each["name"] == "felix_camera:33")
+    assert (fold["facts"]["form"], fold["facts"]["running"]) == ("foldable", True)
 
 
 def test_a_device_that_nothing_maps_is_not_offered(sdk, cli, config_path):

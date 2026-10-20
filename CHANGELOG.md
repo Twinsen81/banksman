@@ -553,3 +553,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left the process tree of its agent and for an emulator that the session started. The lease
   schema and the output schema do not change.
 
+- A foldable is no longer a tablet. The `android-emulator` preset gave a foldable AVD, such as
+  the 7.6in Foldable of the AVD manager, the form `tablet`, because unfolded it is as wide as a
+  tablet, so `--where form=tablet` could get a foldable in its folded posture. `form` now has
+  the value `foldable`: for an AVD with a hinge (`hw.sensor.hinge=yes`), and for a model of a
+  remote kind whose name has `Fold` or `Flip`. `form=phone` and `form=tablet` never get a
+  foldable, and `form=foldable` asks for one. The preset of physical devices does not detect a
+  hinge yet. The guide for agents names the values of `form`. The output schema does not
+  change.
+- `banksman admin discover` is readable in a terminal. It shows one table for each kind, with
+  columns for the form, the API level, the image, the model, and the number of accounts, and
+  it leaves out the facts that repeat the name, so a row is about 100 columns instead of more
+  than 200; `--json` still shows every fact. The summary wraps between names, and gives one
+  line for a group of names instead of one line for each: the instances whose accounts are not
+  known, the accounts that are signed in on the same instances, and the allowed instances that
+  are not offered now. That last line no longer says "not found" for a device that is
+  connected but not authorized. The warning about a selected name outside the preselect
+  patterns now comes only for a name that the run selects, with `--all` or by hand, and only
+  when its kind, or `[accounts]`, has patterns, so a name that was allowed before, or an
+  account on a machine without account patterns, gives no warning. A new warning says when
+  an account that agents may not use is signed in on an instance that they may use.
+- The reap job of `banksman admin reap-agent` now also runs when launchd loads it
+  (`RunAtLoad`), so the operator sees it work at once instead of after the first 5 minutes.
+  `banksman admin doctor` asks to save the job again, because it differs from the printed one.

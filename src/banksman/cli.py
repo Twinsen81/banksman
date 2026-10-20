@@ -7,8 +7,10 @@ import contextlib
 import json
 import os
 import select
+import shutil
 import signal
 import sys
+import textwrap
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -43,8 +45,11 @@ from banksman.config import (
     parse_duration,
 )
 from banksman.discovery import (
+    ENDS,
+    HANDLE,
     KIND,
     PAID,
+    FactValue,
     Found,
     Instance,
     discover,
@@ -2859,6 +2864,36 @@ def _cmd_admin_doctor(args: argparse.Namespace) -> int:
     return 1 if doctor.failed(checks) else 0
 
 
+_ALLOWED_BEFORE = "allowed before"
+_REFUSED_BEFORE = "refused before"
+_NEW = "new"
+# What the tables of discover show of what the inventory said before. The JSON keeps the words
+# above.
+_BEFORE = {_ALLOWED_BEFORE: "allowed", _REFUSED_BEFORE: "refused", _NEW: "new"}
+# The facts that discover shows in a column of their own, in this order. The other facts go in
+# the details, except those below.
+_COLUMNS = (("form", "FORM"), ("api", "API"), ("image", "IMAGE"), ("model", "MODEL"))
+_COLUMN_KEYS = frozenset(key for key, _ in _COLUMNS)
+# Facts that the tables leave out, so that a row fits in a terminal: they repeat the name or a
+# column, or they say what the instance does now rather than what it is. --json shows them.
+_LEFT_OUT = frozenset(
+    {
+        KIND,
+        PAID,
+        HANDLE,
+        ENDS,
+        android.INPUT_AGE,
+        "avd",
+        "serial",
+        "running",
+        "display_name",
+        "manufacturer",
+        "codename",
+    }
+)
+_MAX_WIDTH = 100
+
+
 @dataclass
 class _Choice:
     """An instance or an account that discover shows, and whether it is selected."""
@@ -2905,7 +2940,7 @@ def _cmd_admin_discover(args: argparse.Namespace) -> int:
     if not args.json:
         _print_found(found, instances)
     if interactive and instances:
-        _choose(instances, "instances")
+        _choose(instances, "instances", lambda: _print_found(found, instances))
     chosen = [choice for choice in instances if choice.selected]
     hosts: dict[str, list[str]] = {}
     for choice in chosen:
@@ -2922,9 +2957,9 @@ def _cmd_admin_discover(args: argparse.Namespace) -> int:
     ]
     if accounts and not args.json:
         print("\nAccounts on the selected instances:")
-        _print_choices(accounts)
+        _print_accounts(accounts)
     if interactive and accounts:
-        _choose(accounts, "accounts")
+        _choose(accounts, "accounts", lambda: _print_accounts(accounts))
     updated = Inventory(
         kinds={
             **inventory.kinds,
@@ -2956,12 +2991,8 @@ def _cmd_admin_discover(args: argparse.Namespace) -> int:
     outside = [
         choice
         for choice in chosen
-        if not matches(config.kinds[choice.kind].preselect, choice.name)  # type: ignore[index]
-    ] + [
-        choice
-        for choice in accounts
-        if choice.selected and not matches(config.account_preselect, choice.name)
-    ]
+        if _outside(choice, config.kinds[choice.kind].preselect)  # type: ignore[index]
+    ] + [choice for choice in accounts if _outside(choice, config.account_preselect)]
     if not args.json:
         _print_summary(updated, kinds, chosen, accounts, missing, outside)
     write = args.yes or (interactive and _confirm(f"Write {path}?"))
@@ -3075,42 +3106,136 @@ def _renew_catalogue(kind: Kind, config: Config) -> list[str]:
 
 def _before(decisions: Decisions, name: str) -> str:
     if name in decisions.allowed:
-        return "allowed before"
+        return _ALLOWED_BEFORE
     if name in decisions.refused:
-        return "refused before"
-    return "new"
+        return _REFUSED_BEFORE
+    return _NEW
+
+
+def _outside(choice: _Choice, patterns: Sequence[str]) -> bool:
+    """Whether this run selects a name that the preselect patterns do not match.
+
+    Only a kind, or [accounts], with patterns says what it expects. A name that was allowed
+    before is selected because of that decision, not because of this run.
+    """
+    return (
+        choice.selected
+        and choice.before != _ALLOWED_BEFORE
+        and bool(patterns)
+        and not matches(patterns, choice.name)
+    )
 
 
 def _print_found(found: Sequence[Found], instances: Sequence[_Choice]) -> None:
-    for each in found:
-        print(f"Kind {each.kind}: {len(each.instances)} found")
+    """Print one table for each kind. The numbers go on from one table to the next, so that a
+    person switches any instance by its number."""
+    numbered = list(enumerate(instances, 1))
+    for index, each in enumerate(found):
+        rows = [(number, choice) for number, choice in numbered if choice.kind == each.kind]
+        common = _common_facts([_instance(choice) for _, choice in rows])
+        shared = f", each with {_facts_text(common)}" if common else ""
+        if index:
+            print()
+        print(clean(f"Kind {each.kind}: {len(each.instances)} found{shared}"))
         for note in each.notes:
             print(clean(f"  note: {note}"))
-    if instances:
-        print()
-        _print_choices(instances)
+        if rows:
+            _print_instances(rows, common)
 
 
-def _print_choices(choices: Sequence[_Choice]) -> None:
-    rows = []
-    for number, choice in enumerate(choices, 1):
-        mark = "[x]" if choice.selected else "[ ]"
-        if choice.instance is not None:
-            facts = " ".join(
-                f"{key}={value}"
-                for key, value in sorted(choice.instance.facts.items())
-                if key not in (KIND, PAID)
-            )
-            note = f"note: {choice.instance.note}" if choice.instance.note else ""
-            paid = " (paid)" if choice.instance.facts.get(PAID) is True else ""
-            detail = "  ".join(part for part in (f"{choice.kind}{paid}", facts, note) if part)
-        else:
-            detail = "on " + ", ".join(choice.hosts)
-        rows.append([mark, str(number), choice.name, choice.before, detail])
-    _print_table(["", "#", "NAME", "BEFORE", "DETAILS"], rows)
+def _print_instances(rows: Sequence[tuple[int, _Choice]], common: Mapping[str, FactValue]) -> None:
+    instances = [_instance(choice) for _, choice in rows]
+    columns = [
+        (key, title) for key, title in _COLUMNS if any(key in each.facts for each in instances)
+    ]
+    lines = []
+    for (number, choice), instance in zip(rows, instances):
+        details = [
+            f"{key}={_fact_text(value)}"
+            for key, value in sorted(instance.facts.items())
+            if _is_detail(key) and key not in common
+        ]
+        if instance.facts.get(PAID) is True:
+            details.insert(0, "paid")
+        if instance.note:
+            details.append(f"note: {instance.note}")
+        lines.append(
+            [
+                _mark(choice),
+                str(number),
+                choice.name,
+                _BEFORE[choice.before],
+                *(_column_text(instance.facts, key) for key, _ in columns),
+                "?" if instance.accounts is None else str(len(instance.accounts)),
+                "  ".join(details),
+            ]
+        )
+    header = ["", "#", "NAME", "BEFORE", *(title for _, title in columns), "ACCOUNTS", "DETAILS"]
+    if not any(line[-1] for line in lines):
+        header.pop()
+        lines = [line[:-1] for line in lines]
+    _print_table(header, lines)
 
 
-def _choose(choices: list[_Choice], what: str) -> None:
+def _print_accounts(accounts: Sequence[_Choice]) -> None:
+    rows = [
+        [_mark(choice), str(number), choice.name, _BEFORE[choice.before], ", ".join(choice.hosts)]
+        for number, choice in enumerate(accounts, 1)
+    ]
+    _print_table(["", "#", "ACCOUNT", "BEFORE", "ON"], rows)
+
+
+def _instance(choice: _Choice) -> Instance:
+    assert choice.instance is not None
+    return choice.instance
+
+
+def _mark(choice: _Choice) -> str:
+    return "[x]" if choice.selected else "[ ]"
+
+
+def _common_facts(instances: Sequence[Instance]) -> dict[str, FactValue]:
+    """Return the facts of the details that every instance has, with one value, when there are
+    several instances. The title of the table names them once."""
+    if len(instances) < 2:
+        return {}
+    first, *others = instances
+    return {
+        key: value
+        for key, value in sorted(first.facts.items())
+        if _is_detail(key)
+        and all(
+            key in other.facts and _fact_text(other.facts[key]) == _fact_text(value)
+            for other in others
+        )
+    }
+
+
+def _is_detail(key: str) -> bool:
+    return key not in _LEFT_OUT and key not in _COLUMN_KEYS
+
+
+def _column_text(facts: Mapping[str, FactValue], key: str) -> str:
+    if key not in facts:
+        return ""
+    text = _fact_text(facts[key])
+    maker = facts.get("manufacturer")
+    # A device model such as SM-S926B says little without its manufacturer.
+    if key == "model" and isinstance(maker, str) and not text.lower().startswith(maker.lower()):
+        return f"{maker} {text}"
+    return text
+
+
+def _facts_text(facts: Mapping[str, FactValue]) -> str:
+    return " ".join(f"{key}={_fact_text(value)}" for key, value in facts.items())
+
+
+def _fact_text(value: FactValue) -> str:
+    # As a request writes it, for example running=true.
+    return str(value).lower() if isinstance(value, bool) else str(value)
+
+
+def _choose(choices: list[_Choice], what: str, show: Callable[[], None]) -> None:
     numbers = set(range(1, len(choices) + 1))
     while True:
         answer = _ask(
@@ -3132,7 +3257,7 @@ def _choose(choices: list[_Choice], what: str) -> None:
                 continue
             for number in picked:
                 choices[number - 1].selected = not choices[number - 1].selected
-        _print_choices(choices)
+        show()
 
 
 def _print_summary(
@@ -3146,32 +3271,111 @@ def _print_summary(
     print()
     for kind in kinds:
         allowed = updated.kinds.get(kind.name, Decisions()).allowed
-        print(clean(f"Kind {kind.name}: agents may use {_names(allowed)}."))
-    print(clean(f"Accounts: agents may use {_names(updated.accounts.allowed)}."))
-    for choice in chosen:
-        if choice.instance is not None and choice.instance.accounts is None:
-            print(
-                clean(
-                    f"The accounts on {choice.name} are not known, so it is not offered for work"
-                    " that needs an account."
-                )
+        _say(f"Kind {kind.name}: agents may use {_names(allowed)}.")
+    _say(f"Accounts: agents may use {_names(updated.accounts.allowed)}.")
+    for kind_name, names in _by_kind(missing).items():
+        if len(names) == 1:
+            _say(f"{names[0]} (kind {kind_name}) is allowed but not offered now. It stays allowed.")
+        else:
+            _say(
+                f"{_names(names)} (kind {kind_name}) are allowed but not offered now. They stay"
+                " allowed."
             )
+    unknown = _by_kind(
+        (choice.kind, choice.name)
+        for choice in chosen
+        if choice.kind is not None and _instance(choice).accounts is None
+    )
+    for kind_name, names in unknown.items():
+        if len(names) == 1:
+            _say(
+                f"The accounts on {names[0]} are not known, so it is not offered for work that"
+                " needs an account."
+            )
+        else:
+            _say(
+                f"The accounts on {len(names)} instances of kind {kind_name} are not known (? in"
+                " the ACCOUNTS column), so they are not offered for work that needs an account."
+            )
+    shared: dict[tuple[str, ...], list[str]] = {}
     for choice in accounts:
         if choice.selected and len(choice.hosts) > 1:
-            print(
-                clean(
-                    f"Warning: {choice.name} is signed in on {', '.join(choice.hosts)}. Runs that"
-                    " need it wait for each other; give each instance its own account to avoid"
-                    " that."
-                )
+            shared.setdefault(choice.hosts, []).append(choice.name)
+    for hosts, names in shared.items():
+        if len(names) == 1:
+            _say(
+                f"Warning: {names[0]} is signed in on {', '.join(hosts)}. Runs that need it wait"
+                " for each other; give each instance its own account to avoid that."
             )
-    for choice in outside:
-        what = f"the account {choice.name}" if choice.kind is None else (
-            f"{choice.name} (kind {choice.kind})"
+        else:
+            _say(
+                f"Warning: {len(names)} accounts are signed in on {', '.join(hosts)}:"
+                f" {_names(names)}. Runs that need them wait for each other; give each instance"
+                " its own accounts to avoid that."
+            )
+    # Leaving an account out stops banksman from leasing it, not an agent from using the apps
+    # in which it is signed in.
+    refused = {choice.name for choice in accounts if not choice.selected}
+    for choice in chosen:
+        on = [account for account in _instance(choice).accounts or () if account in refused]
+        if on:
+            count, which = (
+                ("1 account that agents may not use is", "that account is")
+                if len(on) == 1
+                else (f"{len(on)} accounts that agents may not use are", "those accounts are")
+            )
+            _say(
+                f"Warning: agents may use {choice.name}, and {count} signed in on it. An agent"
+                f" that holds it can still open the apps in which {which} signed in."
+            )
+    for kind_name, names in _by_kind(
+        (choice.kind, choice.name) for choice in outside if choice.kind is not None
+    ).items():
+        if len(names) == 1:
+            _say(
+                f"Warning: {names[0]} (kind {kind_name}) is selected, but no preselect pattern"
+                " matches it."
+            )
+        else:
+            _say(
+                f"Warning: {_names(names)} (kind {kind_name}) are selected, but no preselect"
+                " pattern matches them."
+            )
+    names = [choice.name for choice in outside if choice.kind is None]
+    if len(names) == 1:
+        _say(f"Warning: the account {names[0]} is selected, but no preselect pattern matches it.")
+    elif names:
+        _say(
+            f"Warning: the accounts {_names(names)} are selected, but no preselect pattern"
+            " matches them."
         )
-        print(clean(f"Warning: {what} is selected, but no preselect pattern matches it."))
-    for kind, name in missing:
-        print(clean(f"{name} (kind {kind}) is allowed but not found now. It stays allowed."))
+
+
+def _by_kind(pairs: Iterable[tuple[str, str]]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for kind, name in pairs:
+        grouped.setdefault(kind, []).append(name)
+    return grouped
+
+
+def _say(text: str) -> None:
+    """Print a sentence of the summary, wrapped between names, so that a long list of names
+    stays readable in a terminal."""
+    print(
+        textwrap.fill(
+            clean(text),
+            _width(),
+            subsequent_indent="  ",
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    )
+
+
+def _width() -> int:
+    if not sys.stdout.isatty():
+        return _MAX_WIDTH
+    return max(40, min(_MAX_WIDTH, shutil.get_terminal_size((_MAX_WIDTH, 24)).columns))
 
 
 def _names(names: Sequence[str]) -> str:

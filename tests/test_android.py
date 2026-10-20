@@ -200,6 +200,14 @@ TABLET = {
     "hw.lcd.density": "320",
 }
 WATCH = {"tag.id": "android-wear", "abi.type": "arm64-v8a"}
+# The 7.6in Foldable of the AVD manager: as wide as a tablet when it is unfolded.
+FOLDABLE = {
+    **TABLET,
+    "hw.lcd.width": "1768",
+    "hw.lcd.height": "2208",
+    "hw.lcd.density": "420",
+    "hw.sensor.hinge": "yes",
+}
 
 
 def test_emulators_are_the_avds_and_a_running_one_has_its_serial_and_accounts(tmp_path):
@@ -255,6 +263,22 @@ def test_emulators_are_the_avds_and_a_running_one_has_its_serial_and_accounts(tm
             },
         },
     ]
+
+
+@pytest.mark.parametrize(
+    ("config", "form"),
+    [
+        (FOLDABLE, "foldable"),
+        ({**FOLDABLE, "hw.sensor.hinge": "no"}, "tablet"),
+        ({**PHONE, "hw.sensor.hinge": "no"}, "phone"),
+    ],
+)
+def test_an_avd_with_a_hinge_is_a_foldable(tmp_path, config, form):
+    home = tmp_path / "avd"
+    write_avd(home, "qa_fold_api36", config)
+    adb = FakeAdb({"devices": "List of devices attached\n"})
+    (instance,) = android.emulators(Android(sdk=SDK, avd_home=home), run=adb)["instances"]
+    assert instance["facts"]["form"] == form
 
 
 def test_an_avd_with_a_relative_path_is_found(tmp_path):

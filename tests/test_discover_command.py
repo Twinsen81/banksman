@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from helpers import hook, write_config
+from helpers import hook, table_rows, write_config
 
 from banksman import cli
 from banksman.cli import main
@@ -44,6 +44,11 @@ def answers(monkeypatch, *replies):
             raise EOFError from None
 
     monkeypatch.setattr("builtins.input", reply)
+
+
+def unwrapped(out):
+    """Return the output with each wrapped sentence of the summary on one line."""
+    return out.replace("\n  ", " ")
 
 
 def run_json(capsys, *arguments):
@@ -130,14 +135,144 @@ def test_a_rescan_cannot_widen_access_to_a_refused_name(capsys, config_path):
 
 
 def test_all_selects_names_outside_the_patterns_and_warns(capsys, config_path):
-    configure(config_path, preselect=["qa_*"])
+    configure(config_path, preselect=["qa_*", "R5CR*"], accounts=["qa-*@example.test"])
     assert main(["admin", "discover", "--yes", "--all"]) == 0
     out = capsys.readouterr().out
     assert (
         "Warning: Pixel_7_API_34 (kind lab) is selected, but no preselect pattern matches it."
         in out
     )
-    assert "Warning: the account someone@example.com is selected" in out
+    assert (
+        "Warning: the account someone@example.com is selected, but no preselect pattern matches"
+        " it." in out
+    )
+
+
+def test_a_name_that_was_allowed_before_needs_no_pattern(capsys, config_path):
+    save_inventory(Inventory(kinds={"lab": Decisions(allowed=("Pixel_7_API_34",))}))
+    configure(config_path, preselect=["qa_*"])
+    assert main(["admin", "discover", "--yes"]) == 0
+    assert "no preselect pattern" not in capsys.readouterr().out
+
+
+def test_without_patterns_nothing_is_outside_them(capsys, config_path):
+    # No pattern of [accounts], as on a machine whose accounts follow no naming rule.
+    configure(config_path, preselect=["*"])
+    shown = run_json(capsys, "--all")
+    assert shown["outside_patterns"] == []
+    assert main(["admin", "discover", "--yes", "--all"]) == 0
+    assert "no preselect pattern" not in capsys.readouterr().out
+
+
+def test_names_outside_the_patterns_are_one_warning(capsys, config_path):
+    configure(config_path, preselect=["qa_*"], accounts=["nobody@*"])
+    assert main(["admin", "discover", "--yes", "--all"]) == 0
+    out = unwrapped(capsys.readouterr().out)
+    assert (
+        "Warning: Pixel_7_API_34, R5CR1234ABC, R5CR5678DEF, R5CR9999XYZ (kind lab) are selected,"
+        " but no preselect pattern matches them." in out
+    )
+    assert (
+        "Warning: the accounts qa-1@example.test, qa-2@example.test, someone@example.com are"
+        " selected, but no preselect pattern matches them." in out
+    )
+
+
+def test_each_kind_has_a_table_with_the_facts_that_matter(capsys, config_path):
+    emulators = [
+        {
+            "name": f"qa_phone_api{api}",
+            "facts": {"avd": f"qa_phone_api{api}", "form": "phone", "api": api, "abi": "x86_64"},
+            "accounts": [],
+        }
+        for api in (34, 35)
+    ]
+    devices = [
+        {
+            "name": "R5CR1234ABC",
+            "facts": {"serial": "R5CR1234ABC", "manufacturer": "samsung", "model": "SM-S926B"},
+            "note": "slow",
+        },
+        {"name": "R5CR5678DEF", "facts": {"model": "Pixel 7", "abi": "arm64-v8a", "rack": 2}},
+    ]
+    text = ""
+    for kind, found in (("lab", emulators), ("rack", devices)):
+        document = json.dumps({"schema": 1, "instances": found})
+        text += f"[kinds.{kind}]\ndiscover = {json.dumps(hook(PRINT_ARGUMENT, document))}\n"
+    write_config(config_path, text + 'preselect = ["*"]\n')
+    assert main(["admin", "discover", "--yes"]) == 0
+    lab, rack = capsys.readouterr().out.split("\n\n")[:2]
+    title, table = lab.split("\n", 1)
+    # A fact that every instance has once, in the title; the AVD name only once, as the name.
+    assert title == "Kind lab: 2 found, each with abi=x86_64"
+    assert list(table_rows(table)[0]) == ["#", "NAME", "BEFORE", "FORM", "API", "ACCOUNTS"]
+    assert [list(row.values()) for row in table_rows(table)] == [
+        ["1", "qa_phone_api34", "new", "phone", "34", "0"],
+        ["2", "qa_phone_api35", "new", "phone", "35", "0"],
+    ]
+    title, table = rack.split("\n", 1)
+    assert title == "Kind rack: 2 found"
+    rows = table_rows(table)
+    assert list(rows[0]) == ["#", "NAME", "BEFORE", "MODEL", "ACCOUNTS", "DETAILS"]
+    assert [list(row.values()) for row in rows] == [
+        ["3", "R5CR1234ABC", "new", "samsung SM-S926B", "?", "note: slow"],
+        ["4", "R5CR5678DEF", "new", "Pixel 7", "?", "abi=arm64-v8a  rack=2"],
+    ]
+    # JSON keeps every fact.
+    facts = {item["name"]: item["facts"] for item in run_json(capsys)["instances"]}
+    assert facts["qa_phone_api34"]["avd"] == "qa_phone_api34"
+    assert facts["R5CR1234ABC"]["serial"] == "R5CR1234ABC"
+
+
+def test_notes_about_many_names_are_one_line_each(capsys, config_path):
+    shared = ["qa-1@example.test", "qa-2@example.test"]
+    found = [
+        {"name": "R5CR1234ABC", "accounts": shared},
+        {"name": "R5CR5678DEF", "accounts": shared},
+        {"name": "qa_phone_api34"},
+        {"name": "qa_phone_api35"},
+    ]
+    configure(config_path, found, preselect=["*"], accounts=["qa-*@example.test"])
+    assert main(["admin", "discover", "--yes"]) == 0
+    out = unwrapped(capsys.readouterr().out)
+    assert out.count("are not known") == 1
+    assert (
+        "The accounts on 2 instances of kind lab are not known (? in the ACCOUNTS column), so"
+        " they are not offered for work that needs an account." in out
+    )
+    assert out.count("signed in on") == 1
+    assert (
+        "Warning: 2 accounts are signed in on R5CR1234ABC, R5CR5678DEF: qa-1@example.test,"
+        " qa-2@example.test." in out
+    )
+
+
+def test_a_long_list_of_names_wraps_between_names(capsys, config_path):
+    names = [f"qa_phone_api{api}" for api in range(21, 37)]
+    configure(config_path, [{"name": name} for name in names], preselect=["*"])
+    assert main(["admin", "discover", "--yes"]) == 0
+    summary = capsys.readouterr().out.split("\n\n")[-1].splitlines()
+    allowed = summary[: summary.index("Accounts: agents may use none.")]
+    assert len(allowed) > 1
+    assert all(len(line) <= 100 for line in allowed)
+    assert all(line.startswith("  ") for line in allowed[1:])
+    assert " ".join(allowed).split() == ["Kind", "lab:", "agents", "may", "use"] + [
+        f"{name}," for name in names[:-1]
+    ] + [f"{names[-1]}."]
+
+
+def test_an_allowed_instance_with_an_account_that_agents_may_not_use_warns(
+    capsys, config_path
+):
+    configure(config_path, preselect=["R5CR1234ABC"], accounts=["qa-*@example.test"])
+    assert main(["admin", "discover", "--yes"]) == 0
+    out = unwrapped(capsys.readouterr().out)
+    # The warning names the device, not the account, which can be personal.
+    assert (
+        "Warning: agents may use R5CR1234ABC, and 1 account that agents may not use is signed in"
+        " on it." in out
+    )
+    assert "that account is signed in" in out
 
 
 def test_a_person_chooses_and_what_they_leave_out_is_refused(
@@ -223,6 +358,12 @@ def test_an_allowed_instance_that_is_not_found_now_stays_allowed(capsys, config_
     shown = run_json(capsys, "--yes")
     assert shown["missing"] == [{"kind": "lab", "name": "unplugged"}]
     assert load_inventory().kinds["lab"].allowed == ("unplugged",)
+    assert main(["admin", "discover", "--yes"]) == 0
+    # Not only an unplugged device: one that is not authorized is not offered either.
+    assert (
+        "unplugged (kind lab) is allowed but not offered now. It stays allowed."
+        in capsys.readouterr().out
+    )
 
 
 def test_a_name_of_another_kind_is_left_out(capsys, config_path):
