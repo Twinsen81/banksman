@@ -275,6 +275,41 @@ def test_an_allowed_instance_with_an_account_that_agents_may_not_use_warns(
     assert "that account is signed in" in out
 
 
+def test_accounts_that_agents_may_not_use_are_counted_for_each_instance(capsys, config_path):
+    configure(config_path, preselect=["R5CR1234ABC"], accounts=["nobody@*"])
+    assert main(["admin", "discover", "--yes"]) == 0
+    assert (
+        "Warning: agents may use R5CR1234ABC, and 2 accounts that agents may not use are signed"
+        " in on it. An agent that holds it can still open the apps in which those accounts are"
+        " signed in." in unwrapped(capsys.readouterr().out)
+    )
+    configure(config_path, preselect=["R5CR*"], accounts=["nobody@*"])
+    assert main(["admin", "discover", "--yes"]) == 0
+    out = unwrapped(capsys.readouterr().out)
+    # One warning for every such instance together, with the number of accounts on each.
+    assert out.count("accounts that agents may not use") == 1
+    assert (
+        "Warning: agents may use 2 instances on which accounts that agents may not use are signed"
+        " in: R5CR1234ABC (2), R5CR5678DEF (2)." in out
+    )
+
+
+def test_the_tables_come_again_after_a_switch_without_the_notes(
+    capsys, config_path, monkeypatch
+):
+    document = json.dumps(
+        {"schema": 1, "instances": [{"name": "a"}], "notes": ["the rack is slow today"]}
+    )
+    write_config(
+        config_path, f"[kinds.lab]\ndiscover = {json.dumps(hook(PRINT_ARGUMENT, document))}\n"
+    )
+    answers(monkeypatch, "1", "", "y")
+    assert main(["admin", "discover"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("Kind lab: 1 found") == 2
+    assert out.count("note: the rack is slow today") == 1
+
+
 def test_a_person_chooses_and_what_they_leave_out_is_refused(
     capsys, config_path, inventory_path, monkeypatch
 ):

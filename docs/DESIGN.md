@@ -493,12 +493,13 @@ A run asks for what it needs, not for a resource by name.
 - **Facts** come from the kind's `discover` hook or preset (section 8), and an agent cannot
   set them: `form` (phone, tablet, foldable, watch, tv), `api`, `image`, `abi`,
   `manufacturer`, `model`, `codename`, `display_name`, `avd`, `serial`, `running` (whether the
-  instance runs now), and, for a remote device, `handle` and `ends`. banksman sets four attributes itself, and a hook
-  cannot set them: `kind`; `paid`, from the kind (section 5); `account`, which is true when an
-  allowed account is signed in on the instance now, false when its accounts are known and none
-  of them is allowed, and missing when its accounts are not known; and `tag`. A foldable is
-  as wide as a tablet when it is unfolded, and as narrow as a phone when it is folded, so it is
-  neither: `form=tablet` and `form=phone` never get one, and `form=foldable` asks for one.
+  instance runs now), and, for a remote device, `handle` and `ends`. banksman sets four
+  attributes itself, and a hook cannot set them: `kind`; `paid`, from the kind (section 5);
+  `account`, which is true when an allowed account is signed in on the instance now, false when
+  its accounts are known and none of them is allowed, and missing when its accounts are not
+  known; and `tag`. A foldable is as wide as a tablet when it is unfolded, and as narrow as a
+  phone when it is folded, so it is neither: `form=tablet` and `form=phone` never get one, and
+  `form=foldable` asks for one.
 - **Tags** come from the operator, who assigns them in the inventory with name patterns
   (section 8). A tag gives no access.
 - A request is an AND of `--where` clauses. The operators are `=`, `!=`, `~` (a glob, with `*`
@@ -892,7 +893,10 @@ holdings apart (section 9).
   and `input_age`, the whole seconds since its last input (see the unused timeout below). The
   `form` comes from the files of the AVD: `watch` or `tv` from the tags of its system image,
   `foldable` when it has a hinge (`hw.sensor.hinge=yes`), and otherwise `tablet` when its
-  smallest width is 600 dp or more, as for the layouts of Android, and `phone` below that. When adb cannot list the running emulators, `running` is left out. An emulator that
+  smallest width is 600 dp or more, as for the layouts of Android, and `phone` below that. The
+  Resizable profile of the AVD manager has a hinge too, because it can change between the
+  postures of a phone, a foldable, and a tablet, so its AVD is `foldable` as well. When adb
+  cannot list the running emulators, `running` is left out. An emulator that
   adb lists as `offline`, because the adb daemon in it has not started yet, for example while
   it boots, runs too: its console gives its AVD name, so its serial is known from the start,
   and its accounts are not known yet. An AVD also runs when a process has the arguments
@@ -1076,8 +1080,9 @@ holdings apart (section 9).
   `Flip`, also with a number such as `Fold5`, gives `foldable`, `Tab` or `Tablet` gives
   `tablet`, `Watch` gives `watch`, and everything else is `phone`. A connected device gives its
   own facts instead, as for the `android-device` preset, except `codename` and `api`, which
-  name the model, and the `form` of a foldable, which stays `foldable`. It also has `running`, `serial`, `handle` (the id of its
-  reservation), and `ends` (when the reservation ends, as a UTC time, when banksman knows it).
+  name the model, and the `form` of a foldable, which stays `foldable`. It also has
+  `running`, `serial`, `handle` (the id of its reservation), and `ends` (when the reservation
+  ends, as a UTC time, when banksman knows it).
 
   **No network in discovery.** `banksman admin discover --kind <kind>` runs
   `android device remote models`, saves the catalogue of models as `<kind>-catalogue.json` in

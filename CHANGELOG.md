@@ -557,10 +557,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the 7.6in Foldable of the AVD manager, the form `tablet`, because unfolded it is as wide as a
   tablet, so `--where form=tablet` could get a foldable in its folded posture. `form` now has
   the value `foldable`: for an AVD with a hinge (`hw.sensor.hinge=yes`), and for a model of a
-  remote kind whose name has `Fold` or `Flip`. `form=phone` and `form=tablet` never get a
-  foldable, and `form=foldable` asks for one. The preset of physical devices does not detect a
-  hinge yet. The guide for agents names the values of `form`. The output schema does not
-  change.
+  remote kind whose name has `Fold` or `Flip`. An AVD of the Resizable profile of the AVD
+  manager has a hinge too, so it is `foldable` as well, and no longer `phone`. `form=phone` and
+  `form=tablet` never get a foldable, and `form=foldable` asks for one. The preset of physical
+  devices does not detect a hinge yet. The guide for agents names the values of `form`. The
+  output schema does not change.
 - `banksman admin discover` is readable in a terminal. It shows one table for each kind, with
   columns for the form, the API level, the image, the model, and the number of accounts, and
   it leaves out the facts that repeat the name, so a row is about 100 columns instead of more

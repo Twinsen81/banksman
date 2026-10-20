@@ -2940,7 +2940,7 @@ def _cmd_admin_discover(args: argparse.Namespace) -> int:
     if not args.json:
         _print_found(found, instances)
     if interactive and instances:
-        _choose(instances, "instances", lambda: _print_found(found, instances))
+        _choose(instances, "instances", lambda: _print_found(found, instances, notes=False))
     chosen = [choice for choice in instances if choice.selected]
     hosts: dict[str, list[str]] = {}
     for choice in chosen:
@@ -3126,9 +3126,12 @@ def _outside(choice: _Choice, patterns: Sequence[str]) -> bool:
     )
 
 
-def _print_found(found: Sequence[Found], instances: Sequence[_Choice]) -> None:
+def _print_found(
+    found: Sequence[Found], instances: Sequence[_Choice], *, notes: bool = True
+) -> None:
     """Print one table for each kind. The numbers go on from one table to the next, so that a
-    person switches any instance by its number."""
+    person switches any instance by its number. Without `notes`, the notes of discovery are
+    left out, as when the tables are printed again after a switch."""
     numbered = list(enumerate(instances, 1))
     for index, each in enumerate(found):
         rows = [(number, choice) for number, choice in numbered if choice.kind == each.kind]
@@ -3137,7 +3140,7 @@ def _print_found(found: Sequence[Found], instances: Sequence[_Choice]) -> None:
         if index:
             print()
         print(clean(f"Kind {each.kind}: {len(each.instances)} found{shared}"))
-        for note in each.notes:
+        for note in each.notes if notes else ():
             print(clean(f"  note: {note}"))
         if rows:
             _print_instances(rows, common)
@@ -3316,18 +3319,29 @@ def _print_summary(
     # Leaving an account out stops banksman from leasing it, not an agent from using the apps
     # in which it is signed in.
     refused = {choice.name for choice in accounts if not choice.selected}
+    exposed: dict[str, int] = {}
     for choice in chosen:
-        on = [account for account in _instance(choice).accounts or () if account in refused]
-        if on:
-            count, which = (
-                ("1 account that agents may not use is", "that account is")
-                if len(on) == 1
-                else (f"{len(on)} accounts that agents may not use are", "those accounts are")
-            )
-            _say(
-                f"Warning: agents may use {choice.name}, and {count} signed in on it. An agent"
-                f" that holds it can still open the apps in which {which} signed in."
-            )
+        count = sum(account in refused for account in _instance(choice).accounts or ())
+        if count:
+            exposed[choice.name] = count
+    if len(exposed) == 1:
+        ((name, count),) = exposed.items()
+        signed_in, which = (
+            ("1 account that agents may not use is", "that account is")
+            if count == 1
+            else (f"{count} accounts that agents may not use are", "those accounts are")
+        )
+        _say(
+            f"Warning: agents may use {name}, and {signed_in} signed in on it. An agent that"
+            f" holds it can still open the apps in which {which} signed in."
+        )
+    elif exposed:
+        listed = ", ".join(f"{name} ({count})" for name, count in exposed.items())
+        _say(
+            f"Warning: agents may use {len(exposed)} instances on which accounts that agents may"
+            f" not use are signed in: {listed}. An agent that holds one of them can still open"
+            " the apps in which those accounts are signed in."
+        )
     for kind_name, names in _by_kind(
         (choice.kind, choice.name) for choice in outside if choice.kind is not None
     ).items():

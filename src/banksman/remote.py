@@ -575,7 +575,9 @@ def discover(
             serial, handle, found = running[name]
             # The codename and the API level name the model in the catalogue, so they stay. The
             # properties of a foldable can name it a tablet, and it stays a foldable.
-            kept = ("codename", "api", *(["form"] if facts.get("form") == android.FOLDABLE else []))
+            kept = {"codename", "api"}
+            if facts.get("form") == android.FOLDABLE:
+                kept.add("form")
             facts.update({key: value for key, value in found.items() if key not in kept})
             facts.update(serial=serial, handle=handle)
             session = sessions.get(handle)
