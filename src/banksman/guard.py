@@ -6,7 +6,8 @@ the wrapper runs adb itself, so that a banksman that cannot start never blocks a
 decides from the lease files, without the lock, without reaping, and without discovery. It reads
 the process list and runs `adb devices` only when a decision needs them, because it runs before
 every adb call, and a UI test makes many. It writes to the log only when it refuses a call, or
-lets a call run with a warning. It takes the lock of the lease store only then, and when a call
+lets a call run with a warning, and reads the inventory only then, for the name of a device
+without a lease. It takes the lock of the lease store only then, and when a call
 of the holder touches the lease of its device, which is due about once a minute. While the
 operator has turned the trace on, it adds a line to the trace for every call, without the lock.
 For `adb devices`, it also tells an agent which devices are its own, so it reads the lease files
@@ -27,6 +28,7 @@ import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
+from typing import TYPE_CHECKING
 
 from banksman import android, trace
 from banksman.android import Transport
@@ -68,6 +70,9 @@ from banksman.store import (
     peek,
 )
 from banksman.system import Machine, Process, System
+
+if TYPE_CHECKING:
+    from banksman.inventory import Inventory
 
 # The status of `check` for a lost lease: the caller must not use the device.
 EXIT_REFUSED = 3
@@ -834,7 +839,18 @@ def _every_device_refused(call: Call, caller: Caller, others: Sequence[Lease]) -
 
 def record(verdict: Verdict) -> None:
     """Add the events of a refused or warned call to the log, under the lock of the lease store."""
-    found = events(verdict, verdict.caller.holder(), verdict.caller.system.wall_clock())
+    inventory = None
+    if not verdict.leases and verdict.serial is not None:
+        # Only an event without a lease needs the inventory, so the guard does not import it
+        # before every adb call. An inventory that cannot be read only leaves the serial as the
+        # resource.
+        from banksman.inventory import load_inventory
+
+        with contextlib.suppress(BanksmanError, OSError):
+            inventory = load_inventory()
+    found = events(
+        verdict, verdict.caller.holder(), verdict.caller.system.wall_clock(), inventory
+    )
     if not found:
         return
     history = History(default_log_path())
@@ -843,21 +859,26 @@ def record(verdict: Verdict) -> None:
             history.append(event)
 
 
-def events(verdict: Verdict, caller: Holder, at: float) -> list[Event]:
+def events(
+    verdict: Verdict, caller: Holder, at: float, inventory: Inventory | None = None
+) -> list[Event]:
     """Return the events of a refused or warned call, with the caller as the holder.
 
     A command for every device has one event for each device of another holder that it would
     break, so that the history of that device shows who tried. The events have the words of the
-    command only, never the rest of the command line.
+    command only, never the rest of the command line. Without a lease, the resource is the name
+    of the device in the inventory when the inventory lists it, or else the serial.
     """
     command = verdict.command if COMMAND.fullmatch(verdict.command) else None
 
-    def event(resource: str, lease: Lease | None, serial: str | None) -> Event:
+    def event(
+        resource: str, lease: Lease | None, serial: str | None, kind: str | None = None
+    ) -> Event:
         return Event(
             at,
             GUARD,
             resource,
-            kind=None if lease is None else lease.kind,
+            kind=kind if lease is None else lease.kind,
             lease_id=None if lease is None else lease.lease_id,
             state=None if lease is None else lease.state,
             owner=caller.owner,
@@ -878,7 +899,27 @@ def events(verdict: Verdict, caller: Holder, at: float) -> list[Event]:
     serial = verdict.serial if verdict.serial and RESOURCE_NAME.fullmatch(verdict.serial) else None
     if verdict.leases:
         return [event(verdict.leases[0].resource, verdict.leases[0], serial)]
-    return [] if serial is None else [event(serial, None, serial)]
+    if serial is None:
+        return []
+    name, kind = _inventory_name(serial, inventory)
+    return [event(name, None, serial, kind)]
+
+
+def _inventory_name(serial: str, inventory: Inventory | None) -> tuple[str, str | None]:
+    """Return the name and the kind of the device with this serial in the inventory, or the serial
+    and None when the inventory does not list it.
+
+    The name of a physical device is its serial number, as for its lease: its serial over USB,
+    and a part of its serial over Wi-Fi. The part after the serial number changes when wireless
+    debugging is reset, so without the name, the calls of one device would have several
+    resources.
+    """
+    if inventory is not None:
+        for name in (android.mdns_serial_number(serial) or serial, serial):
+            kind = inventory.kind_of(name)
+            if kind is not None:
+                return name, kind
+    return serial, None
 
 
 def _holder(lease: Lease) -> str:

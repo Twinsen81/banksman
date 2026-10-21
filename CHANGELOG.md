@@ -591,3 +591,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upgrade, and then remove it from the inventory: after the upgrade, a lease of it does not keep
   another holder from a lease of the same device under its serial number. The lease schema and
   the output schema do not change.
+- A guard event of a physical device without a lease names the device as the inventory does.
+  Its resource was the serial, without a kind, so the calls of a tablet over Wi-Fi, with a
+  serial such as `adb-R5CR1234ABC-aYi6h4._adb-tls-connect._tcp`, had a resource of their own
+  for each such serial, and never one with its calls over USB. When the inventory lists the
+  serial number, allowed or refused, the resource is now `R5CR1234ABC` and the kind is the kind
+  that lists it, also over USB. `banksman log --count` and `banksman held` also no longer
+  group the events by serial, so one device is one line, and the line shows every serial of
+  its calls. The JSON of a group has them in the new field `serials`, and `serial` is the serial
+  of its last event. The events that are in the log already do not change. The output schema
+  does not change.

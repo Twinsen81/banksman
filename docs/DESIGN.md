@@ -1338,11 +1338,14 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   release events, with the holder, and the `guard` events of the adb calls that the adb guard
   refused or let run with a warning (section 12). With `--since` and `--resource`, it answers
   "who held this device at 3 a.m.?". `--event` shows only the events of one kind, and
-  `--count` groups the events by event, action, reason, resource, serial, worktree, and agent,
-  and shows how many each group has, when the first and the last happened, and the adb commands
-  of a group of guard events. So `banksman log --event guard --count` lists the flows that still
-  use devices without banksman, one line for each worktree, agent, and device, however many
-  adb calls they make. A release and a void record how long the lease was held and the longest
+  `--count` groups the events by event, action, reason, resource, worktree, and agent, and
+  shows how many each group has, when the first and the last happened, and the adb commands and
+  the serials of a group of guard events. So `banksman log --event guard --count` lists the
+  flows that still use devices without banksman, one line for each worktree, agent, and device,
+  however many adb calls they make. The serial does not make a group of its own: a physical
+  device has one serial over USB and another over Wi-Fi, and an emulator gets another serial
+  when it starts again. The JSON of a group has its serials in `serials`, and the serial of its
+  last event in `serial`. A release and a void record how long the lease was held and the longest
   time between two touches, both in awake time. They are the data for tuning the hard cap and
   the idle timeout. Behind the adb guard, a device call of the holder is a touch too
   (section 12), so for such a holder the longest time between two touches is the longest time
@@ -1747,7 +1750,12 @@ is a setup of the operator, and a project needs nothing for it.
   is `not_leased`, `other_holder`, `lost`, `unreadable`, or `every_device`. Its holder is the
   caller: its worktree, its agent and the pid of the agent, its issue, and its session, as
   `acquire` would record them. Its resource, kind, state, and lease id are those of the lease of
-  the device; without a lease, the resource is the serial. Its `command` has only the words that
+  the device. Without a lease, the resource is the name of the device in the inventory, allowed
+  or refused, and the kind is the kind that lists it: the serial over USB, or the serial number
+  in a serial that adb found by mDNS (section 8). So the calls of a device over USB and over
+  Wi-Fi have one resource, also after the serial over Wi-Fi changes. The guard reads the
+  inventory only for such an event. When the inventory does not list the device, or cannot be
+  read, the resource is the serial, without a kind. Its `command` has only the words that
   name the adb command, such as `shell` or `forward --remove-all`, and only when adb knows the
   command; it never has the rest of the command line, because the arguments are untrusted
   text, and an `adb shell` line can carry tokens. A word in the place of the command can carry
