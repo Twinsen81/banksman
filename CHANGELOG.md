@@ -577,3 +577,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The reap job of `banksman admin reap-agent` now also runs when launchd loads it
   (`RunAtLoad`), so the operator sees it work at once instead of after the first 5 minutes.
   `banksman admin doctor` asks to save the job again, because it differs from the printed one.
+- A device that adb reaches over Wi-Fi is the same device as over USB. The `android-device`
+  preset named a device by its adb serial, so a tablet over Wi-Fi after `adb pair`, with a
+  serial such as `adb-R5CR1234ABC-aYi6h4._adb-tls-connect._tcp`, was a new device that the
+  inventory did not allow, and the allowed `R5CR1234ABC` was not present. A name over Wi-Fi
+  that the operator allowed was a second resource of the same device, which two holders could
+  lease while it was also connected over USB. The preset now names a device by its serial
+  number, the property `ro.serialno`, which adb uses as the serial over USB, so a device over
+  USB and over Wi-Fi is one instance, and its serial is the one over USB while it has one. A
+  connection over the network whose serial number cannot be read is not offered. The adb guard
+  also finds the lease of a device by the serial number in its serial over Wi-Fi. A name over
+  Wi-Fi in the inventory is no longer discovered. Release the leases of such a name before the
+  upgrade, and then remove it from the inventory: after the upgrade, a lease of it does not keep
+  another holder from a lease of the same device under its serial number. The lease schema and
+  the output schema do not change.
