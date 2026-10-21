@@ -121,6 +121,111 @@ def test_a_port_forward_is_not_offered_as_a_device():
     assert adb.commands == [["devices"]]
 
 
+# The serial that adb gives the device R5CR1234ABC over Wi-Fi after `adb pair`.
+WIFI = "adb-R5CR1234ABC-aYi6h4._adb-tls-connect._tcp"
+SERIAL_NUMBER = "[ro.serialno]: [R5CR1234ABC]\n"
+
+
+def test_a_device_over_usb_and_wifi_is_one_instance_with_the_serial_over_usb():
+    adb = FakeAdb(
+        {
+            "devices": f"List of devices attached\n{WIFI}\tdevice\nR5CR1234ABC\tdevice\n",
+            f"-s {WIFI} shell getprop": SERIAL_NUMBER,
+            "-s R5CR1234ABC shell getprop": SERIAL_NUMBER + GETPROP,
+            "-s R5CR1234ABC shell dumpsys account": "  Accounts: 0\n",
+        }
+    )
+    document = android.devices(Android(sdk=SDK), run=adb)
+    (instance,) = document["instances"]
+    assert instance["name"] == "R5CR1234ABC"
+    assert instance["facts"]["serial"] == "R5CR1234ABC"
+    assert instance["facts"]["model"] == "SM-S926B"
+    assert document["notes"] == []
+    assert adb.commands == [
+        ["devices"],
+        ["-s", WIFI, "shell", "getprop"],
+        ["-s", "R5CR1234ABC", "shell", "getprop"],
+        ["-s", "R5CR1234ABC", "shell", "dumpsys", "account"],
+    ]
+
+
+@pytest.mark.parametrize("serial", [WIFI, "192.0.2.7:37123"])
+def test_a_device_over_wifi_only_is_named_by_its_serial_number(serial):
+    adb = FakeAdb(
+        {
+            "devices": f"List of devices attached\n{serial}\tdevice\n",
+            f"-s {serial} shell getprop": SERIAL_NUMBER + GETPROP,
+            f"-s {serial} shell dumpsys account": "  Accounts: 0\n",
+        }
+    )
+    (instance,) = android.devices(Android(sdk=SDK), run=adb)["instances"]
+    assert instance["name"] == "R5CR1234ABC"
+    assert instance["facts"]["serial"] == serial
+    assert instance["facts"]["model"] == "SM-S926B"
+
+
+def test_a_device_over_the_network_without_a_serial_number_is_not_offered():
+    adb = FakeAdb(
+        {
+            "devices": f"List of devices attached\n{WIFI}\tdevice\n192.0.2.7:37123\tdevice\n",
+            "-s 192.0.2.7:37123 shell getprop": GETPROP,
+        }
+    )
+    document = android.devices(Android(sdk=SDK), run=adb)
+    assert document["instances"] == []
+    assert document["notes"] == [
+        f"{serial} is a connection over the network without a serial number that banksman can"
+        " read, so it is not offered"
+        for serial in (WIFI, "192.0.2.7:37123")
+    ]
+
+
+def test_a_device_over_usb_keeps_its_serial_as_its_name_without_a_valid_serial_number():
+    adb = FakeAdb(
+        {
+            "devices": "List of devices attached\nR5CR1234ABC\tdevice\n",
+            "-s R5CR1234ABC shell getprop": "[ro.serialno]: [not a name]\n",
+        }
+    )
+    (instance,) = android.devices(Android(sdk=SDK), run=adb, accounts=False)["instances"]
+    assert instance["name"] == "R5CR1234ABC"
+
+
+@pytest.mark.parametrize(
+    ("serial", "number"),
+    [
+        (WIFI, "R5CR1234ABC"),
+        (WIFI + ".", "R5CR1234ABC"),
+        # After adb tcpip, the name has no random characters.
+        ("adb-R5CR1234ABC._adb._tcp", "R5CR1234ABC"),
+        ("adb-R5CR1234ABC._adb._tcp.", "R5CR1234ABC"),
+        ("adb-0A1B-2C3D._adb._tcp", "0A1B-2C3D"),
+        ("adb-0A1B-2C3D-Zz09aB._adb-tls-connect._tcp", "0A1B-2C3D"),
+        ("adb-R5CR1234ABC-aYi6h._adb-tls-connect._tcp", None),
+        ("adb-R5CR1234ABC-aYi6h4._adb-tls-pairing._tcp", None),
+        ("R5CR1234ABC", None),
+        ("192.0.2.7:37123", None),
+    ],
+)
+def test_the_serial_number_in_a_serial_that_adb_found_by_mdns(serial, number):
+    assert android.mdns_serial_number(serial) == number
+
+
+@pytest.mark.parametrize(
+    ("serial", "network"),
+    [
+        (WIFI, True),
+        ("adb-R5CR1234ABC._adb._tcp", True),
+        ("192.0.2.7:37123", True),
+        ("[2001:db8::7]:37123", True),
+        ("R5CR1234ABC", False),
+        ("emulator-5554", False),
+    ],
+)
+def test_a_serial_over_the_network(serial, network):
+    assert android.network(serial) is network
+
+
 def test_a_remote_device_keeps_a_form_that_its_properties_do_not_name():
     adb = FakeAdb({"-s localhost:49920 shell getprop": "[ro.product.device]: [gts9wifi]\n"})
     settings = Android(sdk=SDK)

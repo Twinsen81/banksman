@@ -12,6 +12,22 @@ from banksman.system import Machine, MachineError, Process, started_no_later
 # These tests read the real machine: its boot id, its clock, and processes that the tests
 # start themselves. They change nothing.
 
+# A child that says when it runs its own program, and then waits.
+SLEEPER = "import time; print(flush=True); time.sleep(30)"
+
+
+def running_child(*arguments, **options):
+    """Start a child that waits, and return it when it runs its own program.
+
+    Popen returns when exec closes a pipe of the child, and on Linux, the command line and the
+    environment of the new program can be read only later in exec.
+    """
+    child = subprocess.Popen(
+        [sys.executable, "-c", SLEEPER, *arguments], stdout=subprocess.PIPE, **options
+    )
+    child.stdout.readline()
+    return child
+
 
 def test_the_boot_id_is_stable():
     boot_id = Machine().boot_id()
@@ -239,16 +255,13 @@ def _wait_until_zombie(pid):
 
 
 def test_the_command_lines_have_each_argument_as_the_process_got_it():
-    child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)", "one argument", ""],
-    )
-    try:
-        process = Machine().commands()[child.pid]
-        assert process.arguments[1:] == ("-c", "import time; time.sleep(30)", "one argument", "")
-        assert process.started == Machine().running([child.pid])[child.pid]
-    finally:
-        child.kill()
-        child.wait()
+    with running_child("one argument", "") as child:
+        try:
+            process = Machine().commands()[child.pid]
+            assert process.arguments[1:] == ("-c", SLEEPER, "one argument", "")
+            assert process.started == Machine().running([child.pid])[child.pid]
+        finally:
+            child.kill()
 
 
 def test_the_arguments_of_procargs2():
@@ -260,18 +273,15 @@ def test_the_arguments_of_procargs2():
 
 
 def test_the_environment_of_a_process_of_the_same_user():
-    child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)"],
-        env={**os.environ, "BANKSMAN_TEST_VALUE": "two words", "BANKSMAN_TEST_EMPTY": ""},
-    )
-    try:
-        environment = Machine().environment(child.pid)
-        assert environment is not None
-        assert environment["BANKSMAN_TEST_VALUE"] == "two words"
-        assert environment["BANKSMAN_TEST_EMPTY"] == ""
-    finally:
-        child.kill()
-        child.wait()
+    env = {**os.environ, "BANKSMAN_TEST_VALUE": "two words", "BANKSMAN_TEST_EMPTY": ""}
+    with running_child(env=env) as child:
+        try:
+            environment = Machine().environment(child.pid)
+            assert environment is not None
+            assert environment["BANKSMAN_TEST_VALUE"] == "two words"
+            assert environment["BANKSMAN_TEST_EMPTY"] == ""
+        finally:
+            child.kill()
 
 
 def test_the_environment_of_an_ended_process_cannot_be_read():

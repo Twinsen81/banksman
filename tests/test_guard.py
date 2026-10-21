@@ -375,6 +375,29 @@ def test_a_physical_device_is_found_by_its_name_in_every_state(store, system, st
     )
 
 
+# The serial that adb gives the device R5CR1234ABC over Wi-Fi after `adb pair`.
+WIFI = "adb-R5CR1234ABC-aYi6h4._adb-tls-connect._tcp"
+
+
+def test_a_physical_device_over_wifi_is_found_by_the_serial_number_in_its_serial(store, system):
+    # The lease records the serial over USB, and the device is also connected over Wi-Fi.
+    lease(store, system, "R5CR1234ABC", other(), serial="R5CR1234ABC", kind="device")
+    assert check(system, "-s", WIFI, "install", "app.apk").startswith(
+        f"adb install: refused: another holder leases {WIFI} (R5CR1234ABC), and the lease is ready"
+    )
+    devices = listing(Transport(WIFI, "device", transport_id="5"))
+    assert "another holder" in check(system, "-e", "shell", adb=devices)
+    assert check(system, "-s", "adb-R5CR9999XYZ-aYi6h4._adb-tls-connect._tcp", "shell") is None
+
+
+def test_a_lease_of_the_name_over_wifi_from_an_earlier_banksman_keeps_its_device(store, system):
+    # An earlier banksman named the device by its serial over Wi-Fi. Discovery now gives that
+    # serial to the device under its serial number, and the old lease loses it.
+    lease(store, system, WIFI, other(), kind="device")
+    lease(store, system, "R5CR1234ABC", mine(), serial=WIFI, kind="device")
+    assert f"another holder leases {WIFI}" in check(system, "-s", WIFI, "shell")
+
+
 def test_the_old_serial_of_a_quarantined_lease_gives_way_to_a_held_lease(
     store, system, state_dir
 ):
@@ -597,6 +620,11 @@ def test_strict_refuses_a_device_that_no_lease_of_the_caller_has(store, system, 
 def test_strict_passes_the_device_of_the_caller(store, system, strict):
     lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
     assert check(system, "-s", "emulator-5554", "shell") is None
+
+
+def test_strict_passes_the_device_of_the_caller_also_over_wifi(store, system, strict):
+    lease(store, system, "R5CR1234ABC", mine(), serial="R5CR1234ABC", kind="device")
+    assert check(system, "-s", WIFI, "shell") is None
 
 
 def test_strict_passes_a_person(store, system, strict):

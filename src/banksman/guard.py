@@ -779,10 +779,13 @@ def _leases_of(serial: str, devices: Snapshot) -> tuple[list[Lease], list[Unread
     by_serial = held or [
         lease for lease in devices.leases if lease.state not in HELD and lease.serial == serial
     ]
-    # The name of a physical device is its serial.
-    named = [lease for lease in devices.leases if lease.resource == serial]
+    # The name of a physical device is its serial number: its serial over USB, and a part of its
+    # serial over Wi-Fi after `adb pair`. So a lease that records the serial over USB also has the
+    # device over Wi-Fi.
+    names = {serial, android.mdns_serial_number(serial) or serial}
+    named = [lease for lease in devices.leases if lease.resource in names]
     leases = by_serial + [lease for lease in named if lease not in by_serial]
-    return leases, [entry for entry in devices.unreadable if entry.resource == serial]
+    return leases, [entry for entry in devices.unreadable if entry.resource in names]
 
 
 def _not_leased(call: Call, caller: Caller, serial: str, *, refuse: bool) -> Verdict:

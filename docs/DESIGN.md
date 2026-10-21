@@ -918,8 +918,17 @@ holdings apart (section 9).
   not read the device name in the settings, which a person can change and which often
   holds a personal name. The `form` is `tablet`, `watch`, or `tv` when the property
   `ro.build.characteristics` names it, and `phone` otherwise. The preset does not detect the
-  hinge of a physical foldable, so a physical foldable is `phone` or `tablet`. A device that is
-  not authorized is reported, not offered. A device whose serial starts with `localhost:` is a
+  hinge of a physical foldable, so a physical foldable is `phone` or `tablet`. The name of a
+  device is its serial number, the property `ro.serialno`, which adb uses as the serial over
+  USB. Over Wi-Fi, adb gives the device another serial: `adb-<serial number>-<6
+  characters>._adb-tls-connect._tcp` after `adb pair`, or `<host>:<port>` after `adb connect`.
+  So a device over USB and over Wi-Fi is one instance, and its `serial` is the one over USB
+  while it has one, because USB is faster and does not depend on the network. A device over USB
+  whose properties cannot be read keeps its serial as its name. A connection over the network
+  whose serial number cannot be read is reported, not offered: it can be a second connection to
+  a device that is listed already, and two instances of one device would let two holders lease
+  it. A device that is not authorized is reported, not offered. A device whose serial starts
+  with `localhost:` is a
   port forward, such as a remote device, and gets another port on every connection, so this
   preset reports it and does not offer it; the `android-remote` preset offers it. The presets use the SDK in `~/Library/Android/sdk`
   on macOS and in `~/Android/Sdk` on Linux, and the AVDs in `~/.android/avd`. The `sdk` and
@@ -1599,7 +1608,10 @@ is a setup of the operator, and a project needs nothing for it.
 - **The lease of the device.** A held lease that records the serial; a lease in another state
   that records it, while no held lease records it, because discovery keeps the serial up to
   date in held leases only (section 3); and a lease in any state whose resource is the serial,
-  as for a physical device. A lease file that cannot be read keeps its device out of use.
+  as for a physical device over USB, or the serial number in a serial that adb found by mDNS, as
+  over Wi-Fi after `adb pair` (section 8). So the lease of a device that records its serial over
+  USB also has the device over Wi-Fi. A lease file that cannot be read keeps its device out of
+  use.
 - **Who may use the device.** The call runs when one of these is true:
   - The caller has no agent process (section 9): none is above it, and its environment names
     none, for example for a person in a terminal.
@@ -1812,7 +1824,9 @@ is a setup of the operator, and a project needs nothing for it.
   adb server itself, such as the connected tests of the Android Gradle plugin, for which the
   `ANDROID_SERIAL` of `banksman run` names the leased device (section 4); and the emulator
   console. A second connection to an emulator, with `adb connect` to its adb port, has another
-  serial, and the guard does not know that it is the same device. A process that has no agent
+  serial, and the guard does not know that it is the same device. The same is true for a
+  physical device over USB that also has a connection of `adb connect <host>:<port>`, while its
+  lease records the serial over USB. A process that has no agent
   process passes as a person's, for example a task that a Gradle daemon runs after an earlier
   build started the daemon, when the pid variable of an agent does not reach the task. A
   process that keeps the pid variable of another agent, such as a daemon that a command of that

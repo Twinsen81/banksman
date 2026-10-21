@@ -20,6 +20,7 @@ from typing import Any
 
 from banksman.config import Android
 from banksman.errors import BanksmanError
+from banksman.lease import RESOURCE_NAME
 
 ADB_TIMEOUT_SECONDS = 15.0
 DISCOVER_SCHEMA = 1
@@ -49,6 +50,13 @@ _EMULATOR_PREFIX = "emulator-"
 # The serial of a device that a program forwards to the adb server from a port on this machine,
 # such as a remote device of Android Device Streaming.
 FORWARDED_PREFIX = "localhost:"
+# The serial of a device that adb found by mDNS: the name that the adb daemon gives its service,
+# and the type of the service. After `adb pair` for wireless debugging, the name is
+# adb-<serial number>-<6 random characters>, which the daemon keeps until wireless debugging is
+# reset. After `adb tcpip`, it is adb-<serial number>.
+_MDNS = re.compile(
+    r"adb-(?:(?P<paired>.+)-[A-Za-z0-9]{6}\._adb-tls-connect|(?P<tcpip>.+)\._adb)\._tcp\.?"
+)
 _PROPERTY = re.compile(r"^\[([^\]]+)\]: \[(.*)\]$")
 _ACCOUNTS_HEADER = re.compile(r"^\s*Accounts: [0-9]+\s*$")
 _ACCOUNT = re.compile(r"^\s*Account \{name=(?P<name>.*), type=(?P<type>[^,}]*)\}\s*$")
@@ -189,7 +197,11 @@ def version(settings: Android, run: Run | None = None) -> str:
 
 
 def devices(settings: Android, run: Run | None = None, *, accounts: bool = True) -> Document:
-    """Find the attached physical devices, with their facts and their accounts."""
+    """Find the attached physical devices, with their facts and their accounts.
+
+    A device is named by its serial number, so a device that adb reaches over USB and over Wi-Fi
+    is one instance. Its serial is the one over USB while it has one.
+    """
     run = run_program if run is None else run
     adb = adb_path(settings)
     notes: list[str] = []
@@ -198,7 +210,8 @@ def devices(settings: Android, run: Run | None = None, *, accounts: bool = True)
     except AndroidError as exc:
         notes.append(f"cannot list the devices: {exc}")
         return {"schema": DISCOVER_SCHEMA, "instances": [], "notes": notes}
-    instances = []
+    # The serial and the properties of each connection to each device, or why they cannot be read.
+    connections: dict[str, list[tuple[str, str | None, str | None]]] = {}
     for serial, state in listed:
         if serial.startswith(_EMULATOR_PREFIX):
             continue
@@ -213,11 +226,29 @@ def devices(settings: Android, run: Run | None = None, *, accounts: bool = True)
         if state != "device":
             notes.append(f"{serial} is {state}, so it is not offered")
             continue
-        instance: Document = {"name": serial, "facts": {"serial": serial, "running": True}}
+        getprop: str | None = None
+        failure: str | None = None
         try:
             getprop = run(_adb(adb, serial, "shell", "getprop"), ADB_TIMEOUT_SECONDS)
         except AndroidError as exc:
-            instance["note"] = f"cannot read the properties: {exc}"
+            failure = f"cannot read the properties: {exc}"
+        name = _device_name(serial, getprop)
+        if name is None:
+            # It could be a second connection to a device that is listed already, and two
+            # instances of one device would let two holders lease it.
+            notes.append(
+                f"{serial} is a connection over the network without a serial number that banksman"
+                " can read, so it is not offered"
+            )
+            continue
+        connections.setdefault(name, []).append((serial, getprop, failure))
+    instances = []
+    for name, reached in connections.items():
+        # USB first: it is faster than Wi-Fi, and it stays while the network changes.
+        serial, getprop, failure = min(reached, key=lambda connection: network(connection[0]))
+        instance: Document = {"name": name, "facts": {"serial": serial, "running": True}}
+        if getprop is None:
+            instance["note"] = failure
         else:
             instance["facts"].update(_device_facts(getprop))
         if accounts:
@@ -227,6 +258,18 @@ def devices(settings: Android, run: Run | None = None, *, accounts: bool = True)
             instance.update(found)
         instances.append(instance)
     return {"schema": DISCOVER_SCHEMA, "instances": instances, "notes": notes}
+
+
+def network(serial: str) -> bool:
+    """Whether adb reaches the device with this serial over the network: a host and a port, or
+    a service that adb found by mDNS."""
+    return ":" in serial or _MDNS.fullmatch(serial) is not None
+
+
+def mdns_serial_number(serial: str) -> str | None:
+    """Return the serial number of the device in a serial that adb found by mDNS, or None."""
+    match = _MDNS.fullmatch(serial)
+    return None if match is None else match["paired"] or match["tcpip"]
 
 
 def describe(
@@ -436,6 +479,19 @@ def _input_age(run: Run, adb: str, serial: str) -> int | None:
     except AndroidError:
         return None
     return parse_input_age(output)
+
+
+def _device_name(serial: str, getprop: str | None) -> str | None:
+    """Return the name of a device: its serial number, or None when a device that adb reaches over
+    the network has none that is a valid resource name.
+
+    Over USB, adb uses the serial number as the serial, so a device over USB keeps its serial as
+    its name when its properties cannot be read.
+    """
+    number = "" if getprop is None else parse_properties(getprop).get("ro.serialno", "")
+    if RESOURCE_NAME.fullmatch(number):
+        return number
+    return None if network(serial) else serial
 
 
 def _device_facts(getprop: str, form: str | None = "phone") -> Document:
