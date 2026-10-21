@@ -88,6 +88,7 @@ COUNT = {
     "reason": TEXT,
     "resource": str,
     "serial": TEXT,
+    "serials": [str],
     "owner": TEXT,
     "agent": TEXT,
     "commands": [str],

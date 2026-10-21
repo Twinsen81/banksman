@@ -21,7 +21,7 @@ import pytest
 import shapes
 from helpers import NOT_ENDED, SRC, FakeSystem, drain, edit_lease, write_config
 
-from banksman import android, cli, guard
+from banksman import android, cli, guard, inventory
 from banksman import store as store_module
 from banksman.android import Transport
 from banksman.config import load_config
@@ -1144,6 +1144,36 @@ def test_a_warned_call_is_in_the_log_with_the_caller(machine, system, warn, work
     ]
 
 
+def test_a_call_without_a_lease_names_the_device_as_the_inventory_does(
+    machine, system, warn, worktree, log_path, inventory_path
+):
+    # The serial over Wi-Fi changes when wireless debugging is reset, and the serial number in it
+    # does not. A refused name is a name of the inventory too.
+    inventory_path.write_text(
+        '[kinds.device]\nallowed = ["R5CR1234ABC"]\nrefused = ["R5CR5678DEF"]\n'
+    )
+    unknown = "adb-R5CR9999XYZ-aYi6h4._adb-tls-connect._tcp"
+    for serial in ("R5CR1234ABC", WIFI, "R5CR5678DEF", unknown, "emulator-5556"):
+        assert guarded("-s", serial, "shell") == 0
+    assert [(event.resource, event.kind, event.serial) for event in logged(log_path)] == [
+        ("R5CR1234ABC", "device", "R5CR1234ABC"),
+        ("R5CR1234ABC", "device", WIFI),
+        ("R5CR5678DEF", "device", "R5CR5678DEF"),
+        (unknown, None, unknown),
+        ("emulator-5556", None, "emulator-5556"),
+    ]
+
+
+def test_an_inventory_that_cannot_be_read_leaves_the_serial_as_the_resource(
+    machine, system, warn, worktree, log_path, inventory_path, capsys
+):
+    inventory_path.write_text("[kinds.device\n")
+    assert guarded("-s", WIFI, "shell") == 0
+    (event,) = logged(log_path)
+    assert (event.resource, event.kind, event.serial) == (WIFI, None, WIFI)
+    assert "not in the log" not in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("mode", [None, "true", '"warn"'])
 def test_a_refused_call_is_in_the_log_in_every_mode(
     machine, store, system, config_path, worktree, log_path, mode
@@ -1244,11 +1274,16 @@ def test_a_serial_that_is_not_a_valid_name_is_not_in_the_log(system, strict):
     assert guard.events(found, CALLER, 1.0) == []
 
 
-def test_a_call_without_a_refusal_or_a_warning_takes_no_lock(
+def test_a_call_without_a_refusal_or_a_warning_takes_no_lock_and_reads_no_inventory(
     machine, store, system, warn, log_path, monkeypatch, capsys
 ):
     locks = []
     monkeypatch.setattr(guard, "log_lock", lambda *arguments: locks.append(arguments))
+
+    def no_inventory(*arguments):
+        raise AssertionError("the guard read the inventory")
+
+    monkeypatch.setattr(inventory, "load_inventory", no_inventory)
     lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
     assert guarded("-s", "emulator-5554", "shell") == 0
     system.parents[ME] = 1

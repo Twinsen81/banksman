@@ -61,6 +61,17 @@ class Inventory:
     def allows(self, kind: str, name: str) -> bool:
         return name in self.kinds.get(kind, Decisions()).allowed
 
+    def kind_of(self, name: str) -> str | None:
+        """Return the kind that lists the name, as allowed or as refused, or None."""
+        return next(
+            (
+                kind
+                for kind, decisions in self.kinds.items()
+                if name in decisions.allowed or name in decisions.refused
+            ),
+            None,
+        )
+
     def allows_account(self, name: str) -> bool:
         return name in self.accounts.allowed
 

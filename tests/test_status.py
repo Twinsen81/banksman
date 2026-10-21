@@ -1,6 +1,7 @@
 """The console: status, watch, and log."""
 
 import argparse
+import dataclasses
 import json
 import os
 import time
@@ -458,6 +459,27 @@ def test_log_counts_the_flows_that_bypass_banksman(capsys, guard_events):
         "not_leased",
         "emulator-5556",
     )
+
+
+def test_the_calls_of_one_device_over_usb_and_over_wifi_count_as_one_flow(capsys, log_path):
+    # The serial over Wi-Fi changes when wireless debugging is reset, and the guard names the
+    # device by the serial number in it.
+    wifi = "adb-R5CR1234ABC-aYi6h4._adb-tls-connect._tcp"
+    again = "adb-R5CR1234ABC-Qx7pL2._adb-tls-connect._tcp"
+    history = History(log_path)
+    for at, serial in enumerate((wifi, "R5CR1234ABC", again)):
+        event = warned(1_790_000_000.0 + at, "shell", serial)
+        history.append(dataclasses.replace(event, resource="R5CR1234ABC", kind="device"))
+    assert main(["log", "--event", "guard", "--count"]) == 0
+    (row,) = table_rows(capsys.readouterr().out)
+    assert (row["COUNT"], row["RESOURCE"]) == ("3", "R5CR1234ABC")
+    assert row["DETAILS"] == (
+        f"warned adb shell on R5CR1234ABC, {again}, {wifi}: no lease of the caller has the"
+        " device; a strict adb guard refuses the call"
+    )
+    assert main(["log", "--count", "--json"]) == 0
+    (count,) = json.loads(capsys.readouterr().out)["counts"]
+    assert (count["serial"], count["serials"]) == (again, ["R5CR1234ABC", again, wifi])
 
 
 def test_the_count_of_events_that_were_added_out_of_order_keeps_their_times_in_order(

@@ -440,9 +440,11 @@ COUNT_HEADER = ("COUNT", "FIRST", "LAST", "EVENT", "RESOURCE", "DETAILS", "HOLDE
 def groups(events: Sequence[Event]) -> list[list[Event]]:
     """Group the events by what happened and who caused it, in the order of their first event.
 
-    The events of a group have the same event, action, reason, resource, serial, worktree, and
-    agent. So the guard events of a flow that still uses devices without a lease are one group
-    for each device, however many adb calls the flow makes.
+    The events of a group have the same event, action, reason, resource, worktree, and agent. So
+    the guard events of a flow that still uses devices without a lease are one group for each
+    device, however many adb calls the flow makes. The serial is not in the key: a device has
+    one serial over USB and another over Wi-Fi, and an emulator gets another serial when it
+    starts again.
     """
     found: dict[tuple[object, ...], list[Event]] = {}
     for event in events:
@@ -451,7 +453,6 @@ def groups(events: Sequence[Event]) -> list[list[Event]]:
             event.action,
             event.reason,
             event.resource,
-            event.serial,
             event.owner,
             event.agent,
         )
@@ -464,7 +465,7 @@ def count_rows(grouped: Sequence[Sequence[Event]]) -> list[list[str]]:
     for group in grouped:
         last = group[-1]
         if last.event == GUARD:
-            details = _guard_details(last, _commands(group))
+            details = _guard_details(last, _commands(group), _serials(group))
         else:
             details = void_text(last.reason) if last.reason else NONE
         rows.append(
@@ -494,7 +495,9 @@ def count_json(group: Sequence[Event]) -> dict[str, object]:
         "action": last.action,
         "reason": last.reason,
         "resource": last.resource,
+        # The serial of the last event, and every serial of the group.
         "serial": last.serial,
+        "serials": _serials(group),
         "owner": last.owner,
         "agent": last.agent,
         "commands": _commands(group),
@@ -522,7 +525,7 @@ def guard_rows(grouped: Sequence[Sequence[Event]], leases: Mapping[str, Lease]) 
                 str(len(group)),
                 time.strftime("%H:%M:%S", time.localtime(max(event.at for event in group))),
                 last.resource,
-                _guard_details(last, _commands(group)),
+                _guard_details(last, _commands(group), _serials(group)),
                 holder,
             ]
         )
@@ -552,11 +555,11 @@ def _local_time(wall: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(wall))
 
 
-def _guard_details(event: Event, commands: Sequence[str]) -> str:
+def _guard_details(event: Event, commands: Sequence[str], serials: Sequence[str]) -> str:
     # For example "refused adb shell on emulator-5554: another holder leases the device, and the
     # lease is ready".
     command = f"adb {', '.join(commands)}" if commands else "an adb command"
-    device = "" if event.serial is None else f" on {event.serial}"
+    device = f" on {', '.join(serials)}" if serials else ""
     why = _GUARD_REASONS.get(event.reason or "", "unknown")
     if event.state is not None:
         why += f", and the lease is {event.state}"
@@ -569,9 +572,13 @@ def _commands(group: Sequence[Event]) -> list[str]:
     return sorted({event.command for event in group if event.command is not None})
 
 
+def _serials(group: Sequence[Event]) -> list[str]:
+    return sorted({event.serial for event in group if event.serial is not None})
+
+
 def _details(event: Event) -> str:
     if event.event == GUARD:
-        return _guard_details(event, _commands([event]))
+        return _guard_details(event, _commands([event]), _serials([event]))
     if event.event == ACQUIRE:
         return f"with the accounts {','.join(event.accounts)}" if event.accounts else NONE
     if event.event == RELEASE:
