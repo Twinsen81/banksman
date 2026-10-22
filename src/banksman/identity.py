@@ -17,13 +17,14 @@ from pathlib import Path
 from banksman import fencing
 from banksman.config import HolderRules
 from banksman.errors import BanksmanError
-from banksman.lease import ISSUE, MAX_PURPOSE_LENGTH, SESSION, Holder
+from banksman.lease import ISSUE, MAX_PURPOSE_LENGTH, SESSION, Holder, Session
 from banksman.sanitize import clean
 from banksman.system import Process, started_no_later
 
-# The variable in which an agent gives the id of its session, for the agents that set one. It
-# is only for display, so an agent without one loses nothing.
-SESSION_VARIABLES = {"claude": "CLAUDE_CODE_SESSION_ID"}
+# The variable in which an agent gives the id of its session, for the agents that set one. The
+# session keeps its id when the agent runs it in a new process, so a new process of the session
+# continues its holdings. An agent without one loses only that.
+SESSION_VARIABLES = {"claude": "CLAUDE_CODE_SESSION_ID", "codex": "CODEX_SESSION_ID"}
 # The variable in which an agent gives the pid of its agent process, for the agents that set
 # one. A command that has left the process tree of its agent, for example with nohup, keeps the
 # environment that it got from the agent.
@@ -87,6 +88,12 @@ def agent_session(agent: str | None, env: Mapping[str, str]) -> str | None:
     variable = SESSION_VARIABLES.get(agent or "")
     session = env.get(variable) if variable else None
     return session if session and SESSION.fullmatch(session) else None
+
+
+def session_of(agent: str | None, env: Mapping[str, str]) -> Session | None:
+    """Return the session of an agent process from the environment, when the agent gives one."""
+    session = agent_session(agent, env)
+    return None if agent is None or session is None else Session(agent, session)
 
 
 def worktree(directory: Path) -> Path:

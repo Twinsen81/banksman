@@ -258,6 +258,84 @@ def test_an_owner_process_with_another_start_time_is_not_the_owner(store, system
     assert "another holder" in check(system, "-s", "emulator-5554", "shell")
 
 
+# The agent process that ran the session before a restart of the agent.
+EARLIER_AGENT = 400
+IN_SESSION = {"CLAUDE_CODE_SESSION_ID": "session-1"}
+
+
+def earlier(agent="claude", session="session-1"):
+    return Holder("/work/tree-a", owner_pid=EARLIER_AGENT, agent=agent, session=session)
+
+
+@pytest.fixture
+def restarted(store, system):
+    """Lease e2e_phone to the earlier agent process of the caller's session, which has ended."""
+    system.spawn(EARLIER_AGENT, program="/opt/bin/claude")
+    lease(store, system, "e2e_phone", earlier(), serial="emulator-5554")
+    system.end(EARLIER_AGENT)
+
+
+def test_a_new_agent_process_of_the_session_uses_the_devices_of_the_earlier_one(
+    store, system, restarted
+):
+    assert check(system, "-s", "emulator-5554", "shell", env=IN_SESSION) is None
+    assert note(system, env=IN_SESSION).startswith("your holding has emulator-5554.")
+    # Another session, and a caller that gives no session, are other holders.
+    for env in ({"CLAUDE_CODE_SESSION_ID": "session-2"}, {}):
+        assert "another holder" in check(system, "-s", "emulator-5554", "shell", env=env)
+        assert note(system, env=env) == NO_DEVICE
+
+
+def test_after_the_owner_grace_the_lease_of_the_earlier_agent_process_is_lost(
+    store, system, restarted
+):
+    system.now += Timeouts().owner_grace
+    assert check(system, "-s", "emulator-5554", "shell", env=IN_SESSION) == (
+        "adb shell: refused: your lease of emulator-5554 (e2e_phone) is lost: the owner process"
+        " ended, and nothing touched the lease for the grace period. Stop using the device, and"
+        " acquire one again"
+    )
+
+
+def test_the_lease_of_the_session_from_an_earlier_boot_is_lost(store, system, restarted):
+    # The lease file outlived a restart of the machine, no banksman command has reaped since,
+    # and the session was resumed. Awake time starts again at every boot.
+    system.boot = "boot-2"
+    system.now = 100.0
+    assert check(system, "-s", "emulator-5554", "shell", env=IN_SESSION) == (
+        "adb shell: refused: your lease of emulator-5554 (e2e_phone) is lost: the machine"
+        " restarted after the lease was written. Stop using the device, and acquire one again"
+    )
+    assert note(system, env=IN_SESSION) == NO_DEVICE
+
+
+def test_only_a_lease_of_the_session_alone_reads_the_boot(store, system, restarted):
+    # A lease whose owner process runs above the caller is of this boot, so no call waits for
+    # the boot id.
+    lease(store, system, "e2e_tablet", mine(), serial="emulator-5556")
+
+    def no_boot_id():
+        raise AssertionError("the guard read the boot id")
+
+    system.boot_id = no_boot_id
+    assert check(system, "-s", "emulator-5556", "shell", env=IN_SESSION) is None
+
+
+@pytest.mark.parametrize("agent", ["codex", None])
+def test_the_session_of_another_agent_is_another_holder(store, system, agent):
+    system.spawn(EARLIER_AGENT)
+    lease(store, system, "e2e_phone", earlier(agent=agent), serial="emulator-5554")
+    system.end(EARLIER_AGENT)
+    assert "another holder" in check(system, "-s", "emulator-5554", "shell", env=IN_SESSION)
+
+
+def test_a_lease_of_the_session_whose_owner_process_runs_is_not_the_callers(store, system):
+    # Such as the lease of banksman run --where: it ends with its own process.
+    system.spawn(EARLIER_AGENT)
+    lease(store, system, "e2e_phone", earlier(), serial="emulator-5554")
+    assert "another holder" in check(system, "-s", "emulator-5554", "shell", env=IN_SESSION)
+
+
 def test_a_person_passes_also_on_the_device_of_another_holding(store, system):
     lease(store, system, "e2e_phone", other(), serial="emulator-5554")
     system.parents[ME] = 1

@@ -17,10 +17,11 @@ from banksman.identity import (
     find_holder,
     issue_of,
     purpose_text,
+    session_of,
     started_by,
     worktree,
 )
-from banksman.lease import MAX_PURPOSE_LENGTH
+from banksman.lease import MAX_PURPOSE_LENGTH, Session
 
 # An agent that an app ships: macOS shows the full path, which can contain spaces.
 CLAUDE_IN_AN_APP = "/opt/Agent App/agent-binaries/claude/2.1.284/claude"
@@ -455,6 +456,20 @@ def test_a_session_id_is_read_only_for_its_agent_and_only_when_valid(tmp_path):
     assert find_holder(codex, RULES, cwd=str(tmp_path), env=env, pid=500).session is None
     env = {"CLAUDE_CODE_SESSION_ID": "s-1\x1b[2J"}
     assert find_holder(AGENT_IN_AN_APP, RULES, cwd=str(tmp_path), env=env, pid=500).session is None
+
+
+def test_codex_gives_its_session_in_its_own_variable(tmp_path):
+    codex = processes((500, "/bin/sh"), (400, "codex"))
+    # A subagent of Codex has a thread of its own, and the session of its parent.
+    env = {
+        "CODEX_SESSION_ID": "01a1627d-9081-7392-a825-ba039f806627",
+        "CODEX_THREAD_ID": "01a1627d-9081-7392-a825-ba039f806628",
+        "CLAUDE_CODE_SESSION_ID": "s-1",
+    }
+    holder = find_holder(codex, RULES, cwd=str(tmp_path), env=env, pid=500)
+    assert (holder.agent, holder.session) == ("codex", env["CODEX_SESSION_ID"])
+    assert session_of(holder.agent, env) == Session("codex", env["CODEX_SESSION_ID"])
+    assert session_of(None, env) is None
 
 
 @pytest.mark.parametrize(

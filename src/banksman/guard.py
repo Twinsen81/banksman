@@ -48,7 +48,7 @@ from banksman.history import (
     Event,
     History,
 )
-from banksman.identity import find_agent, find_holder
+from banksman.identity import find_agent, find_holder, session_of
 from banksman.lease import (
     HELD,
     LEASE_VARIABLE,
@@ -56,6 +56,7 @@ from banksman.lease import (
     VOID_REASONS,
     Holder,
     Lease,
+    Session,
     void_reason,
 )
 from banksman.sanitize import clean
@@ -437,12 +438,17 @@ class Caller:
         timeout, for example, until the next banksman command takes it back. The process list is
         read only when a rule needs a process.
         """
-        # Not the rule for a restart, so that no call waits for sysctl. A restart ends every
-        # process, and a lease of the caller's holding has an owner process above the caller, or
-        # its id in the environment of the caller, so it is a lease of this boot.
+        # The rule for a restart only for a holding that the caller has through its session
+        # alone, so that no other call waits for sysctl. A restart ends every process, so a
+        # holding with an owner process above the caller, or with its id in the environment of
+        # the caller, is of this boot. The owner process of a holding of the session has ended,
+        # maybe before a restart, and awake time starts again at every boot.
+        by_session = lease.holding != self.token_holding() and lease.holding in (
+            self._by_session - self._by_process
+        )
         return void_reason(
             lease,
-            boot_id=lease.boot_id,
+            boot_id=self.system.boot_id() if by_session else lease.boot_id,
             now=self.system.clock(),
             running=_Started(lambda: self._table),
         )
@@ -456,15 +462,27 @@ class Caller:
 
     @cached_property
     def holdings(self) -> set[str]:
-        """Return the holdings of the lease id that the caller has, and of the owner processes
-        above it."""
-        found = {
+        """Return the holdings of the lease id that the caller has, of the owner processes above
+        it, and that the session of its agent process continues (see `Session.continues`)."""
+        found = self._by_process | self._by_session
+        token = self.token_holding()
+        return found if token is None else found | {token}
+
+    @cached_property
+    def _by_process(self) -> set[str]:
+        return {
             lease.holding
             for lease in self.leases
             if self.descends_from(lease.owner_pid, lease.owner_started)
         }
-        token = self.token_holding()
-        return found if token is None else found | {token}
+
+    @cached_property
+    def _by_session(self) -> set[str]:
+        session = self._session
+        if session is None:
+            return set()
+        running = _Started(lambda: self._table)
+        return {lease.holding for lease in self.leases if session.continues(lease, running)}
 
     @cached_property
     def _table(self) -> Mapping[int, Process]:
@@ -476,7 +494,15 @@ class Caller:
 
     @cached_property
     def _agent(self) -> int | None:
-        return find_agent(self._table, self.rules.agents, self.pid, self.env)[0]
+        return self._found[0]
+
+    @cached_property
+    def _session(self) -> Session | None:
+        return session_of(self._found[1], self.env)
+
+    @cached_property
+    def _found(self) -> tuple[int | None, str | None]:
+        return find_agent(self._table, self.rules.agents, self.pid, self.env)
 
 
 class _Started(Mapping[int, str]):

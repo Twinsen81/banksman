@@ -52,6 +52,7 @@ from banksman.lease import (
     Lease,
     LeaseFormatError,
     SerialSeen,
+    Session,
     Timeouts,
     User,
     check_names,
@@ -479,6 +480,7 @@ class Store:
         paid: bool = False,
         label: str | None = None,
         since: float | None = None,
+        session: Session | None = None,
     ) -> list[Granted] | None:
         """Grant a resource for every need, all or nothing, or return None while that cannot be
         done because resources or accounts are in use.
@@ -489,13 +491,15 @@ class Store:
         Each new lease gets its own id, and the new leases form one holding. With `keep`, the
         id of a lease that the caller holds, the resources of its holding come first: such a
         lease is touched, records the holder's owner process, and can get more accounts on its
-        resource. While that holding has a held lease, the new leases join it. Otherwise a held
-        resource is never granted, also not to the same owner, because several agents can work
-        in one worktree.
+        resource. A lease of the holding that the request does not name records the holder's
+        owner process too, when it has another one. While that holding has a held lease, the new
+        leases join it. Otherwise a held resource is never granted, also not to the same owner,
+        because several agents can work in one worktree.
 
         With `label` instead of `keep`, the holding with that label whose owner process is the
-        holder's owner process comes first in the same way. Without one, the new leases start a
-        holding with that label.
+        holder's owner process comes first in the same way, or, with `session`, the holding with
+        that label that the session continues (see `Session.continues`). Without one, the new
+        leases start a holding with that label.
 
         When a choice needs a reset or a start, every new lease of the request is booting and
         names this process until the caller marks it ready, so that no other process frees it
@@ -540,7 +544,9 @@ class Store:
             if keep is not None:
                 kept = self._holding(entries, keep)
             elif label is not None:
-                kept = self._labelled(entries, holder.owner_pid, label)  # type: ignore[arg-type]
+                kept = self._labelled(
+                    entries, holder.owner_pid, label, session  # type: ignore[arg-type]
+                )
             else:
                 kept = {}
             if any(lease.state == BOOTING for lease in kept.values()):
@@ -586,6 +592,16 @@ class Store:
             resets = sum(choice.reset for choice in new)
             starts = [choice for choice in new if choice.start]
             granted: list[tuple[str, tuple[str, ...], bool]] = []
+            # The holder takes over the whole holding, as a touch does, also the leases that the
+            # request does not name, so that they do not end with an earlier agent process.
+            picked = {pick.resource for pick in picks}
+            for lease in kept.values():
+                if (
+                    holder.owner_pid is not None
+                    and lease.resource not in picked
+                    and lease.owner_pid != holder.owner_pid
+                ):
+                    serials[lease.resource] = self._write(self._touched(lease, holder.owner_pid))
             for choice, pick in zip(choices, picks):
                 current = kept.get(pick.resource)
                 if current is not None:
@@ -680,17 +696,20 @@ class Store:
         with self._lock():
             return self._holding(self._scan(), lease_id)
 
-    def labelled(self, owner_pid: int, label: str) -> dict[str, Lease]:
+    def labelled(
+        self, owner_pid: int, label: str, session: Session | None = None
+    ) -> dict[str, Lease]:
         """Return the valid held leases of the holding with this label whose owner process is
-        `owner_pid`, by resource."""
+        `owner_pid`, or that `session` continues, by resource."""
         _check_label(label, owner_pid)
         with self._lock():
-            return self._labelled(self._scan(), owner_pid, label)
+            return self._labelled(self._scan(), owner_pid, label, session)
 
-    def held_by(self, owner_pid: int) -> list[Lease]:
-        """Return the valid held leases whose owner process is `owner_pid`."""
+    def held_by(self, owner_pid: int, session: Session | None = None) -> list[Lease]:
+        """Return the valid held leases whose owner process is `owner_pid`, or that `session`
+        continues."""
         with self._lock():
-            return self._owned(self._scan(), owner_pid)
+            return self._owned(self._scan(), owner_pid, session)
 
     def started(
         self,
@@ -948,23 +967,16 @@ class Store:
         return [(lease, self._end_released(after)) for lease, after in given]
 
     def release_all(
-        self, owner_pid: int, *, end: Collection[str] = ()
+        self, owner_pid: int, *, session: Session | None = None, end: Collection[str] = ()
     ) -> list[tuple[Lease, Lease | None]]:
-        """Give back every held lease whose owner process is `owner_pid`, and take back the
-        instances of the resources in `end`, as `release` does.
+        """Give back every held lease whose owner process is `owner_pid`, or that `session`
+        continues, and take back the instances of the resources in `end`, as `release` does.
 
         Return each lease, and the lease while it drains or after it was quarantined, or None
         when its resource is free.
         """
         with self._lock():
-            started = self._start_time(owner_pid)
-            mine = [
-                entry
-                for entry in self._scan()
-                if isinstance(entry, Lease)
-                and entry.state in HELD
-                and (entry.owner_pid, entry.owner_started) == (owner_pid, started)
-            ]
+            mine, _, _ = self._mine(self._scan(), owner_pid, session)
             given = [(lease, self._give_back(lease, lease.resource in end)) for lease in mine]
         return [(lease, self._end_released(after)) for lease, after in given]
 
@@ -1404,11 +1416,17 @@ class Store:
         return {} if named is None else self._held_leases(entries, named.holding)
 
     def _labelled(
-        self, entries: Sequence[Lease | Unreadable], owner_pid: int, label: str
+        self,
+        entries: Sequence[Lease | Unreadable],
+        owner_pid: int,
+        label: str,
+        session: Session | None = None,
     ) -> dict[str, Lease]:
         """Return the valid held leases of the holding with this label whose owner process is
-        `owner_pid`, by resource."""
-        leases = [lease for lease in self._owned(entries, owner_pid) if lease.label == label]
+        `owner_pid`, or that `session` continues, by resource."""
+        leases = [
+            lease for lease in self._owned(entries, owner_pid, session) if lease.label == label
+        ]
         holdings = sorted({lease.holding for lease in leases})
         if len(holdings) > 1:
             # For example after a restart of the agent, when a touch with a lease id moved an
@@ -1424,17 +1442,48 @@ class Store:
             )
         return {lease.resource: lease for lease in leases}
 
-    def _owned(self, entries: Sequence[Lease | Unreadable], owner_pid: int) -> list[Lease]:
-        """Return the valid held leases whose owner process is `owner_pid`."""
-        started = self._start_time(owner_pid)
-        owned = [
-            entry
-            for entry in entries
-            if isinstance(entry, Lease)
-            and entry.state in HELD
-            and (entry.owner_pid, entry.owner_started) == (owner_pid, started)
+    def _owned(
+        self,
+        entries: Sequence[Lease | Unreadable],
+        owner_pid: int,
+        session: Session | None = None,
+    ) -> list[Lease]:
+        """Return the valid held leases whose owner process is `owner_pid`, or that `session`
+        continues."""
+        mine, read, running = self._mine(entries, owner_pid, session)
+        return self._valid_ones(mine, running, read)
+
+    def _mine(
+        self,
+        entries: Sequence[Lease | Unreadable],
+        owner_pid: int,
+        session: Session | None,
+    ) -> tuple[list[Lease], set[int], dict[int, str]]:
+        """Return the held leases whose owner process is `owner_pid`, or that `session`
+        continues, valid or not; the processes that this read, which are `owner_pid` and the
+        owner processes of the leases of the session; and the start times of those that run."""
+        held = [entry for entry in entries if isinstance(entry, Lease) and entry.state in HELD]
+        others = (
+            set()
+            if session is None
+            else {
+                lease.owner_pid
+                for lease in held
+                if lease.session == session.session_id and lease.owner_pid is not None
+            }
+        )
+        read = {owner_pid, *others}
+        running = self.system.running(sorted(read))
+        started = running.get(owner_pid) if owner_pid > 0 else None
+        if started is None:
+            raise BanksmanError(f"process {owner_pid} is not running")
+        mine = [
+            lease
+            for lease in held
+            if (lease.owner_pid, lease.owner_started) == (owner_pid, started)
+            or (session is not None and session.continues(lease, running))
         ]
-        return self._valid_ones(owned, {owner_pid: started})
+        return mine, read, running
 
     def _held_leases(
         self, entries: Sequence[Lease | Unreadable], holding: str
@@ -1448,14 +1497,20 @@ class Store:
         return {lease.resource: lease for lease in self._valid_ones(leases)}
 
     def _valid_ones(
-        self, leases: Sequence[Lease], known: Mapping[int, str] | None = None
+        self,
+        leases: Sequence[Lease],
+        known: Mapping[int, str] | None = None,
+        read: Collection[int] = (),
     ) -> list[Lease]:
         """Return the leases that are not void. `known` gives the start times of processes
-        that the caller has just read."""
+        that the caller has just read, and `read` names the processes that it read, also those
+        that have ended, so that they are not read again."""
         if not leases:
             return []
         known = {} if known is None else known
-        pids = sorted({pid for lease in leases for pid in checked_pids(lease)} - set(known))
+        pids = sorted(
+            {pid for lease in leases for pid in checked_pids(lease)} - set(known) - set(read)
+        )
         running = {**known, **(self.system.running(pids) if pids else {})}
         boot_id = self.system.boot_id()
         now = self.system.clock()
