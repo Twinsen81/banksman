@@ -1663,13 +1663,17 @@ is a setup of the operator, and a project needs nothing for it.
   A held lease of the caller's holding counts only while it is valid. The guard does not reap,
   so a lease file can still say that a lease is held after the lease became void, for example
   after its idle timeout while no banksman command ran, until the next command takes it back. So
-  the guard applies the rules of the reaper (section 3) to such a lease itself, apart from the
-  rule for a restart: a restart ends every process, and such a lease has an owner process above
-  the caller, or its id in the environment of the caller, so it is a lease of this boot, and no
-  call waits for `sysctl`. The guard reads the process list for these rules only when a rule
-  needs a process: for the owner process after the grace period without a touch, and for a
-  booting lease whose `acquire` must still run. So a call with `BANKSMAN_LEASE` still decides
-  without the process list while its lease is touched.
+  the guard applies the rules of the reaper (section 3) to such a lease itself. The rule for a
+  restart applies only to a holding that the caller has through its session alone (section 9):
+  a restart ends every process, so a lease with an owner process above the caller, or with its
+  id in the environment of the caller, is a lease of this boot, and such a call does not wait
+  for `sysctl`. The owner process of a holding of the session has ended, maybe before a restart
+  of the machine, and awake time starts again at every boot, so only the boot id tells that its
+  lease is void when no banksman command has reaped since the restart. The guard reads the
+  process list for these rules only when a rule needs a process: for the owner process after
+  the grace period without a touch, and for a booting lease whose `acquire` must still run. So
+  a call with `BANKSMAN_LEASE` still decides without the process list while its lease is
+  touched.
 
   Otherwise the guard exits with status 3, the status of `check` for a lost lease, and runs no
   adb. On standard error, it names the device, the state of its lease, and the holder as

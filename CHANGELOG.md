@@ -611,5 +611,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `wait`, and `run` with the label record the new agent process in every lease of the holding.
   A lease whose owner process still runs, such as the lease of `banksman run --where` or a
   build slot, stays with that process. With `--owner-pid`, the pid alone counts, as before.
+  The adb guard checks the boot id for a holding that the caller has through its session alone,
+  so a session that resumes after a restart of the machine cannot use a lease of the earlier
+  boot before a banksman command reaps it.
   banksman now also reads `CODEX_SESSION_ID`, the session of Codex, so `whoami`, `status`, and
   the log show it. The lease schema and the output schema do not change.
