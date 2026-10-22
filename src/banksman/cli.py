@@ -59,7 +59,7 @@ from banksman.discovery import (
 )
 from banksman.errors import BanksmanError
 from banksman.history import EVENTS, GUARD, Event, History, LogError
-from banksman.identity import agent_session, find_agent, find_holder
+from banksman.identity import agent_session, find_agent, find_holder, session_of
 from banksman.inventory import (
     Decisions,
     Inventory,
@@ -80,6 +80,7 @@ from banksman.lease import (
     VOID_REASONS,
     Lease,
     SerialSeen,
+    Session,
     User,
 )
 from banksman.request import (
@@ -727,16 +728,23 @@ class _Caller:
     # The processes whose leases are the caller's, by pid and start time: the caller, its
     # ancestors, and its agent process.
     processes: frozenset[tuple[int, str]]
+    # The session of the agent process, which continues the leases of the session whose owner
+    # process has ended.
+    session: Session | None = None
+    # The start time of each process that runs.
+    running: Mapping[int, str] = field(default_factory=dict)
 
 
 def _caller_of(
     table: Mapping[int, Process], agents: Sequence[str], pid: int, env: Mapping[str, str]
 ) -> _Caller:
-    agent, _ = find_agent(table, agents, pid, env)
+    agent, name = find_agent(table, agents, pid, env)
     pids = [pid, *fencing.ancestors(table, pid), *([] if agent is None else [agent])]
     return _Caller(
         agent is not None,
         frozenset((each, table[each].started) for each in pids if each in table),
+        session_of(name, env),
+        {each: process.started for each, process in table.items()},
     )
 
 
@@ -773,7 +781,10 @@ class _Audience:
         return _stderr_is_terminal() and not self._find().agent
 
     def owns(self, lease: Lease) -> bool:
-        return (lease.owner_pid, lease.owner_started) in self._find().processes
+        caller = self._find()
+        return (lease.owner_pid, lease.owner_started) in caller.processes or (
+            caller.session is not None and caller.session.continues(lease, caller.running)
+        )
 
 
 def _stderr_is_terminal() -> bool:
@@ -1210,19 +1221,12 @@ def _cmd_whoami(args: argparse.Namespace) -> int:
 def _cmd_held(args: argparse.Namespace) -> int:
     config = load_config()
     store, _ = _reaped_store(config)
-    session = None
-    if args.owner_pid is None:
-        owner, agent = find_agent(
-            Machine().process_table(), config.holder.agents, os.getpid(), os.environ
-        )
-        session = agent_session(agent, os.environ)
-    else:
-        owner = args.owner_pid
+    owner, session = _owner_process(config, args.owner_pid)
     if owner is None:
         raise BanksmanError("held needs the agent process, and none was found: pass --owner-pid")
     # The leases of one holding are next to each other, and the holdings with a label first.
     leases = sorted(
-        store.held_by(owner),
+        store.held_by(owner, session),
         key=lambda lease: (lease.label is None, lease.label or "", lease.holding, lease.resource),
     )
     calls: list[list[Event]] | None = None
@@ -1230,7 +1234,10 @@ def _cmd_held(args: argparse.Namespace) -> int:
     try:
         # banksman does not know the session of a process that the caller names.
         calls = _guard_calls(
-            owner, store.system.wall_clock(), session, by_session=args.owner_pid is None
+            owner,
+            store.system.wall_clock(),
+            None if session is None else session.session_id,
+            by_session=args.owner_pid is None,
         )
     except (LogError, OSError) as exc:
         problem = exc
@@ -1423,8 +1430,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if args.holding is None:
             named = [(chosen[0], args.lease)]
         else:
-            owner = _owner_process(config, args.owner_pid)
-            held = _labelled_leases(store, owner, args.holding, chosen)
+            owner, session = _owner_process(config, args.owner_pid)
+            held = _labelled_leases(store, owner, args.holding, chosen, session)
             booting = [lease.resource for lease in held if lease.state == BOOTING]
             if booting:
                 # Only the acquire that starts or resets the instance gives the lease to its
@@ -1435,6 +1442,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     f" {args.holding}, or give it back with banksman release --holding"
                     f" {args.holding}"
                 )
+            if any(lease.owner_pid != owner for lease in held):
+                # A new agent process of the session takes the holding over, as acquire does, so
+                # that it lives with that process.
+                store.touch_holding(held[0].lease_id, owner)
             named = [(lease.resource, lease.lease_id) for lease in held]
         leases, unknown = _with_serials_now(store, config, named)
         command = _command_line(command, leases, unknown)
@@ -1774,6 +1785,12 @@ def _acquire(
     agent_pid = find_agent(table, config.holder.agents, os.getpid(), os.environ)[0]
     if label is not None and holder.owner_pid is None:
         raise BanksmanError(_no_agent("--holding"))
+    # banksman does not know the session of a process that the caller names.
+    session = (
+        Session(holder.agent, holder.session)
+        if owner_pid is None and holder.agent is not None and holder.session is not None
+        else None
+    )
     give_up = machine.clock() + wait
     waiting = False
     owner_started = None
@@ -1822,7 +1839,7 @@ def _acquire(
         if keep is not None:
             holding = store.holding(keep)
         elif label is not None:
-            holding = store.labelled(holder.owner_pid, label)  # type: ignore[arg-type]
+            holding = store.labelled(holder.owner_pid, label, session)  # type: ignore[arg-type]
         # A paid resource takes part only when the caller acknowledges the cost, or keeps a
         # lease on it. The store checks that again under its lock.
         kept = set() if paid else set(holding)
@@ -1861,6 +1878,7 @@ def _acquire(
                 paid=paid,
                 label=label,
                 since=looked,
+                session=session,
             )
         except Outdated:
             # A lease ended after this discovery saw its instance, for example after a take-back
@@ -2535,7 +2553,9 @@ def _cmd_wait(args: argparse.Namespace) -> int:
     if args.owner_pid is not None and args.lease is not None:
         raise BanksmanError("wait --owner-pid needs --holding")
     config = load_config()
-    owner = None if args.holding is None else _owner_process(config, args.owner_pid)
+    owner, session = (
+        (None, None) if args.holding is None else _owner_process(config, args.owner_pid)
+    )
     if args.holding is not None and owner is None:
         raise BanksmanError(_no_agent("--holding"))
     machine = Machine()
@@ -2548,7 +2568,7 @@ def _cmd_wait(args: argparse.Namespace) -> int:
         config = load_config()
         store, _ = _reaped_store(config)
         if args.holding is not None:
-            leases = store.labelled(owner, args.holding)  # type: ignore[arg-type]
+            leases = store.labelled(owner, args.holding, session)  # type: ignore[arg-type]
             holding = f"the holding {args.holding}"
             none = f"process {owner} has no held holding with the label {args.holding}"
         else:
@@ -2572,9 +2592,10 @@ def _cmd_wait(args: argparse.Namespace) -> int:
         if left <= 0:
             raise Busy(f"{', '.join(booting)} of {holding} is still booting: {_BOOTING}")
         machine.sleep(min(WAIT_SECONDS, left))
-    # The holder is back, and uses the resources now.
+    # The holder is back, and uses the resources now. With a label, a new agent process of the
+    # session takes the holding over, as acquire does.
     touched = sorted(
-        store.touch_holding(next(iter(leases.values())).lease_id),
+        store.touch_holding(next(iter(leases.values())).lease_id, owner),
         key=lambda lease: lease.resource,
     )
     if args.json:
@@ -2591,10 +2612,10 @@ def _cmd_touch(args: argparse.Namespace) -> int:
         raise BanksmanError("touch needs --lease, the id of the lease, or --holding, its label")
     config = load_config()
     store, _ = _reaped_store(config)
-    owner = _owner_process(config, args.owner_pid)
+    owner, session = _owner_process(config, args.owner_pid)
     lease_id = args.lease
     if args.holding is not None:
-        lease_id = _labelled(store, owner, args.holding, args.resource).lease_id
+        lease_id = _labelled(store, owner, args.holding, args.resource, session).lease_id
     # A touch keeps every lease of the holding, so the resource only checks that it is held.
     if args.resource is None:
         store.touch_holding(lease_id, owner, expect=args.expect)
@@ -2618,12 +2639,12 @@ def _cmd_release(args: argparse.Namespace) -> int:
     config = load_config()
     store, _ = _reaped_store(config)
     lease_id = args.lease
-    owner = None
+    owner = session = None
     if args.holding is not None:
-        owner = _owner_process(config, args.owner_pid)
-        lease_id = _labelled(store, owner, args.holding, args.resource).lease_id
+        owner, session = _owner_process(config, args.owner_pid)
+        lease_id = _labelled(store, owner, args.holding, args.resource, session).lease_id
     elif args.all:
-        owner = _owner_process(config, args.owner_pid)
+        owner, session = _owner_process(config, args.owner_pid)
         if owner is None:
             raise BanksmanError(
                 "release --all needs the agent process, and none was found: pass --owner-pid, or"
@@ -2634,7 +2655,7 @@ def _cmd_release(args: argparse.Namespace) -> int:
     end: set[str] = set()
     kept: dict[str, str] = {}
     if args.end:
-        for lease in _to_release(store, args, lease_id, owner):
+        for lease in _to_release(store, args, lease_id, owner, session):
             why = _kept_instance(config, lease)
             if why is None:
                 end.add(lease.resource)
@@ -2648,7 +2669,7 @@ def _cmd_release(args: argparse.Namespace) -> int:
     else:
         if args.all:
             assert owner is not None
-            leases = store.release_all(owner, end=end)
+            leases = store.release_all(owner, session=session, end=end)
         else:
             leases = store.release_holding(lease_id, end=end)
         released = [(lease.resource, after) for lease, after in leases]
@@ -2663,12 +2684,16 @@ def _cmd_release(args: argparse.Namespace) -> int:
 
 
 def _to_release(
-    store: Store, args: argparse.Namespace, lease_id: str | None, owner: int | None
+    store: Store,
+    args: argparse.Namespace,
+    lease_id: str | None,
+    owner: int | None,
+    session: Session | None,
 ) -> list[Lease]:
     """Return the held leases that a release gives back."""
     if args.all:
         assert owner is not None
-        return store.held_by(owner)
+        return store.held_by(owner, session)
     assert lease_id is not None
     leases = store.holding(lease_id)
     if args.resource is None:
@@ -2733,20 +2758,33 @@ def _adopt(config: Config, leases: Sequence[Lease]) -> None:
             _warn(f"cannot record that {lease.resource} runs, so it is unmanaged now: {exc}")
 
 
-def _labelled(store: Store, owner: int | None, label: str, resource: str | None) -> Lease:
-    """Return a held lease of the holding with this label of the owner process: the lease of
-    `resource`, or any lease of the holding."""
-    return _labelled_leases(store, owner, label, [] if resource is None else [resource])[0]
+def _labelled(
+    store: Store,
+    owner: int | None,
+    label: str,
+    resource: str | None,
+    session: Session | None = None,
+) -> Lease:
+    """Return a held lease of the holding with this label of the owner process or of its
+    session: the lease of `resource`, or any lease of the holding."""
+    return _labelled_leases(
+        store, owner, label, [] if resource is None else [resource], session
+    )[0]
 
 
 def _labelled_leases(
-    store: Store, owner: int | None, label: str, resources: Sequence[str]
+    store: Store,
+    owner: int | None,
+    label: str,
+    resources: Sequence[str],
+    session: Session | None = None,
 ) -> list[Lease]:
-    """Return the held leases of the holding with this label of the owner process: the leases of
-    `resources`, in their order, or every lease of the holding, in the order of the resources."""
+    """Return the held leases of the holding with this label of the owner process or of its
+    session (see `Session.continues`): the leases of `resources`, in their order, or every lease
+    of the holding, in the order of the resources."""
     if owner is None:
         raise BanksmanError(_no_agent("--holding"))
-    leases = store.labelled(owner, label)
+    leases = store.labelled(owner, label, session)
     if not leases:
         raise NotHeld(f"process {owner} has no held holding with the label {label}")
     for resource in resources:
@@ -2763,13 +2801,20 @@ def _no_agent(flag: str) -> str:
     )
 
 
-def _owner_process(config: Config, owner_pid: int | None) -> int | None:
-    # The nearest agent process, as for a new lease: after a restart of the agent, a touch
-    # records its new process, so that the lease does not end with the earlier one.
+def _owner_process(config: Config, owner_pid: int | None) -> tuple[int | None, Session | None]:
+    """Return the owner process whose leases the caller acts on, and the session that continues
+    the leases of its earlier processes.
+
+    The owner process is the nearest agent process, as for a new lease: after a restart of the
+    agent, a touch records its new process, so that the lease does not end with the earlier one.
+    banksman does not know the session of a process that the caller names, so with `owner_pid`,
+    the pid alone counts.
+    """
     if owner_pid is not None:
-        return owner_pid
+        return owner_pid, None
     table = Machine().process_table()
-    return find_agent(table, config.holder.agents, os.getpid(), os.environ)[0]
+    pid, agent = find_agent(table, config.holder.agents, os.getpid(), os.environ)
+    return pid, session_of(agent, os.environ)
 
 
 def _released(

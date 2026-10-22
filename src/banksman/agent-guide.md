@@ -19,7 +19,9 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
   process, and banksman knows a holding by the agent process and the label: two subagents with
   the same label share one holding, and so one device.
 - Run the same command again to keep the same device, for example after you lost the output:
-  banksman then prints `KEPT=true`. You do not need to remember the lease id.
+  banksman then prints `KEPT=true`. You do not need to remember the lease id. This also works
+  when your app ran your session in a new agent process: banksman knows the session, also in
+  `held`, `release`, and on `adb` calls.
 - banksman prints `KEY=value` lines: `RESOURCE` (the device), `KIND`, `LEASE` (the lease id),
   `STATE` (`ready`, or `booting` after `--no-wait`), `KEPT`, `PREVIOUS`, and `STARTED`. It
   also prints `SERIAL` when the device has a serial now, `HANDLE` (the reservation) for a remote

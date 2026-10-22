@@ -124,8 +124,9 @@ leases instead.
   background commands running across a restart of the session process. Those commands keep
   touching the lease, and a touch can record the new owner process. So a restarted run
   keeps its resource if its lease is touched within the grace period; until that touch, the
-  grace period is its idle timeout. A run that is really gone frees its resource within
-  minutes.
+  grace period is its idle timeout. For an agent that gives its session, the new agent process
+  of the session uses the lease at once, and its next request records it (section 9). A run
+  that is really gone frees its resource within minutes.
 - **Renewal needs no agent cooperation.** A project's device scripts touch the lease on
   every call. A long-running script keeps a touch loop alive for its own lifetime. With the
   adb guard, an adb call of the holder on its own device touches the lease too (section 12).
@@ -266,11 +267,12 @@ minutes, and its lease can become void in the middle.
   its build slot. A person gets the notice on standard error: the processes that still run and
   the command that releases the lease, or why the take-back failed. Every other caller gets
   nothing about the lease of another holder. About a lease of its own, whose owner process is
-  the caller, a process above it, or its agent process, it gets one line without a pid and
-  without a command: that the lease is quarantined, why, and that only the operator can
-  release it. An agent reads a command in its output as its next step, and a build or a
-  scheduled job has no reader. A caller is a person when its standard error is a terminal and
-  no agent process is above it (section 9): a Gradle daemon can be older than the agent that
+  the caller, a process above it, or its agent process, or that the session of its agent
+  process continues (section 9), it gets one line without a pid and without a command: that
+  the lease is quarantined, why, and that only the operator can release it. An agent reads a
+  command in its output as its next step, and a build or a scheduled job has no reader. A
+  caller is a person when its standard error is a terminal and no agent process is above it
+  (section 9): a Gradle daemon can be older than the agent that
   uses it now, so banksman does not find that agent, but the daemon reads the output of
   banksman through a pipe. banksman reads the process list for this only when the reap has
   something to tell. The log keeps every fact (section 10). The operator finds the quarantines
@@ -1171,7 +1173,7 @@ for any agent and for a person at a terminal.
 | issue | `--issue`, otherwise the first match of `issue_pattern` in the branch name, then in the name of the worktree directory |
 | agent | the nearest ancestor process whose program is in `agents`, the last part of its executable path, with case, or that the agent's pid variable names, `CLAUDE_PID` for `claude`; otherwise the agent process that the pid variable names |
 | owner process | that process's pid and start time, used for liveness |
-| session | an agent-specific extra when the environment has one, never required: `CLAUDE_CODE_SESSION_ID` for `claude` |
+| session | an agent-specific extra when the environment has one, never required: `CLAUDE_CODE_SESSION_ID` for `claude`, `CODEX_SESSION_ID` for `codex`. A new agent process of the session continues its holdings (see below) |
 
 A command can leave the process tree of its agent: a script that starts a test runner with
 `nohup` or in a session of its own, or a background job whose shell has ended. The init process
@@ -1185,7 +1187,7 @@ nearest agent wins: when one agent runs another, the variable names the outer on
 nearest agent runs the command. When no agent is in the ancestry, the process that the variable
 names is the agent process. Acquire, `touch`, `release --all`, `held`, `whoami`, and the adb
 guard (section 12) find the agent process in the same way. The map of variables is built in, as
-for the session: only `claude` sets one, and Codex does not.
+for the session: only `claude` sets a pid variable, and Codex does not.
 
 - The process list that banksman reads already has the process, so the variable costs no more
   reads, and a person at a terminal, who has no such variable, gets the same result as before.
@@ -1223,18 +1225,45 @@ worktree at the same time, each with its own agent process. The lease id identif
 holding, and `acquire --lease`, `touch`, and `release` take it. Liveness stays with each
 agent, through its own agent process.
 
-- `touch` records the caller's agent process as the owner process of every lease of the
-  holding, so a lease survives a restart of the agent. A lease whose owner process still runs
+- `touch`, and a request that keeps a holding, record the caller's agent process as the owner
+  process of every lease of the holding, also of a lease that the request does not name, so a
+  lease survives a restart of the agent. A lease whose owner process still runs
   and started the caller keeps that owner, also for `acquire --lease`: the caller works within
   the life of that process. So a script that `banksman run --where` runs cannot move the lease
   of the run to the agent, and the lease still ends with the run. A script that has left the
   process tree of the run counts as started by it when its `BANKSMAN_LEASE` names a lease of the
   holding.
 - `release --all` gives back only the leases whose owner process is the caller's agent
-  process, so it acts for one agent. After a restart of the agent, it finds a lease only
-  after a touch has recorded the new agent process; until then, the lease ends by its
-  timeouts. A subagent runs its commands in the agent process of its session (section 17), so
-  `release --all` also gives back the leases of the other subagents of the session.
+  process, or that its session continues (see below), so it acts for one agent. A subagent
+  runs its commands in the agent process of its session (section 17), so `release --all` also
+  gives back the leases of the other subagents of the session.
+- **A session continues its holdings.** An app can run a session of an agent in a new agent
+  process, for example when it restarts the agent between two messages of the user, and the
+  new process can come at any time. The session keeps its id, and the lease records it. So a
+  held lease is also the caller's when it has the agent and the session of the caller's agent
+  process, and its owner process has ended. Acquire with a label, `touch`, `wait`, `run`, and
+  `release` with a label, `release --all`, `held`, the adb guard, and the notices of the
+  reaper count such a lease as the caller's. `acquire`, `touch`, `wait`, and `run` with the
+  label record the new agent process in every lease of the holding, also in those that the
+  command does not name, and `acquire` prints `KEPT=true`; from then on, the lease lives with
+  the new process. An adb call uses the holding at once and touches it, but records no owner
+  process (section 12).
+  - The owner process must have ended. A lease of the session whose owner process runs stays
+    with that process: the lease of `banksman run --where`, or of a build with `--owner-pid`,
+    records the session of the agent, and it must still end with its own process. Otherwise a
+    `release --all` of the agent would give back the build slot of a build that still runs.
+  - banksman does not know the session of a process that the caller names, so with
+    `--owner-pid`, the pid alone counts.
+  - The grace period stays. A lease whose owner process has ended is void after the grace
+    period without a touch, also when its session can still come back (section 3). A device
+    must not wait for a person, so an agent still releases its holding before it stops to wait
+    for an answer.
+  - The worktree is not part of the rule. Several sessions can work in one worktree, for example
+    two chats of an app in one workspace, so a holding by worktree and label would give one of
+    them the devices of the other. A session that moves to another directory is still the same
+    agent.
+  - An agent without a session variable gets nothing new: after a restart, a touch with a lease
+    id records the new agent process, as before.
 
 - **Named holdings.** An agent must keep the lease id between its commands. But the shell tool
   of an agent does not keep variables from one command to the next, a compaction of the
@@ -1265,9 +1294,10 @@ agent, through its own agent process.
   `acquire` has ended before it was done, the instance can be started or reset only in part,
   so the lease is void, and the next command takes it back (section 3). The request with the
   label then starts a new holding.
-- After a restart of the agent, a label finds its holding only after a touch with a lease id
-  has recorded the new agent process, as for `release --all`. When that touch gives the new
-  process two holdings with one label, banksman refuses the label and names a lease of each
+- After a restart of the agent, a label finds its holding in the session that continues it, as
+  for `release --all`. For an agent without a session, it finds it only after a touch with a
+  lease id has recorded the new agent process. When the new process has two holdings with one
+  label, for example after such a touch, banksman refuses the label and names a lease of each
   holding, instead of choosing one.
 
 - banksman reads the branch from the `HEAD` file of the worktree, and runs no `git`
@@ -1621,9 +1651,11 @@ is a setup of the operator, and a project needs nothing for it.
   - The device has no lease, and the guard is not strict.
   - The lease is held, and its holding is the caller's: `BANKSMAN_LEASE` names a lease of the
     holding, as `banksman run` sets it, or the owner process of a lease of the holding is above
-    the caller, or is the agent process that the environment of the caller names. So a script
+    the caller, or is the agent process that the environment of the caller names, or the session
+    of the caller's agent process continues a lease of the holding (section 9). So a script
     that has left the process tree of its agent can use the devices of its agent, and is refused
-    on the device of another holder.
+    on the device of another holder, and after a restart of the agent, the new agent process of
+    the session uses the devices of the earlier one at once.
   - The banksman process that the lease names is above the caller: the `acquire` that resets
     the instance, or the reaper that takes it back. Their hooks act on the device, and a reaper
     can run inside a command of another agent (section 5).
@@ -1649,10 +1681,10 @@ is a setup of the operator, and a project needs nothing for it.
 - **Touches.** The idle timeout ends a lease that nothing touched (section 3). An agent that
   uses its device with direct adb calls, for example to verify a change on the device, makes
   many device calls and no banksman call. So a device command that the guard lets run because
-  a held lease of the caller's holding has the device, through `BANKSMAN_LEASE` or through the
-  owner process above the caller or named in its environment, touches that lease and the other
-  held leases of its holding, as `touch` does (section 7). The idle timeout then counts the
-  time without a banksman call
+  a held lease of the caller's holding has the device, through `BANKSMAN_LEASE`, through the
+  owner process above the caller or named in its environment, or through its session, touches
+  that lease and the other held leases of its holding, as `touch` does (section 7). The idle
+  timeout then counts the time without a banksman call
   and without a device call of the holder. The guard touches the holding when the last touch
   of one of its held leases is more than a minute old, or more than a quarter of the idle
   timeout of that lease when that is shorter. So a lease of the holding with an idle timeout of
@@ -1683,8 +1715,9 @@ is a setup of the operator, and a project needs nothing for it.
   machine, and the list does not say which of them its holding leases. So for `adb devices` and
   `adb devices -l` of a caller with an agent process, the guard prints one line on standard
   error before the wrapper runs adb. When held leases of the caller's holdings have devices,
-  through an owner process above the caller or named in its environment, the line names their
-  serials, or the resource while the serial is not known, with the label of the holding:
+  through an owner process above the caller or named in its environment, or through its
+  session, the line names their serials, or the resource while the serial is not known, with
+  the label of the holding:
 
   ```text
   banksman: your holding login-tests has emulator-5556. Use only that device; get another with banksman acquire.

@@ -11,13 +11,13 @@ import time
 import pytest
 from helpers import SRC, age_lease, edit_lease, hook, table_rows, write_config
 
-from banksman import __version__, cli, console, hooks
+from banksman import __version__, cli, console, hooks, identity
 from banksman.cli import main
 from banksman.config import parse_duration
 from banksman.errors import BanksmanError
 from banksman.history import GUARD, NOT_LEASED, OTHER_HOLDER, REFUSED, WARNED, Event, History
 from banksman.inventory import Decisions, Inventory, save_inventory
-from banksman.lease import Holder
+from banksman.lease import Holder, Session, Timeouts
 from banksman.store import Choice, Need, NotHeld, Store
 from banksman.system import Machine
 
@@ -141,6 +141,95 @@ def test_held_by_lists_the_held_leases_of_one_owner_process(store, system, agent
     # A void lease is not held, also before the reaper takes it back.
     system.advance(4 * 60 * 60)
     assert store.held_by(101) == []
+
+
+# A session that continues in a new agent process.
+
+SESSION = Session("claude", "session-1")
+
+
+def in_session(owner_pid, session=SESSION):
+    return Holder(OWNER, owner_pid=owner_pid, agent=session.agent, session=session.session_id)
+
+
+def test_a_new_agent_process_of_the_session_continues_its_holding(store, system, agents):
+    # The app restarted the agent: process 101 ended, and the session runs on in process 102.
+    first = grant(store, in_session(101), "tests", "emu-1", "emu-2")
+    system.end(101)
+    assert sorted(store.labelled(102, "tests", SESSION)) == ["emu-1", "emu-2"]
+    assert sorted(lease.resource for lease in store.held_by(102, SESSION)) == ["emu-1", "emu-2"]
+    again = grant(store, in_session(102), "tests", "emu-1", session=SESSION)["emu-1"]
+    assert (again.kept, again.lease.lease_id) == (True, first["emu-1"].lease.lease_id)
+    # The grant recorded the new agent process in every lease of the holding, so they live with
+    # it now, also without the session.
+    held = store.labelled(102, "tests")
+    assert {lease.owner_pid for lease in held.values()} == {102}
+    system.advance(Timeouts().owner_grace + 1)
+    assert sorted(store.labelled(102, "tests")) == ["emu-1", "emu-2"]
+
+
+def test_a_request_that_keeps_a_holding_records_its_owner_process_in_every_lease(
+    store, system, agents
+):
+    # An agent without a session: after a restart, it keeps its holding by a lease id.
+    first = grant(store, Holder(OWNER, owner_pid=101), None, "emu-1", "emu-2")
+    system.end(101)
+    lease_id = first["emu-1"].lease.lease_id
+    need = [Need((Choice("emu-1", "emulator"),))]
+    (kept,) = store.grant(need, Holder(OWNER, owner_pid=102), keep=lease_id)
+    assert kept.kept
+    assert {lease.owner_pid for lease in store.holding(lease_id).values()} == {102}
+
+
+@pytest.mark.parametrize(
+    "session",
+    [
+        Session("claude", "session-2"),
+        # Another agent with the same id.
+        Session("codex", "session-1"),
+        None,
+    ],
+)
+def test_only_the_same_session_of_the_same_agent_continues_a_holding(
+    store, system, agents, session
+):
+    grant(store, in_session(101), "tests", "emu-1")
+    system.end(101)
+    assert store.labelled(102, "tests", session) == {}
+    assert store.held_by(102, session) == []
+    started = grant(store, Holder(OWNER, owner_pid=102), "tests", "emu-2", session=session)
+    assert started["emu-2"].kept is False
+
+
+def test_a_lease_of_the_session_whose_owner_process_runs_stays_with_that_process(
+    store, system, agents
+):
+    # Such as the lease of banksman run --where, or of a build that names its own process: the
+    # lease records the session of the agent, and it ends with its own owner process.
+    grant(store, in_session(101), "tests", "emu-1")
+    assert store.labelled(102, "tests", SESSION) == {}
+    assert store.held_by(102, SESSION) == []
+    assert store.release_all(102, session=SESSION) == []
+    assert list(store.labelled(101, "tests")) == ["emu-1"]
+
+
+def test_release_all_gives_back_the_leases_that_the_session_continues(store, system, agents):
+    grant(store, in_session(101), "tests", "emu-1")
+    grant(store, in_session(101), None, "emu-2")
+    system.end(101)
+    assert store.release_all(102) == []
+    released = store.release_all(102, session=SESSION)
+    assert sorted(lease.resource for lease, _ in released) == ["emu-1", "emu-2"]
+    assert store.held_by(102, SESSION) == []
+
+
+def test_a_session_does_not_continue_a_lease_after_the_owner_grace(store, system, agents):
+    grant(store, in_session(101), "tests", "emu-1")
+    system.end(101)
+    system.advance(Timeouts().owner_grace)
+    assert store.labelled(102, "tests", SESSION) == {}
+    store.reap()
+    assert grant(store, in_session(102), "tests", "emu-1", session=SESSION)["emu-1"].kept is False
 
 
 # The commands.
@@ -312,6 +401,68 @@ def test_held_lists_the_holdings_of_the_agent_process(capsys, config_path, other
     assert main(["release", "--all", *ME]) == 0
     capsys.readouterr()
     assert held_text(capsys, *ME) == (f"Process {os.getpid()} holds no lease.", NO_CALLS)
+
+
+def sleeper():
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["acquire", "--holding", "tests", "--where", "form=phone"],
+        ["run", "--holding", "tests", "--", sys.executable, "-c", "pass"],
+        ["wait", "--holding", "tests"],
+        ["touch", "--holding", "tests"],
+    ],
+)
+def test_a_new_agent_process_of_the_session_takes_its_holding_over(
+    capsys, config_path, monkeypatch, command
+):
+    configure(config_path)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "session-1")
+    processes = []
+
+    def agent_process():
+        process = sleeper()
+        processes.append(process)
+
+        def found(table, agents, pid, env):
+            return process.pid, "claude"
+
+        monkeypatch.setattr(cli, "find_agent", found)
+        monkeypatch.setattr(identity, "find_agent", found)
+        return process
+
+    try:
+        earlier = agent_process()
+        _, first, _ = acquire(capsys, "--holding", "tests", "--where", "form=phone")
+        assert (first["RESOURCE"], first["KEPT"]) == ("qa_phone", "false")
+        # The app ends the agent process, and runs the session on in a new one.
+        earlier.kill()
+        earlier.wait()
+        now = agent_process()
+        shown, _ = held_text(capsys)
+        assert [(row["LABEL"], row["RESOURCE"]) for row in table_rows(shown)] == [
+            ("tests", "qa_phone")
+        ]
+        # banksman does not know the session of a process that the caller names.
+        assert held_text(capsys, "--owner-pid", str(now.pid))[0] == (
+            f"Process {now.pid} holds no lease."
+        )
+        assert main(command) == 0
+        if command[0] == "acquire":
+            assert "KEPT=true" in capsys.readouterr().out.splitlines()
+        # The lease lives with the new agent process now.
+        held = leases()["qa_phone"]
+        assert (held.lease_id, held.owner_pid) == (first["LEASE"], now.pid)
+        capsys.readouterr()
+        assert main(["release", "--holding", "tests"]) == 0
+        assert capsys.readouterr().out == "Released qa_phone: it is free.\n"
+    finally:
+        for process in processes:
+            process.kill()
+            process.wait()
 
 
 def test_held_without_an_agent_process_is_an_error(capsys, config_path):

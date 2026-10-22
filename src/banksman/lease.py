@@ -116,10 +116,37 @@ class Holder:
     issue: str | None = None
     # The program name of the agent process.
     agent: str | None = None
-    # An agent-specific id of the session, for display only.
+    # An agent-specific id of the session. A new process of the session continues its holdings
+    # (see `Session`).
     session: str | None = None
     # Text that one agent writes and other agents read. It is untrusted.
     purpose: str | None = None
+
+
+@dataclass(frozen=True)
+class Session:
+    """An agent session: the program of the agent, and the id that the agent gives the session.
+
+    An app can run a session in a new agent process, for example after it restarted the agent,
+    and the session keeps its id. A lease records the owner process for liveness, so without the
+    session, the new process would be another holder until the lease is void.
+    """
+
+    agent: str
+    session_id: str
+
+    def continues(self, lease: Lease, running: Mapping[int, str]) -> bool:
+        """Whether a process of this session takes over a lease: the lease is of the session,
+        and its owner process has ended.
+
+        A lease whose owner process runs stays with that process, for example the lease of
+        `banksman run --where`, or of a build with `--owner-pid`.
+        """
+        return (
+            lease.agent == self.agent
+            and lease.session == self.session_id
+            and not owner_runs(lease, running)
+        )
 
 
 @dataclass(frozen=True)

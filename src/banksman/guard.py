@@ -48,7 +48,7 @@ from banksman.history import (
     Event,
     History,
 )
-from banksman.identity import find_agent, find_holder
+from banksman.identity import find_agent, find_holder, session_of
 from banksman.lease import (
     HELD,
     LEASE_VARIABLE,
@@ -56,6 +56,7 @@ from banksman.lease import (
     VOID_REASONS,
     Holder,
     Lease,
+    Session,
     void_reason,
 )
 from banksman.sanitize import clean
@@ -456,12 +457,15 @@ class Caller:
 
     @cached_property
     def holdings(self) -> set[str]:
-        """Return the holdings of the lease id that the caller has, and of the owner processes
-        above it."""
+        """Return the holdings of the lease id that the caller has, of the owner processes above
+        it, and that the session of its agent process continues (see `Session.continues`)."""
+        session = self._session
+        running = _Started(lambda: self._table)
         found = {
             lease.holding
             for lease in self.leases
             if self.descends_from(lease.owner_pid, lease.owner_started)
+            or (session is not None and session.continues(lease, running))
         }
         token = self.token_holding()
         return found if token is None else found | {token}
@@ -476,7 +480,15 @@ class Caller:
 
     @cached_property
     def _agent(self) -> int | None:
-        return find_agent(self._table, self.rules.agents, self.pid, self.env)[0]
+        return self._found[0]
+
+    @cached_property
+    def _session(self) -> Session | None:
+        return session_of(self._found[1], self.env)
+
+    @cached_property
+    def _found(self) -> tuple[int | None, str | None]:
+        return find_agent(self._table, self.rules.agents, self.pid, self.env)
 
 
 class _Started(Mapping[int, str]):

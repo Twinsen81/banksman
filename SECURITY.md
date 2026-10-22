@@ -236,7 +236,10 @@ emulator, and a process that has no agent process all pass, and the lease id tha
 call pass is the same token as for the scripts. A process can name an agent process in the pid
 variable of the agent, such as `CLAUDE_PID`, as it can with `--owner-pid`: banksman checks only
 that the process runs, is that agent, and started before the processes that got the variable
-from it. The wrapper runs
+from it. In the same way, a process can set the session variable of an agent, such as
+`CLAUDE_CODE_SESSION_ID`, to another session of that agent, and so use a holding of that session
+whose agent process has ended. The session id is not a secret: the lease files,
+`status --json`, and the log carry it. The wrapper runs
 only a `banksman` in an
 absolute directory of the `PATH`, so a file in a project cannot stand in for it, and the wrapper
 runs the adb of the SDK of the configuration, or the adb that it saved, never one from the

@@ -112,6 +112,27 @@ def test_a_build_without_a_terminal_and_without_an_agent_is_not_a_person(
     assert capsys.readouterr().err == ""
 
 
+def test_a_lease_of_the_session_whose_agent_process_ended_is_its_own(
+    capsys, state_dir, agent, monkeypatch
+):
+    # The agent restarted: its earlier process took the lease, and the session runs on in a new
+    # process.
+    earlier = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    holder = Holder(OWNER, owner_pid=earlier.pid, agent="claude", session="session-1")
+    Store(state_dir, Machine()).acquire("phone-1", "device", holder)
+    earlier.kill()
+    earlier.wait()
+    edit_lease(state_dir, "phone-1", lambda data: drain(data, deadline=0))
+    edit_lease(state_dir, "phone-1", lambda data: data.update(users=[_me().to_json()]))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "session-1")
+    assert main(["status"]) == 0
+    assert capsys.readouterr().err == OWN_LINE
+
+
+def _me() -> User:
+    return User(os.getpid(), Machine().running([os.getpid()])[os.getpid()])
+
+
 def test_a_lease_whose_owner_process_is_above_the_caller_is_its_own(capsys, state_dir, no_agent):
     # For example the build slot of a Gradle daemon, or the lease of banksman run --where.
     quarantine(state_dir, owner_pid=os.getpid(), owner=OWNER)

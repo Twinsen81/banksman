@@ -601,3 +601,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its calls. The JSON of a group has them in the new field `serials`, and `serial` is the serial
   of its last event. The events that are in the log already do not change. The output schema
   does not change.
+- A new agent process of a session continues the holdings of the earlier one. An app can run a
+  session in a new agent process at any time, for example between two messages of the user, and
+  banksman tied each holding to the agent process. So the new process had no holding: the adb
+  guard refused its calls on its own devices, `acquire --holding` with its label waited, and
+  `release --holding` found nothing, until the grace period voided the leases. A held lease is
+  now also the caller's when it has the agent and the session of the caller's agent process,
+  and its owner process has ended. `acquire --holding` then prints `KEPT=true`, and it, `touch`,
+  `wait`, and `run` with the label record the new agent process in every lease of the holding.
+  A lease whose owner process still runs, such as the lease of `banksman run --where` or a
+  build slot, stays with that process. With `--owner-pid`, the pid alone counts, as before.
+  banksman now also reads `CODEX_SESSION_ID`, the session of Codex, so `whoami`, `status`, and
+  the log show it. The lease schema and the output schema do not change.
