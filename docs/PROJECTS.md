@@ -174,6 +174,12 @@ The `|| status=$?` keeps the status of the command and lets the script go on to
 `banksman_release`, also under `set -e`. A script that can end earlier, for example on an
 error, gives the lease back in a trap: `trap banksman_release EXIT`.
 
+A project with a minimum API level adds it to each request, for example
+`banksman_acquire --where form=phone --where 'api>=28' ...`, and says the same in the
+instructions for its agents. The operator allows the emulators for every project on the
+machine, so an emulator below that level can be free, and a request without the clause can get
+it (DESIGN.md, section 15).
+
 A wait should be shorter than the timeout of the shell tool of the agent that runs the
 script, so that the agent gets the result in the same call. Claude Code waits 2 minutes for a
 command of its Bash tool unless the agent gives a longer timeout, and 10 minutes at most. Then

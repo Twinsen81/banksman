@@ -6,7 +6,7 @@ import sys
 from dataclasses import replace
 
 import pytest
-from helpers import SRC, FakeSystem
+from helpers import SRC, FakeSystem, sleep_as
 
 from banksman.config import HolderRules
 from banksman.errors import BanksmanError
@@ -539,8 +539,7 @@ os.execv(sys.executable, [sys.executable, "-m", "banksman", "whoami", "--json"])
 def test_whoami_finds_the_agent_by_the_variable_on_the_real_machine(tmp_path):
     agent_program = tmp_path / "bin" / "claude"
     agent_program.parent.mkdir()
-    agent_program.symlink_to("/bin/sleep")
-    agent = subprocess.Popen([str(agent_program), "60"])
+    agent = sleep_as(agent_program, 60)
     try:
         result = subprocess.run(
             [sys.executable, "-c", DETACHED],

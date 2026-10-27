@@ -697,6 +697,8 @@ def test_agent_guide_prints_a_skill_for_the_installed_version(capsys):
     assert "`STARTED=true` says that this request started the device" in guide
     # It says where the agent finds a refusal of the adb guard that a script hid.
     assert "run `banksman held` first" in guide
+    # It says that the minimum API level of the project goes in every request.
+    assert "When your project has a minimum API level" in guide
 
 
 def test_the_guide_names_every_key_of_the_grant_and_every_variable_of_run(capsys):

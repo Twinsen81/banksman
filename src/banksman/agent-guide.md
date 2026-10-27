@@ -44,6 +44,9 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
   device, ask for it with `--where`, for example `avd=<name>`.
 - Ask for properties with `--where`, such as `form=tablet`, `'api>=33'`, or `avd=<name>`.
   `banksman status` shows the devices that exist, and who holds them.
+- When your project has a minimum API level, put it in every request for an emulator or a
+  device, for example `--where 'api>=28'`. The machine can have emulators below that level for
+  other projects, and a request without it can get one of them.
 - `form` is `phone`, `tablet`, `foldable`, `watch`, or `tv`. A foldable is never a phone or a
   tablet: ask for `form=foldable` to get one.
 - Add `--start` to get a device that runs: banksman then starts a granted emulator that does

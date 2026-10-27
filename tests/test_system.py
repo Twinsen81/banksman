@@ -5,6 +5,7 @@ import sys
 import time
 
 import pytest
+from helpers import sleep_as
 
 from banksman import system
 from banksman.system import Machine, MachineError, Process, started_no_later
@@ -121,8 +122,7 @@ def test_the_process_table_keeps_a_program_path_with_spaces(tmp_path):
     folder = tmp_path / "Application Support"
     folder.mkdir()
     program = folder / "sleep for agents"
-    program.symlink_to("/bin/sleep")
-    child = subprocess.Popen([str(program), "60"])
+    child = sleep_as(program, 60)
     try:
         shown = Machine().process_table()[child.pid].program
         # Linux shows only the last part of the path, cut to 15 characters.
