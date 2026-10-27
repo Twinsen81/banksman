@@ -2040,6 +2040,13 @@ this section names.
   permission rules of the agents ask the user before every `banksman acquire ... --paid` and
   `banksman run ... --paid`.
 - Keep app setup and cleanup in the project's scripts.
+- Keep the needs of one project in its requests, not in the inventory or the `preselect`
+  patterns. Every project on the machine uses the same inventory, so an instance that the
+  operator refuses because one project cannot use it is refused to all projects. A project
+  that needs a minimum API level asks for it in each request, for example with
+  `--where 'api>=28'`, in its scripts and in the instructions for its agents. A request
+  without it can get an emulator below that level, because the order of choice does not
+  look at the API level (section 6).
 - Refuse `banksman admin` in the permission rules of the agents. Without such a rule, an agent
   can widen what agents may use, or take a resource from another holder. The rule is a
   guardrail, not a security boundary.

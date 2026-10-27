@@ -616,3 +616,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boot before a banksman command reaps it.
   banksman now also reads `CODEX_SESSION_ID`, the session of Codex, so `whoami`, `status`, and
   the log show it. The lease schema and the output schema do not change.
+- The guide for agents now says to put the minimum API level of the project in every request,
+  for example `--where 'api>=28'`. The operator allows the emulators for every project on the
+  machine, and a request without the clause can get an emulator below that level. The design
+  and [docs/PROJECTS.md](docs/PROJECTS.md) now also say that the needs of one project belong in
+  its requests, not in the inventory or the `preselect` patterns: an operator who refused the
+  emulators below the level of one project refused them to every other project too.
