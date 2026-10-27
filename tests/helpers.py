@@ -122,6 +122,21 @@ class FakeSystem:
 NOT_ENDED = "the instance did not end"
 
 
+def sleep_as(program: Path, seconds: int) -> subprocess.Popen:
+    """Start a process that sleeps through `program`, a new symlink, so that the process list
+    names the process after `program`.
+
+    On macOS, the symlink is to /bin/sleep, because Python of a framework build runs Python.app,
+    and the process gets the name of that program. On Linux, the symlink is to Python, because
+    the sleep of uutils coreutils refuses to run under another name.
+    """
+    if sys.platform == "darwin":
+        program.symlink_to("/bin/sleep")
+        return subprocess.Popen([str(program), str(seconds)])
+    program.symlink_to(sys.executable)
+    return subprocess.Popen([str(program), "-c", f"import time; time.sleep({seconds})"])
+
+
 def write_config(path: Path, text: str) -> Path:
     """Write a configuration file that banksman accepts, whatever the umask is."""
     path.write_text(text)

@@ -18,6 +18,7 @@ from helpers import (
     FakeSystem,
     edit_lease,
     reap_in_child,
+    sleep_as,
     table_rows,
     work_in,
     write_config,
@@ -1604,8 +1605,7 @@ def agent(tmp_path):
         pytest.skip("needs /bin/sleep")
     program = tmp_path / "bin" / "claude"
     program.parent.mkdir()
-    program.symlink_to("/bin/sleep")
-    process = subprocess.Popen([str(program), "120"])
+    process = sleep_as(program, 120)
     yield process
     process.kill()
     process.wait()
