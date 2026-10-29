@@ -1,89 +1,38 @@
 # banksman
 
-Lease shared devices and emulators to parallel coding agents on one machine, so that two
-agents never use the same device at the same time, and a dead run never holds one forever.
+Lease shared Android devices and emulators to parallel coding agents on one machine.
 
-> **Status: pre-alpha, not usable yet.** This repository has the design, the lease core
-> (lease files, void triggers, and the reaper), resource kinds as configuration, fencing,
-> discovery with the allowlist, holder identity, requests by properties, joint acquire with
-> accounts, the console (`status`, `watch`, and `log`), the supervised run (`banksman run`)
-> with a helper for the scripts of a project, optional build slots for Gradle, an optional
-> adb guard, emulators that banksman starts on `--start` and never gives away when somebody
-> else started them, paid remote devices of Android Device Streaming that banksman reserves on
-> `--start`, holdings that an agent names with a label, and a guide for agents.
-> `explain` and the queue of the callers that wait are not written yet. The design is in
-> [docs/DESIGN.md](docs/DESIGN.md).
-
-A *banksman* is the person on a building site who directs crane lifts and tells each
-operator when it is safe to move. This tool does that job for agents that share a machine:
-it decides who may use which device, records who holds it and why, and takes it back when
-the holder is gone.
+> **Status: pre-alpha.** The commands and the file formats can still change.
 
 ## The problem
 
-Run two or three coding agents in parallel worktrees of one mobile app, and they reach for
-the same devices: a phone on USB, and a small number of emulators. One agent installs its
-build while another is in the middle of a UI test. A lock held by "whoever started it" does
-not help, because it stays taken forever when that run dies.
+Run two or three coding agents in parallel worktrees of one app, and they reach for the same
+devices. One agent installs its build while another is in the middle of a UI test. A lock does
+not help, because it stays taken forever when its run dies.
 
-banksman is made for devices and emulators. The lease core does not depend on the type of
-resource, so an operator can also declare other resources, such as host ports or a mutex for
-`sdkmanager`. These are optional, and a project that only shares devices does not need them.
+## What it does
 
-## How it works
-
-- **Leases, not locks.** A lease becomes void when its holder is gone, when it has been
-  idle too long, or when it has been held longer than a hard limit. A dead run cannot keep
-  a device.
-- **Requests by properties.** A run asks for what it needs, for example
-  `banksman acquire --where form=tablet --where 'api>=33'`, not for a device by name.
-- **Several resources at once.** A run that needs a phone and a tablet, or a device with a
-  signed-in test account, gets them in one call, all or nothing. Two runs never use the same
-  account at the same time, also not on two different devices.
-- **Work that stops when its lease is lost.** `banksman run` runs a command in a process
-  group of its own under a lease, and stops it when the lease is lost. With `--where`, it
-  leases a resource just for that command, so a kind with one instance is a mutex.
-- **Automatic holder identity.** banksman records the worktree, the issue, and the agent
-  process that holds each lease. It works the same for any coding agent, and for a person
-  at a terminal.
-- **One view of everything.** `banksman status` shows every resource, who holds it, why,
-  and when it will be free at the latest. Agents read the same data as JSON.
-- **Closed by default.** An agent can only get what the operator allows. A personal phone
-  or emulator on the same machine is never offered, and an allowed emulator that a person
-  started outside banksman is not given to an agent.
-- **Starts emulators, when asked.** With `--start`, banksman starts a granted emulator that
-  does not run, on a port that it chooses before the boot, so two parallel starts never mix
-  up their serials. It ends the emulators that it started, also, with a free timeout, the free
-  ones that no lease has used for that time. With an unused timeout, `banksman reap` also ends
-  an emulator without a lease that has had no input for that time, when banksman started it or
-  the agent that started it has ended, and `banksman admin reap-agent` prints a launchd job or a
-  crontab line that runs `banksman reap` every 5 minutes. With `--no-wait`, the start goes on
-  after `acquire` has returned, so the time limit of an agent's shell tool does not stop it,
-  and `banksman wait` waits until the emulator is ready.
-- **A guard for raw adb calls, when the operator wants it.** An optional `adb` wrapper on the
-  `PATH` refuses an agent's device command on a device that another holder leases, also when
-  a script or an agent calls adb without banksman. An adb call of the holder on its own device
-  keeps the lease, so a lease that an agent uses with direct adb calls does not become idle. An
-  agent's `adb devices` also says which devices are its own. A warn mode lists the scripts and agents that still use devices without a lease, before a
-  strict mode refuses them. A part of the guard for Gradle checks the tasks of the Android
-  Gradle plugin that install on a device, remove from it, or run tests on it, which do not
-  run adb, before such a build runs its first task.
-- **Knows no app.** banksman leases devices. What a run installs or clears on a device is
-  the run's own business.
-- **Other resources, when the operator wants them.** A counted kind is a number of
-  interchangeable slots. For example, an operator who wants to limit parallel Gradle builds
-  can install a Gradle init script that makes every build hold a build slot. This is one
-  use of a counted kind. It is not part of the device setup, and a project does not need it.
-- **Optional.** Scripts that call banksman behave exactly as before on a machine where it
-  is not installed. [docs/PROJECTS.md](docs/PROJECTS.md) has a helper that a project copies,
-  a stub for its tests, and permission rules for its agents, and `banksman agent-guide` prints
-  a guide for the agents in the format of a skill.
+- **Leases, not locks.** A lease ends when its agent process is gone, when nobody uses it for
+  too long, or at a hard limit. Nothing needs to be renewed.
+- **Works with your setup.** Your AVDs, your phones on USB or Wi-Fi, the default adb server, and
+  your scripts stay as they are. Scripts behave as before on a machine without banksman.
+- **Requests by properties.** `banksman acquire --where form=tablet --where 'api>=33'`. Several
+  devices and test accounts come in one call, all or nothing.
+- **Work that stops with its lease.** `banksman run` runs a command with `ANDROID_SERIAL` set to
+  the leased device, and stops the command when the lease is lost.
+- **An optional guard on adb and Gradle.** It refuses a call on a device that another agent
+  holds, also in scripts that do not know banksman, and tells the agent how to get a device.
+- **Closed by default.** Agents get only the devices that the operator allows.
+- **Emulators on request.** `--start` boots a leased emulator, and banksman ends it when nobody
+  uses it.
+- **One view.** `banksman status` shows who holds each device, why, and until when.
+- **Small.** Python standard library only, no daemon.
 
 ## Requirements
 
 - macOS or Linux.
 - Python 3.11 or newer.
-- For Android devices and emulators: the Android SDK platform tools and emulator.
+- The Android SDK platform tools and emulator.
 
 ## Trying it
 
@@ -91,15 +40,15 @@ resource, so an operator can also declare other resources, such as host ports or
 python3 -m venv ~/.venvs/banksman
 ~/.venvs/banksman/bin/pip install -e .
 ~/.venvs/banksman/bin/banksman version
-~/.venvs/banksman/bin/banksman status --json
+~/.venvs/banksman/bin/banksman admin doctor
 ```
 
-After you install or upgrade banksman, and after you change its setup, run
-`banksman admin doctor`. It checks the configuration, the inventory, the Android SDK, the
-`PATH`, and the directories of banksman, and it compares the files that you saved from
-banksman, such as the adb wrapper, the Gradle scripts, and the guide for agents, with what the
-installed banksman prints. It changes nothing, says how to repair each problem, and exits with
-status 1 when a check fails.
+## Documentation
+
+- [docs/PROJECTS.md](docs/PROJECTS.md): use banksman from a project, and set it up for agents.
+- [docs/DESIGN.md](docs/DESIGN.md): the design and the roadmap.
+- [DECISIONS.md](DECISIONS.md): the design decisions and why.
+- [SECURITY.md](SECURITY.md): what banksman protects, and what it does not.
 
 ## License
 
