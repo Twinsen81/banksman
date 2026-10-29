@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/images/banksman-logo.png" alt="banksman" width="600"></p>
+
 # banksman
 
 Lease shared Android devices and emulators to parallel coding agents on one machine.
