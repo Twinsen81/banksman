@@ -4,7 +4,8 @@
 
 Lease shared Android devices and emulators to parallel coding agents on one machine.
 
-> **Status: pre-alpha.** The commands and the file formats can still change.
+> **Status: beta.** The core features are complete. Until 1.0.0, a minor version can change
+> the commands and the file formats, and [CHANGELOG.md][changelog] names every such change.
 
 ## The problem
 
@@ -60,6 +61,7 @@ banksman from a clone, see [CONTRIBUTING.md][contributing].
 [Apache License 2.0][license]. Contributions are welcome; see [CONTRIBUTING.md][contributing].
 
 <!-- Full URLs, so that the links also work on PyPI. -->
+[changelog]: https://github.com/Twinsen81/banksman/blob/main/CHANGELOG.md
 [contributing]: https://github.com/Twinsen81/banksman/blob/main/CONTRIBUTING.md
 [projects]: https://github.com/Twinsen81/banksman/blob/main/docs/PROJECTS.md
 [design]: https://github.com/Twinsen81/banksman/blob/main/docs/DESIGN.md
