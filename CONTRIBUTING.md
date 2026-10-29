@@ -97,6 +97,35 @@ field needs only that. A field that is removed or renamed, or that changes its t
 meaning, also needs a new `OUTPUT_SCHEMA`. Any change of the lease file format needs a new
 `LEASE_SCHEMA`. Section 14 of [docs/DESIGN.md](docs/DESIGN.md) has the rules.
 
+## Releasing
+
+A tag `vX.Y.Z` on `main` starts the release workflow
+([`.github/workflows/release.yml`](.github/workflows/release.yml)). It runs the tests, builds the
+sdist and the wheel, checks them, publishes them on PyPI with trusted publishing, and creates
+the GitHub release with the notes of the version from `CHANGELOG.md`. It stops before PyPI when
+the tag is not on `main`, when the tag and the version of the package differ, or when
+`CHANGELOG.md` has no section for the version.
+
+1. In a PR, set `__version__` in `src/banksman/__init__.py` to `X.Y.Z`. In `CHANGELOG.md`, move
+   the entries under `## [Unreleased]` to a new section `## [X.Y.Z] - YYYY-MM-DD`, and update
+   the links at the end of the file. Name every change of `LEASE_SCHEMA` or `OUTPUT_SCHEMA` in
+   the notes, because an operator must then save again the files that banksman printed.
+2. After the merge, tag the merge commit and push the tag:
+
+   ```bash
+   git switch main && git pull
+   git tag -a vX.Y.Z -m "banksman X.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
+3. Check that the workflow passes, that <https://pypi.org/project/banksman/> shows the version,
+   and that the GitHub release exists.
+4. On each machine that uses banksman, run `pipx upgrade banksman` and `banksman admin doctor`,
+   and save again the files that it names.
+
+PyPI accepts the release because the project has a trusted publisher for this repository, the
+workflow `release.yml`, and the environment `pypi`. No token is stored.
+
 ## Code of Conduct
 
 By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).

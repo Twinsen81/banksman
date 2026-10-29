@@ -28,6 +28,9 @@ dependencies = []
 [project.urls]
 Homepage = "https://github.com/Twinsen81/banksman"
 Repository = "https://github.com/Twinsen81/banksman"
+Documentation = "https://github.com/Twinsen81/banksman/blob/main/docs/PROJECTS.md"
+Changelog = "https://github.com/Twinsen81/banksman/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Twinsen81/banksman/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
@@ -42,13 +45,15 @@ path = "src/banksman/__init__.py"
 packages = ["src/banksman"]
 
 [tool.hatch.build.targets.sdist]
+# Anchored with "/": a pattern without it, such as "tests", also matches in any directory below.
 include = [
-    "src/banksman",
-    "tests",
-    "docs",
-    "README.md",
-    "LICENSE",
-    "pyproject.toml",
+    "/src/banksman",
+    "/tests",
+    "/docs",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/pyproject.toml",
 ]
 
 [tool.pytest.ini_options]

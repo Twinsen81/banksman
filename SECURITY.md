@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-banksman has no release yet. Security fixes go to the `main` branch until the first
-release; after that, to the latest release.
+Only the latest release gets security fixes. Before 1.0.0, earlier minor versions get no
+fixes: upgrade with `pipx upgrade banksman`.
 
 ## Reporting a vulnerability
 
