@@ -2274,6 +2274,8 @@ Done:
   job, which runs `banksman reap` every 5 minutes.
 - The trace: when the operator turns it on, a line for every command and every adb call
   through the guard, with what banksman saw and decided on the way.
+- Releases on PyPI, for `pipx install banksman`: a tag starts a workflow that publishes with
+  trusted publishing and creates the GitHub release.
 
 Next:
 

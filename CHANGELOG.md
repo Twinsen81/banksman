@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-29
+
+The first release, on PyPI: `pipx install banksman`. banksman leases shared Android devices,
+emulators, and build slots to parallel coding agents on one machine. It has leases that end
+with their holder, requests by properties, several devices and accounts in one call,
+`banksman run`, an optional guard on adb and Gradle, emulators that banksman starts and ends,
+paid remote devices of Android Device Streaming, `status`, `watch`, and `log`, a guide for
+agents, and `banksman admin doctor`. The lease schema is 12, and the output schema is 6. The
+entries below list the changes of the development before this release.
+
 ### Added
 
 - Project scaffold: the `banksman` Python package (standard library only, Python 3.11+),
@@ -533,6 +543,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   device tasks are not checked.
   `banksman admin doctor` checks the two files, and the guide for agents says to run such
   tasks under `banksman run` or with `ANDROID_SERIAL`.
+- Releases on PyPI. A tag `vX.Y.Z` starts a workflow that runs the tests, builds and checks
+  the sdist and the wheel, publishes them with trusted publishing, and creates the GitHub
+  release with the notes of this file. [CONTRIBUTING.md](CONTRIBUTING.md) has the steps.
 
 ### Fixed
 
@@ -652,3 +665,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--holding`, because the helper adds `--lease` under `banksman run`, and that a script takes
   its label from its caller. The stub for tests no longer passes the `BANKSMAN_HANDLE` of its
   caller to the command, as `banksman run` does not.
+
+[Unreleased]: https://github.com/Twinsen81/banksman/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Twinsen81/banksman/releases/tag/v0.1.0

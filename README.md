@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/images/banksman-logo.png" alt="banksman" width="600"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/Twinsen81/banksman/main/docs/images/banksman-logo.png" alt="banksman" width="600"></p>
 
 # banksman
 
@@ -36,24 +36,34 @@ not help, because it stays taken forever when its run dies.
 - Python 3.11 or newer.
 - The Android SDK platform tools and emulator.
 
-## Trying it
+## Install
 
 ```bash
-python3 -m venv ~/.venvs/banksman
-~/.venvs/banksman/bin/pip install -e .
-~/.venvs/banksman/bin/banksman version
-~/.venvs/banksman/bin/banksman admin doctor
+pipx install banksman
+banksman version
+banksman admin doctor
 ```
+
+`uv tool install banksman` works too. To upgrade, run `pipx upgrade banksman`, then
+`banksman admin doctor`: it names the saved files that you must save again. To work on
+banksman from a clone, see [CONTRIBUTING.md][contributing].
 
 ## Documentation
 
-- [docs/PROJECTS.md](docs/PROJECTS.md): use banksman from a project, and set it up for agents.
-- [docs/DESIGN.md](docs/DESIGN.md): the design and the roadmap.
-- [DECISIONS.md](DECISIONS.md): the design decisions and why.
-- [SECURITY.md](SECURITY.md): what banksman protects, and what it does not.
+- [docs/PROJECTS.md][projects]: use banksman from a project, and set it up for agents.
+- [docs/DESIGN.md][design]: the design and the roadmap.
+- [DECISIONS.md][decisions]: the design decisions and why.
+- [SECURITY.md][security]: what banksman protects, and what it does not.
 
 ## License
 
-[Apache License 2.0](LICENSE). Contributions are welcome; see
-[CONTRIBUTING.md](CONTRIBUTING.md).
+[Apache License 2.0][license]. Contributions are welcome; see [CONTRIBUTING.md][contributing].
+
+<!-- Full URLs, so that the links also work on PyPI. -->
+[contributing]: https://github.com/Twinsen81/banksman/blob/main/CONTRIBUTING.md
+[projects]: https://github.com/Twinsen81/banksman/blob/main/docs/PROJECTS.md
+[design]: https://github.com/Twinsen81/banksman/blob/main/docs/DESIGN.md
+[decisions]: https://github.com/Twinsen81/banksman/blob/main/DECISIONS.md
+[security]: https://github.com/Twinsen81/banksman/blob/main/SECURITY.md
+[license]: https://github.com/Twinsen81/banksman/blob/main/LICENSE
 

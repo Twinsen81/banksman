@@ -1,6 +1,6 @@
 """Banksman: lease shared devices, emulators, and build slots to parallel coding agents."""
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
 
 # The version of the lease file format. A banksman that does not know a field would drop it when
 # it writes the file again, so raise this on any change of the format, also on a new field.
