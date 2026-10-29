@@ -59,8 +59,8 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
   `unmanaged` in `banksman status`. When status shows it as started by your agent process
   (`banksman whoami` shows its pid), acquire it, for example with `--where avd=<name>`, and do
   not start a second one: banksman gives it to your agent process and to no other holder.
-  banksman never ends an emulator that it did not start, also when your session ends, so
-  prefer `--start`.
+  banksman does not end such an emulator when your session ends; only an unused timeout that
+  the operator sets can end it later. So prefer `--start`.
 - `banksman held` lists the holdings of your agent process, with their labels, lease ids,
   devices, and serials, and the `adb` calls that banksman refused or warned about in the last
   15 minutes. It also lists the holdings and the calls of the other subagents of your session:
@@ -100,6 +100,10 @@ banksman run --holding login-tests -- ./scripts/ui-tests.sh --device {serial}
   add `--resource <device>`.
 - Outside `banksman run`, pass the serial to every tool, for example `adb -s <serial>`. A bare
   `adb` command acts on whatever device adb chooses.
+- A lease that nobody uses for some time, 20 minutes by default, ends, and another holder can
+  get the device. `banksman run` keeps it in use, and so do your `adb` calls on a machine with
+  the adb guard. Otherwise, after a pause, run `banksman touch --holding login-tests` with
+  your label before you use the device again.
 
 ## Give it back
 
@@ -165,7 +169,7 @@ banksman release --holding login-tests
   `banksman wait` exits with 0 when every device of the holding is ready, and prints them with
   their serials, with 4 while one still boots, and with 3 when the start failed or was stopped.
   Run it again after 4. Use `--no-wait` only for a label that has no device yet: banksman
-  refuses it for a holding that has one. To stop such a start, release the holding.
+  refuses it when a device that must still boot would join a holding that has other devices. To stop such a start, release the holding.
 - Without `--no-wait`, keep the wait short, for example `--wait 3m` with a timeout of 10
   minutes. When the tool stops the command during the boot, banksman ends what it started, and
   the request with the same label starts the boot again.

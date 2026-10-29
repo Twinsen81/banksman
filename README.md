@@ -25,8 +25,8 @@ not help, because it stays taken forever when its run dies.
 - **An optional guard on adb and Gradle.** It refuses a call on a device that another agent
   holds, also in scripts that do not know banksman, and tells the agent how to get a device.
 - **Closed by default.** Agents get only the devices that the operator allows.
-- **Emulators on request.** `--start` boots a leased emulator, and banksman ends it when nobody
-  uses it.
+- **Emulators on request.** `--start` boots a leased emulator. banksman ends it when its holder
+  is gone, on `release --end`, or after a timeout that the operator sets.
 - **One view.** `banksman status` shows who holds each device, why, and until when.
 - **Small.** Python standard library only, no daemon.
 

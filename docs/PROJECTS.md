@@ -199,11 +199,16 @@ holding (`KEPT=true`), also one with another id than the one that the caller gav
 `banksman_release` does not give it back: the lease stays with the caller, who releases it. A
 new lease, also one that joins the caller's holding, the script gives back. Inside
 `banksman run`, `BANKSMAN_LEASE` names the lease of the run, so a script that the run starts
-uses that lease in the same way, and the lease keeps the run as its owner process.
+uses that lease in the same way, and the lease keeps the run as its owner process. So do not
+pass `--holding` to `banksman_acquire`: when `BANKSMAN_LEASE` is set, the helper adds
+`--lease`, and `acquire` refuses the two together.
 
 The helper reads only a grant with one part. A script that needs several resources at the same
 time calls `banksman acquire` with `--as` and `--holding` itself, and runs its command with
-`banksman run --holding` (see "One command on several devices" above).
+`banksman run --holding` (see "One command on several devices" above). A label names a holding
+of the agent process, and the subagents of one session share that process, so a script takes
+its label from an argument or from its caller, never a fixed text: two subagents that run the
+script at the same time would otherwise share one holding.
 
 ## Setup that the device still has
 
@@ -452,7 +457,7 @@ it applies the rules, but not a script with redirections, substitutions, or vari
 banksman must run outside the sandbox anyway, because it reads the process list. Rules are
 experimental in Codex. `codex execpolicy check --rules <file> -- banksman admin discover`
 shows what a rule decides for a command. The rule for `--paid` can only match the flag right
-after the command name, so the text for the agents below asks them to write it there; a
+after the command name, so the guide for agents below asks them to write it there; a
 `--paid` in another place passes without a question.
 
 ### The guide for agents

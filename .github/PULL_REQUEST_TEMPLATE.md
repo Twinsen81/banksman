@@ -6,7 +6,7 @@
 
 - [ ] Bug fix (non-breaking)
 - [ ] New feature (non-breaking)
-- [ ] Breaking change (CLI, JSON output, lease file format, configuration, or hook contract)
+- [ ] Breaking change (CLI, JSON output, lease file format, log file format, configuration, or hook contract)
 - [ ] Documentation / tooling only
 
 ## Checklist
