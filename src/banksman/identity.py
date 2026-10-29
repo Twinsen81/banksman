@@ -54,10 +54,12 @@ def find_holder(
     issue: str | None = None,
     owner_pid: int | None = None,
     purpose: str | None = None,
+    from_env: bool = False,
 ) -> Holder:
     """Return the holder for a caller: the process `pid`, by default this one.
 
-    `issue`, `owner_pid`, and `purpose` are what the caller gives explicitly.
+    `issue`, `owner_pid`, and `purpose` are what the caller gives explicitly. `from_env` is for
+    a caller whose environment is that of another process that runs now (see `find_agent`).
     """
     try:
         directory = Path(os.path.realpath(os.getcwd() if cwd is None else cwd))
@@ -65,7 +67,11 @@ def find_holder(
         raise BanksmanError("the working directory does not exist") from None
     owner = worktree(directory)
     env = os.environ if env is None else env
-    agent_pid, agent = find_agent(table, rules.agents, os.getpid() if pid is None else pid, env)
+    caller = os.getpid() if pid is None else pid
+    if from_env:
+        agent_pid, agent = find_agent(table, rules.agents, caller, env, from_env=True)
+    else:
+        agent_pid, agent = find_agent(table, rules.agents, caller, env)
     if issue is not None and ISSUE.fullmatch(issue) is None:
         raise BanksmanError(
             "an issue id has 1 to 64 letters, digits, and the characters '#', '.', '_', '/',"
@@ -147,7 +153,12 @@ def issue_of(rules: HolderRules, *texts: str | None) -> str | None:
 
 
 def find_agent(
-    table: Mapping[int, Process], agents: Sequence[str], pid: int, env: Mapping[str, str]
+    table: Mapping[int, Process],
+    agents: Sequence[str],
+    pid: int,
+    env: Mapping[str, str],
+    *,
+    from_env: bool = False,
 ) -> tuple[int | None, str | None]:
     """Return the agent process of a process and the name of its program: the nearest ancestor
     whose program is a known agent or that `env`, the environment of the process, names as the
@@ -157,11 +168,19 @@ def find_agent(
     program, so the walk alone can pass the agent and stop at a process above it, such as a
     service that hosts the sessions of the agent. When one agent runs another, the variable names
     the outer one, and the nearest one runs the command.
+
+    With `from_env`, `env` is the environment of another process that runs now, not the
+    environment that the caller got from its ancestors: a Gradle daemon takes the environment of
+    the client of each build. The agent process that `env` names then counts when it runs, also
+    when the caller or an ancestor of the caller started before it, and it comes before the walk,
+    because the ancestors of such a caller say nothing about the client.
     """
     caller = table.get(pid)
     if caller is None:
         return None, None
-    named_pid, named = named_agent(table, agents, env, caller)
+    named_pid, named = named_agent(table, agents, env, caller, aged=not from_env)
+    if from_env and named_pid is not None:
+        return named_pid, named
     for ancestor in fencing.ancestors(table, pid):
         process = table.get(ancestor)
         if process is None:
@@ -175,12 +194,17 @@ def find_agent(
 
 
 def named_agent(
-    table: Mapping[int, Process], agents: Sequence[str], env: Mapping[str, str], caller: Process
+    table: Mapping[int, Process],
+    agents: Sequence[str],
+    env: Mapping[str, str],
+    caller: Process,
+    *,
+    aged: bool = True,
 ) -> tuple[int | None, str | None]:
     """Return the agent process that the environment of a process names, and the name of its
     program, when that process runs, is the known agent that sets the variable, also under a
-    title (see `_is_agent`), and started no later than each process of the branch of the caller
-    (see `caller_branch`)."""
+    title (see `_is_agent`), and, with `aged`, started no later than each process of the branch
+    of the caller (see `caller_branch`)."""
     for agent, variable in PID_VARIABLES.items():
         pid = _pid_value(env.get(variable, ""))
         if pid is None:
@@ -191,9 +215,12 @@ def named_agent(
             and process.pid != caller.pid
             and agent in agents
             and _is_agent(process, agent)
-            and all(
-                started_no_later(process.started, each.started)
-                for each in caller_branch(table, caller, process)
+            and (
+                not aged
+                or all(
+                    started_no_later(process.started, each.started)
+                    for each in caller_branch(table, caller, process)
+                )
             )
         ):
             return process.pid, agent

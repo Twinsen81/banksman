@@ -19,6 +19,7 @@ from banksman.history import (
     ACQUIRE,
     EVERY_DEVICE,
     FORCE_RELEASE,
+    GRADLE,
     GUARD,
     LOST,
     NOT_LEASED,
@@ -557,8 +558,12 @@ def _local_time(wall: float) -> str:
 
 def _guard_details(event: Event, commands: Sequence[str], serials: Sequence[str]) -> str:
     # For example "refused adb shell on emulator-5554: another holder leases the device, and the
-    # lease is ready".
-    command = f"adb {', '.join(commands)}" if commands else "an adb command"
+    # lease is ready". The words of a Gradle build, such as "gradle install", name the tool
+    # already, and they come after the adb commands.
+    builds = [each for each in commands if each.split()[0] == GRADLE]
+    calls = [each for each in commands if each not in builds]
+    named = ([f"adb {', '.join(calls)}"] if calls else []) + builds
+    command = ", ".join(named) if named else "an adb command"
     device = f" on {', '.join(serials)}" if serials else ""
     why = _GUARD_REASONS.get(event.reason or "", "unknown")
     if event.state is not None:

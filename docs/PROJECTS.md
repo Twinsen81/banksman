@@ -11,7 +11,9 @@ agents. That is all that this guide describes. Other kinds, such as host ports o
 are optional, and a project adds one only when it needs it. Build slots for Gradle
 (DESIGN.md, section 11) are not part of a project's integration: they are an optional setup
 of the operator for every Gradle build on the machine. Do not add them to a project unless
-its maintainers ask for them.
+its maintainers ask for them. The same is true of the adb guard and its part for Gradle
+(DESIGN.md, section 12): a project runs its Gradle device tasks under `banksman run`, or
+with `ANDROID_SERIAL`, and needs nothing else for them.
 
 ## Run work under a lease: `banksman run`
 

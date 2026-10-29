@@ -1,0 +1,38 @@
+// banksman adb guard for Gradle: the init script.
+//
+// The Android Gradle plugin talks to the adb server itself, so a task that installs on a device,
+// removes from it, or runs tests on it never passes through the adb wrapper of banksman. This
+// init script makes every such build of this user ask banksman first, so that an agent's build
+// does not act on a device that another holder leases. The setup has two files: this init
+// script, and the part that it applies. Save them with:
+//
+//     banksman admin gradle-guard > ~/.gradle/init.d/banksman-gradle-guard.gradle
+//     mkdir -p ~/.gradle/banksman
+//     banksman admin gradle-guard --part > ~/.gradle/banksman/gradle-guard.gradle
+//
+// After an upgrade of banksman, save both files again.
+//
+// This script applies the part only on Gradle 7.4 and later. On an older Gradle, a build runs as
+// it does without banksman. The part uses APIs that Gradle 6.2 added, and Gradle compiles a
+// whole script before it runs any of it, so this script uses only APIs that older versions also
+// have. Gradle 6.5 to 7.3 also refuse to read a value source while they configure a build,
+// unless the script calls forUseAtConfigurationTime(), which Gradle 9 removed. The part is
+// outside init.d, because Gradle applies every file in init.d.
+//
+// When the part is missing, a build runs, and this script says that its device tasks are not
+// checked: like the adb wrapper, the guard fails open, because a guard that fails every build of
+// the user is worse than a short time without protection.
+
+import org.gradle.util.GradleVersion
+
+def part = new File(gradle.gradleUserHomeDir, "banksman/gradle-guard.gradle")
+if (GradleVersion.current().baseVersion < GradleVersion.version("7.4")) {
+    logger.info("banksman: Gradle ${GradleVersion.current().version} is older than 7.4, so the"
+        + " device tasks of this build are not checked")
+} else if (!part.isFile()) {
+    logger.lifecycle("banksman: ${part} does not exist, so the device tasks of this build are not"
+        + " checked. Save it with: mkdir -p ${part.parentFile} && banksman admin gradle-guard"
+        + " --part > ${part}. Or remove ${buildscript.sourceFile} to build without the guard.")
+} else {
+    apply from: part
+}

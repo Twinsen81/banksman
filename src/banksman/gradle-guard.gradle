@@ -1,0 +1,204 @@
+// banksman adb guard for Gradle: the part that checks the device tasks of a build.
+//
+// The Android Gradle plugin talks to the adb server itself, so a task that installs on a device,
+// removes from it, or runs tests on it never passes through the adb wrapper of banksman. This
+// part runs `banksman guard gradle` with the paths of those tasks twice: before the build runs
+// its first task, so that a refused build ends before it compiles anything, and again right
+// before each of those tasks, because the devices of the machine can change while the build
+// compiles, and the plugin chooses its devices only when the task runs. The guard checks the
+// devices that the build acts on: the serials of the --serial option, which the connected tests
+// of the plugin take first, the serials in ANDROID_SERIAL, as the plugin reads it, or every
+// device that adb lists while neither names one. When the guard refuses, the build fails. The
+// init script that `banksman admin gradle-guard` prints applies this part only on Gradle 7.4
+// and later. Save it outside init.d, where the init script finds it:
+//
+//     mkdir -p ~/.gradle/banksman
+//     banksman admin gradle-guard --part > ~/.gradle/banksman/gradle-guard.gradle
+//
+// The comment at the top of the init script describes the whole setup. Without banksman on the
+// PATH, or with a banksman that cannot start, a build with device tasks runs, and this part
+// says that they are not checked.
+
+import javax.inject.Inject
+import org.gradle.StartParameter
+import org.gradle.api.Action
+import org.gradle.api.GradleException
+import org.gradle.api.Plugin
+import org.gradle.api.Task
+import org.gradle.api.invocation.Gradle
+import org.gradle.api.logging.Logging
+import org.gradle.api.provider.ListProperty
+import org.gradle.api.provider.Property
+import org.gradle.api.provider.ProviderFactory
+import org.gradle.api.provider.ValueSource
+import org.gradle.api.provider.ValueSourceParameters
+
+class BanksmanGradleGuardCommand {
+    static final def LOGGER = Logging.getLogger("banksman")
+    // The exit status of banksman guard for a refused call.
+    static final int REFUSED = 3
+    // The option of the connected tests of the plugin that names their devices, on the test
+    // task or on connectedCheck. They take it before ANDROID_SERIAL; an install or an uninstall
+    // reads only the variable.
+    static final String SERIAL_OPTION = "--serial"
+    // The tasks of the Android Gradle plugin that act on a device, by the names of their classes,
+    // and by their names for a version of the plugin that renames a class. Only a task of the
+    // plugin counts: installDist of the distribution plugin, for example, acts on no device.
+    static final def CLASSES = ["InstallVariantTask", "UninstallTask", "DeviceProviderInstrumentTestTask"]
+    static final def NAMES = ~/(?:install|uninstall)[A-Z].*|connected.*AndroidTest/
+
+    static boolean actsOnDevice(Task task) {
+        def type = task.getClass().getName()
+        if (!type.startsWith("com.android.build.")) {
+            return false
+        }
+        return CLASSES.any { type.contains(it) } || task.name ==~ NAMES
+    }
+
+    // The values of the --serial option on the command line of the build, as `--serial X` or
+    // `--serial=X`. Only a task of the plugin takes the option: Gradle refuses it for any other.
+    static List<String> serialOptions(StartParameter parameters) {
+        def serials = []
+        for (request in parameters.taskRequests) {
+            def arguments = request.args
+            for (int i = 0; i < arguments.size(); i++) {
+                if (arguments[i] == SERIAL_OPTION && i + 1 < arguments.size()) {
+                    serials << arguments[++i]
+                } else if (arguments[i].startsWith(SERIAL_OPTION + "=")) {
+                    serials << arguments[i].substring(SERIAL_OPTION.length() + 1)
+                }
+            }
+        }
+        return serials
+    }
+
+    // The daemon takes the environment of each client, so this is the PATH of the client that
+    // started the build. Only absolute directories count, so that a file in the project cannot
+    // stand in for banksman.
+    static String program() {
+        for (directory in (System.getenv("PATH") ?: "").split(File.pathSeparator)) {
+            def file = new File(directory, "banksman")
+            if (new File(directory).isAbsolute() && file.isFile() && file.canExecute()) {
+                return file.absolutePath
+            }
+        }
+        return null
+    }
+
+    // Returns the exit status and the messages of banksman. The messages also go to the console,
+    // so that an agent reads why banksman refuses its build.
+    static List run(String program, String directory, List<String> arguments) {
+        def process = new ProcessBuilder([program] + arguments).directory(new File(directory)).start()
+        process.outputStream.close()
+        def messages = Collections.synchronizedList([])
+        def errors = Thread.start {
+            process.errorStream.eachLine("utf-8") { line ->
+                messages << line.replaceFirst("^banksman: ", "")
+                LOGGER.lifecycle(line)
+            }
+        }
+        process.inputStream.eachLine("utf-8") { line -> LOGGER.info(line) }
+        errors.join()
+        return [process.waitFor(), messages]
+    }
+
+    // Asks banksman whether the build may run these device tasks, and fails the build when
+    // banksman refuses. A banksman that is not on the PATH, that cannot start, or that ends
+    // without a decision leaves the build unchecked, and this says so: like the adb wrapper, the
+    // guard fails open, because a check that fails every build is worse than a short time
+    // without protection.
+    static void check(String directory, List<String> tasks, List<String> serials) {
+        def program = program()
+        if (program == null) {
+            LOGGER.lifecycle(
+                "banksman: banksman is not on the PATH, so the device tasks of this build are not"
+                + " checked: ${tasks.join(' ')}")
+            return
+        }
+        def arguments = ["guard", "gradle"]
+        for (serial in serials) {
+            arguments += [SERIAL_OPTION, serial]
+        }
+        def status
+        def messages
+        try {
+            (status, messages) = run(program, directory, arguments + ["--"] + tasks)
+        } catch (IOException exception) {
+            LOGGER.lifecycle(
+                "banksman: the device tasks of this build are not checked: cannot run ${program}:"
+                + " ${exception.message}")
+            return
+        }
+        if (status == REFUSED) {
+            def problem = messages ? messages.join(" ") : "the device tasks of this build are refused"
+            throw new GradleException("banksman: ${problem}")
+        }
+        if (status != 0) {
+            LOGGER.lifecycle(
+                "banksman: the device tasks of this build are not checked: banksman ended with"
+                + " status ${status}")
+        }
+    }
+}
+
+abstract class BanksmanGradleGuardCheck implements ValueSource<String, Params> {
+    interface Params extends ValueSourceParameters {
+        Property<String> getDirectory()
+        ListProperty<String> getTasks()
+        ListProperty<String> getSerials()
+    }
+
+    // Gradle runs this also before it reuses a configuration cache entry, when the init script
+    // does not run, so a build from the cache is checked too. The value never changes, so that
+    // it never makes an entry stale.
+    String obtain() {
+        BanksmanGradleGuardCommand.check(
+            parameters.directory.get(), parameters.tasks.get(), parameters.serials.get())
+        return ""
+    }
+}
+
+// The check right before a device task runs. It has only strings, so that the configuration
+// cache stores it with the task, and runs it also for a build from the cache.
+class BanksmanDeviceTaskCheck implements Action<Task> {
+    String directory
+    List<String> serials
+
+    void execute(Task task) {
+        BanksmanGradleGuardCommand.check(directory, [task.path], serials)
+    }
+}
+
+abstract class BanksmanGradleGuardPlugin implements Plugin<Gradle> {
+    @Inject
+    abstract ProviderFactory getProviders()
+
+    void apply(Gradle gradle) {
+        // A dry run runs no task.
+        if (gradle.startParameter.dryRun) {
+            return
+        }
+        def providers = getProviders()
+        def directory = gradle.startParameter.currentDir.absolutePath
+        def serials = BanksmanGradleGuardCommand.serialOptions(gradle.startParameter)
+        // The graph is complete here, with the tasks that the requested ones depend on, such as
+        // the connected test of a connectedCheck. The value source is an input of the
+        // configuration cache entry, so Gradle runs the check again when it reuses the entry.
+        gradle.taskGraph.whenReady { graph ->
+            def tasks = graph.allTasks.findAll { BanksmanGradleGuardCommand.actsOnDevice(it) }
+            if (tasks.isEmpty()) {
+                return
+            }
+            providers.of(BanksmanGradleGuardCheck) {
+                it.parameters.directory.set(directory)
+                it.parameters.tasks.set(tasks.collect { it.path })
+                it.parameters.serials.set(serials)
+            }.get()
+            for (task in tasks) {
+                task.doFirst(new BanksmanDeviceTaskCheck(directory: directory, serials: serials))
+            }
+        }
+    }
+}
+
+apply plugin: BanksmanGradleGuardPlugin

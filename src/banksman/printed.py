@@ -1,5 +1,5 @@
-"""The files that banksman prints for the operator to save: the adb wrapper, the two Gradle
-scripts, and the guide for agents.
+"""The files that banksman prints for the operator to save: the adb wrapper, the Gradle
+scripts of the build slots and of the adb guard, and the guide for agents.
 
 `banksman admin doctor` compares the saved copies with this text. A comparison of the content
 needs no version stamp in the files, and every development install has the same version.
@@ -16,6 +16,10 @@ from banksman import __version__
 # on Gradle 7.4 and later to take a build slot for every build.
 GRADLE_INIT_SCRIPT = "gradle-init.gradle"
 GRADLE_BUILD_SLOT_SCRIPT = "build-slot.gradle"
+# The Gradle scripts of the adb guard: the init script, and the part that it applies on Gradle
+# 7.4 and later to check the device tasks of a build.
+GRADLE_GUARD_INIT_SCRIPT = "gradle-guard-init.gradle"
+GRADLE_GUARD_SCRIPT = "gradle-guard.gradle"
 # The adb wrapper that runs the adb guard, and the text in it that becomes the path of the real
 # adb.
 ADB_SHIM_SCRIPT = "adb-shim.sh"
@@ -31,6 +35,14 @@ def gradle_init() -> str:
 
 def build_slot() -> str:
     return _text(GRADLE_BUILD_SLOT_SCRIPT)
+
+
+def gradle_guard_init() -> str:
+    return _text(GRADLE_GUARD_INIT_SCRIPT)
+
+
+def gradle_guard() -> str:
+    return _text(GRADLE_GUARD_SCRIPT)
 
 
 def adb_shim(adb: str) -> str:

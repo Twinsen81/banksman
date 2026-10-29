@@ -113,11 +113,20 @@ ADB_COMMANDS = frozenset(
     }
 )
 _WAIT = r"wait-for(?:-(?:usb|local|any))?-(?:device|recovery|rescue|sideload|bootloader|disconnect)"
-# A command, such as "shell", "forward --remove-all", or "wait-for-device shell".
+# The words of a Gradle build that the adb guard checked: what its device tasks do, by the
+# names of the tasks of the Android Gradle plugin. A task name itself can carry a token, so the
+# log has these words only.
+GRADLE = "gradle"
+GRADLE_INSTALL = "install"
+GRADLE_UNINSTALL = "uninstall"
+GRADLE_CONNECTED_TEST = "connectedAndroidTest"
+GRADLE_WORDS = (GRADLE_CONNECTED_TEST, GRADLE_INSTALL, GRADLE_UNINSTALL)
+# A command, such as "shell", "forward --remove-all", "wait-for-device shell", or "gradle
+# install".
 COMMAND = re.compile(
     rf"(?:{_WAIT} )?(?:reconnect offline|forward --remove-all|"
     + "|".join(re.escape(name) for name in sorted(ADB_COMMANDS))
-    + ")"
+    + rf")|{GRADLE}(?: (?:{'|'.join(GRADLE_WORDS)}))*"
 )
 # The file starts again at this size, and the earlier file is kept next to it, so that the log
 # never fills the disk.

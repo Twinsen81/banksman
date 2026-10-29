@@ -7,7 +7,8 @@ exist. Sections 3 to 9, 11, 12, and 15 are implemented, with
 `banksman acquire`, `touch`, `release`, `reap`, `banksman whoami`, `banksman held`,
 `banksman agent-guide`, the commands that scripts run (`enter`, `check`, `leave`, and `run`),
 `banksman guard`, `banksman admin discover`,
-`banksman admin release --force`, `banksman admin gradle-init`, and `banksman admin adb-shim`.
+`banksman admin release --force`, `banksman admin gradle-init`, `banksman admin adb-shim`,
+and `banksman admin gradle-guard`.
 Of section 10, `status`, `watch`, `log`, and `banksman admin doctor` are implemented.
 `explain` and the queue of the callers that wait are not implemented yet.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
@@ -1463,7 +1464,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   adb of the configuration exists, with what `adb version` says, that it can list the devices
   when a kind uses an Android preset, and the emulator for a kind of the `android-emulator`
   preset; that the first `adb` on the `PATH` is the adb wrapper, when one is saved (section 12);
-  that the saved adb wrapper, the two Gradle files (section 11), and the guide for agents saved
+  that the saved adb wrapper, the Gradle files of the build slots (section 11) and of the adb
+  guard (section 12), and the guide for agents saved
   as a skill in `~/.claude/skills/banksman/SKILL.md` and `~/.codex/skills/banksman/SKILL.md` are
   what the installed banksman prints; that the reap job (section 8) is what banksman prints for
   the banksman that it runs, that this program exists, that it is the banksman that runs the
@@ -1478,7 +1480,9 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   content of each file, so a printed file needs no version stamp, also while every development
   install has the same version. A file that is missing is `skip`, because each of these parts is
   optional, but a part that another part needs is a failure: an init script without the
-  build-slot part, or without `[kinds.build]` in the configuration, fails every build. A missing
+  build-slot part, or without `[kinds.build]` in the configuration, fails every build. The init
+  script of the guard for Gradle without its part is a warning, because such a build runs and
+  says that it is not checked. A missing
   inventory is a failure when a kind is discovered, because agents then get no instance of it. A
   file at the place where the setup saves the adb wrapper is the saved wrapper, also when it is
   empty: the redirection of a save empties the file before banksman runs, so a save that failed
@@ -1706,8 +1710,9 @@ is a setup of the operator, and a project needs nothing for it.
   agent process, or that acts on every device touches nothing: a person's call is not
   use by the holder, and a call on a device of another holder is not use of the caller's
   device. The log records nothing for a touch, as for every other touch (section 10). A tool
-  that talks to the adb server itself, such as the connected tests of the Android Gradle
-  plugin, does not pass through the guard, and `banksman run` touches the lease for it.
+  that talks to the adb server itself does not pass through the guard, and `banksman run`
+  touches the lease for it; a Gradle build with the guard for Gradle (see below) touches the
+  holding once, when the build starts.
 - **Starts.** The start of an emulator records its serial before the boot. The serial of a
   remote device, `localhost:<port>`, is a serial like any other, and the start records it in
   the lease before the lease is ready. So the guard protects an instance that banksman starts
@@ -1836,6 +1841,72 @@ is a setup of the operator, and a project needs nothing for it.
   these commands for an agent while another holding has a held lease that records a serial,
   that is, while an instance of another holder runs. `adb reconnect` and
   `adb reconnect device` act on one device, like other device commands.
+- **The guard for Gradle.** The Android Gradle plugin talks to the adb server itself, so a task
+  that installs on a device, removes from it, or runs tests on it, such as `installDebug`,
+  `installDebugAndroidTest`, `uninstallAll`, or `connectedDebugAndroidTest`, never passes
+  through the wrapper. Without `ANDROID_SERIAL`, the plugin acts on every online device that
+  adb lists, also on the devices of other holders. So the guard has a second part, for
+  Gradle: `banksman admin gradle-guard` prints an init script, which the operator saves in
+  `~/.gradle/init.d/`, and `banksman admin gradle-guard --part` prints the part that it
+  applies, saved in `~/.gradle/banksman/`, in two files for the reasons of the build slots
+  (section 11). The setup is the operator's, for every Gradle build of the user: a project
+  needs nothing for it, and a developer without banksman never has the files.
+
+  ```sh
+  banksman admin gradle-guard > ~/.gradle/init.d/banksman-gradle-guard.gradle
+  mkdir -p ~/.gradle/banksman
+  banksman admin gradle-guard --part > ~/.gradle/banksman/gradle-guard.gradle
+  ```
+
+  When the task graph of a build is ready, the part finds the tasks of the plugin that act on
+  a device: by the names of their classes, and by their names for a version of the plugin
+  that renames a class, among the tasks of the plugin only, so that `installDist` of the
+  distribution plugin counts for nothing. A build without such a task, and a dry run, ask
+  nothing. For a build with such tasks, the part runs `banksman guard gradle [--serial
+  <serial>] ... -- <task path> ...` twice: in a `ValueSource` when the graph is ready, as
+  the build slots take their slot, so that a refused build ends before it compiles anything,
+  also when Gradle reuses a configuration cache entry; and in an action right before each
+  device task, which the configuration cache stores with the task, because the plugin
+  chooses its devices only when the task runs, and another holder's emulator can come online
+  while the build compiles. The guard decides for each device that the build acts on as it
+  decides for an adb call on that device. The connected tests of the plugin take the
+  `--serial` option of the command line first, on the test task or on `connectedCheck`, and
+  the part reads it from the task requests of the build; an install or an uninstall, and the
+  connected tests without the option, act on the serials in `ANDROID_SERIAL`, as the plugin
+  reads the variable, a list with commas, or, while the variable is not set, on every online
+  device of `adb devices -l`. A build on several devices gets the first refusal, else the
+  first warning, and a build that runs, with or without a warning, touches the holdings of
+  the caller's devices among them. A refusal names the build by the paths of the device tasks
+  that act on the device, three at most, and for a build that names no device, it says that
+  the plugin acts on every device that adb lists, and that `banksman run` or
+  `ANDROID_SERIAL` names the device. With exit status 3, the part fails the build, before
+  its first task or before the device task, and the output of Gradle has the text of the
+  refusal. The log records the
+  call with the command `gradle` and the words for what its tasks do, `install`,
+  `uninstall`, and `connectedAndroidTest`, never the task names, which come from the build
+  scripts of the project; `held` shows it as it shows an adb call.
+
+  The daemon takes the environment of the client of each build, so `BANKSMAN_LEASE` and
+  `ANDROID_SERIAL` of `banksman run`, the `PATH`, and the pid variable of the agent (section
+  9) reach the guard. The ancestors of the daemon say nothing about the client: an earlier
+  build of another agent, or of a person, can have started it. So for a build, the agent
+  process that the environment names counts when it runs and is the agent, also when the
+  daemon started before it, and it comes before the walk up the process tree; and a lease is
+  the caller's only through that agent process, its session, or `BANKSMAN_LEASE`, never
+  through an owner process above the daemon. A person's build, in a terminal or in Android
+  Studio, has no agent process and runs as before. Without the pid variable, for an agent
+  that sets none, the walk finds the agent that started the daemon when it still runs above
+  it, and otherwise the build passes as a person's: the limit below stays for such an agent.
+
+  The guard for Gradle fails open, as the wrapper does: without `banksman` on the `PATH`,
+  when the part is missing, when banksman cannot start, for example because an upgrade of
+  Python removed the interpreter of its launcher, and when banksman ends in any way other
+  than with a decision, the build runs, and the script says on the console that its device
+  tasks are not checked.
+  A check that fails every build would stop every build of the user, also the builds of a
+  person. On a Gradle older than 7.4, the init script applies nothing (section 11). Android
+  Studio does not run these tasks to deploy an app: its deploy talks to the adb server
+  directly, and stays outside the guard.
 - **Speed.** The guard runs before every adb call, and a UI test can make many. It reads the
   lease files without the lock: every write replaces a whole file with a rename, so each file
   that it reads is whole. It also reads the copies of the quarantines, so a quarantine counts
@@ -1866,14 +1937,16 @@ is a setup of the operator, and a project needs nothing for it.
   the call is not in the log. The same is true for a line of the trace.
 - **Limits.** The guard is a guardrail, not a security boundary. These do not pass through it: a
   call through the full path of adb, such as the adb of Android Studio; a tool that talks to the
-  adb server itself, such as the connected tests of the Android Gradle plugin, for which the
-  `ANDROID_SERIAL` of `banksman run` names the leased device (section 4); and the emulator
-  console. A second connection to an emulator, with `adb connect` to its adb port, has another
+  adb server itself, such as the deploy of Android Studio, or the device tasks of the Android
+  Gradle plugin on a machine without the guard for Gradle, for which the `ANDROID_SERIAL` of
+  `banksman run` names the leased device (section 4); and the emulator console. A second connection to an emulator, with `adb connect` to its adb port, has another
   serial, and the guard does not know that it is the same device. The same is true for a
   physical device over USB that also has a connection of `adb connect <host>:<port>`, while its
   lease records the serial over USB. A process that has no agent
   process passes as a person's, for example a task that a Gradle daemon runs after an earlier
-  build started the daemon, when the pid variable of an agent does not reach the task. A
+  build started the daemon, when the pid variable of an agent does not reach the task; the
+  guard for Gradle reads the variable from the environment of the client of the build, so
+  only an agent that sets no variable has this limit there. A
   process that keeps the pid variable of another agent, such as a daemon that a command of that
   agent started, acts for that agent while that agent runs (section 9). The guard never
   acquires a lease itself: that would make it a second way to get a device, and hide that two
@@ -1914,11 +1987,14 @@ banksman log     [--since <time>] [--resource <name>] [--json] [--verbose]
 banksman reap
 banksman version [--json]
 banksman guard adb [--fallback-adb <path>] -- <adb argument> ...  # what the adb wrapper runs
+banksman guard gradle [--serial <serial>] ... -- <task path> ...  # what the Gradle part of
+                                                                   # the adb guard runs
 
 banksman admin discover [--kind <kind>] [--all] [--json] [--yes]
 banksman admin release --force --resource <name>
 banksman admin gradle-init [--build-slot]                          # optional build slots
 banksman admin adb-shim                                            # optional adb guard
+banksman admin gradle-guard [--part]                               # its part for Gradle
 banksman admin reap-agent                                          # optional reap job
 banksman admin doctor [--json]                                     # check the install
 ```
@@ -2051,8 +2127,10 @@ this section names.
   can widen what agents may use, or take a resource from another holder. The rule is a
   guardrail, not a security boundary.
 - When the operator installs the adb guard (section 12), `adb` exits with status 3 when an
-  agent acts on the device of another holder. An agent that uses the devices of its own leases
-  never sees it.
+  agent acts on the device of another holder, and with the part of the guard for Gradle, a
+  build with a device task of the Android Gradle plugin fails before that task when the build
+  would act on such a device. An agent that uses the devices of its own leases, with
+  `banksman run` or `ANDROID_SERIAL`, never sees either.
 
 An example configuration for a typical Android project, in `~/.config/banksman/config.toml`:
 
@@ -2124,7 +2202,8 @@ Done:
 - The serial in the lease, from discovery only, for `status`, the hooks, and `banksman run`,
   with `ANDROID_SERIAL` and the placeholders `{serial}` and `{resource}`.
 - The optional adb guard: an adb wrapper that refuses an agent's device command on the device
-  of another holding, and commands that disconnect every device.
+  of another holding, and commands that disconnect every device; and its part for Gradle,
+  which checks the device tasks of the Android Gradle plugin, which do not run adb.
 - Remote devices of Android Device Streaming: the `android-remote` preset with a catalogue
   that `admin discover` fetches, paid kinds and `--paid`, and `acquire --start`, which
   reserves, connects, and extends a remote device, with the reservation id in the lease, a

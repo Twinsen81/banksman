@@ -510,6 +510,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Design document ([docs/DESIGN.md](docs/DESIGN.md)), recorded decisions
   ([DECISIONS.md](DECISIONS.md)), security policy and threat model
   ([SECURITY.md](SECURITY.md)), and contribution guide.
+- The adb guard for Gradle. The Android Gradle plugin talks to the adb server itself, so
+  its tasks that install on a device, remove from it, or run tests on it never pass through
+  the adb wrapper, and without `ANDROID_SERIAL` they act on every device of the machine.
+  `banksman admin gradle-guard` prints a Gradle init script that the operator saves in
+  `~/.gradle/init.d/`, and `banksman admin gradle-guard --part` prints the part that it
+  applies on Gradle 7.4 and later, saved in `~/.gradle/banksman/`. Before such a build runs
+  its first task, also when Gradle reuses the configuration cache, and again right before
+  each device task, the part runs `banksman guard gradle` with the paths of those tasks,
+  and the guard decides for each device that the build acts on, the `--serial` option of
+  the connected tests, the serials in `ANDROID_SERIAL`, or every online device that adb
+  lists, as it decides for an adb call. A refusal fails the build before any task runs,
+  and the log and `held` show it with the words `gradle install`, `uninstall`, and
+  `connectedAndroidTest`, never the task names. The environment of such a call is the
+  environment of the client of the build, so the agent that the pid variable names counts
+  also for a Gradle daemon that is older than the agent, and a lease is the caller's only
+  through that agent, its session, or `BANKSMAN_LEASE`. Without `banksman` on the `PATH`,
+  without the part, or with a banksman that cannot start, a build runs and says that its
+  device tasks are not checked.
+  `banksman admin doctor` checks the two files, and the guide for agents says to run such
+  tasks under `banksman run` or with `ANDROID_SERIAL`.
 
 ### Fixed
 

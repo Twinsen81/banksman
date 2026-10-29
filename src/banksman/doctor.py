@@ -60,6 +60,8 @@ _LABELS = {OK: "ok", WARN: "warn", FAIL: "FAIL", SKIP: "skip"}
 ADB_WRAPPER = Path(".local/share/banksman/bin/adb")
 GRADLE_INIT = Path(".gradle/init.d/banksman-build-slot.gradle")
 GRADLE_BUILD_SLOT = Path(".gradle/banksman/build-slot.gradle")
+GRADLE_GUARD_INIT = Path(".gradle/init.d/banksman-gradle-guard.gradle")
+GRADLE_GUARD = Path(".gradle/banksman/gradle-guard.gradle")
 SKILLS = {
     "claude": Path(".claude/skills/banksman/SKILL.md"),
     "codex": Path(".codex/skills/banksman/SKILL.md"),
@@ -127,6 +129,7 @@ def run(shell: Shell) -> list[Check]:
         path_check,
         _guarded("adb-wrapper", _adb_wrapper, wrapper, config),
         *_gradle(shell.home, config, config_path),
+        *_gradle_guard(shell.home),
         *_skills(shell.home),
         _guarded("reap-job", _reap_job, shell, config),
         _guarded("state-dir", _place, "state-dir", default_state_dir),
@@ -433,6 +436,49 @@ def _gradle(home: Path, config: Config | None, config_path: Path | None) -> list
             f"declare [kinds.{BUILD_KIND}] in {config_path}, or remove {init}",
         )
     return [init_check, _saved("gradle-build-slot", part, printed.build_slot(), part_fix, no_part)]
+
+
+def _gradle_guard(home: Path) -> list[Check]:
+    init, part = home / GRADLE_GUARD_INIT, home / GRADLE_GUARD
+    init_fix = f"banksman admin gradle-guard > {_quoted(init)}"
+    part_fix = (
+        f"mkdir -p {_quoted(part.parent)} &&"
+        f" banksman admin gradle-guard --part > {_quoted(part)}"
+    )
+    # The guard for Gradle is optional, but one file without the other checks no build. The
+    # init script fails no build without the part: like the adb wrapper, it fails open.
+    if os.path.lexists(part):
+        no_init = Check(
+            "gradle-guard-init",
+            WARN,
+            f"{part} is saved, but {init} is not, so no Gradle build is checked",
+            init_fix,
+        )
+    else:
+        no_init = Check(
+            "gradle-guard-init",
+            SKIP,
+            f"the adb guard for Gradle is not installed: {init} does not exist; banksman admin"
+            " gradle-guard prints it",
+        )
+    if os.path.lexists(init):
+        no_part = Check(
+            "gradle-guard",
+            WARN,
+            f"every build on Gradle 7.4 and later says that its device tasks are not checked:"
+            f" {init} applies {part}, which does not exist",
+            part_fix,
+        )
+    else:
+        no_part = Check(
+            "gradle-guard",
+            SKIP,
+            f"the adb guard for Gradle is not installed: {part} does not exist",
+        )
+    return [
+        _saved("gradle-guard-init", init, printed.gradle_guard_init(), init_fix, no_init),
+        _saved("gradle-guard", part, printed.gradle_guard(), part_fix, no_part),
+    ]
 
 
 def _skills(home: Path) -> list[Check]:
