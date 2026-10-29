@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The status is now beta, in the README and in the classifiers of the package: the core
+  features are complete. Until 1.0.0, a minor version can still change the commands and the
+  file formats.
+
 ## [0.1.0] - 2026-10-29
 
 The first release, on PyPI: `pipx install banksman`. banksman leases shared Android devices,
