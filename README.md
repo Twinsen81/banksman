@@ -65,7 +65,9 @@ resource, so an operator can also declare other resources, such as host ports or
   a script or an agent calls adb without banksman. An adb call of the holder on its own device
   keeps the lease, so a lease that an agent uses with direct adb calls does not become idle. An
   agent's `adb devices` also says which devices are its own. A warn mode lists the scripts and agents that still use devices without a lease, before a
-  strict mode refuses them.
+  strict mode refuses them. A part of the guard for Gradle checks the tasks of the Android
+  Gradle plugin that install on a device, remove from it, or run tests on it, which do not
+  run adb, before such a build runs its first task.
 - **Knows no app.** banksman leases devices. What a run installs or clears on a device is
   the run's own business.
 - **Other resources, when the operator wants them.** A counted kind is a number of

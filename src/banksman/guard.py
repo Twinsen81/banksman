@@ -13,10 +13,19 @@ operator has turned the trace on, it adds a line to the trace for every call, wi
 For `adb devices`, it also tells an agent which devices are its own, so it reads the lease files
 and the process list for that call too.
 
-It is a guardrail, not a security boundary: a call through the full path of adb, a tool that
-talks to the adb server itself, and the emulator console do not pass through it. It never
-acquires a lease itself: that would make it a second way to get a device, and hide that two
-holders want the same one.
+The Android Gradle plugin talks to the adb server itself, so its tasks that install on a device,
+remove from it, or run tests on it never pass through the wrapper. The part of the guard for
+Gradle, which `banksman admin gradle-guard` prints, runs `banksman guard gradle -- TASK ...`
+before such a build runs its first task. The guard then checks the devices that the build acts
+on: the serials in `ANDROID_SERIAL`, as the plugin reads it, or every device that adb lists while
+the variable is not set. The environment of such a call is the environment of the client of the
+build, which the Gradle daemon takes for each build, so the agent process that it names counts
+also for a daemon that is older than the agent.
+
+It is a guardrail, not a security boundary: a call through the full path of adb, a tool other
+than the plugin that talks to the adb server itself, and the emulator console do not pass
+through it. It never acquires a lease itself: that would make it a second way to get a device,
+and hide that two holders want the same one.
 """
 
 from __future__ import annotations
@@ -26,7 +35,7 @@ import os
 import re
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -38,6 +47,10 @@ from banksman.fencing import ancestors
 from banksman.history import (
     COMMAND,
     EVERY_DEVICE,
+    GRADLE,
+    GRADLE_CONNECTED_TEST,
+    GRADLE_INSTALL,
+    GRADLE_UNINSTALL,
     GUARD,
     LOST,
     NOT_LEASED,
@@ -77,7 +90,15 @@ if TYPE_CHECKING:
 
 # The status of `check` for a lost lease: the caller must not use the device.
 EXIT_REFUSED = 3
-USAGE = "usage: banksman guard adb [--fallback-adb PATH] -- [ADB ARGUMENT ...]"
+USAGE = (
+    "usage: banksman guard adb [--fallback-adb PATH] -- [ADB ARGUMENT ...]\n"
+    "       banksman guard gradle [--serial SERIAL ...] -- TASK ..."
+)
+# The programs whose calls the guard checks: adb, and Gradle for the device tasks of a build.
+ADB = "adb"
+# A value of the --serial option of a build, which its connected tests take before
+# ANDROID_SERIAL.
+SERIAL_OPTION = "--serial"
 # The adb that the wrapper saved, for a configuration that names no SDK or cannot be read.
 FALLBACK_OPTION = "--fallback-adb"
 # What a command acts on: only the adb server or this machine, such as `adb devices`; one device;
@@ -107,6 +128,32 @@ _HOST_COMMANDS = frozenset(
 # The state that `adb devices` shows for a USB device that adb may not open. adb never chooses
 # such a device.
 _NO_PERMISSION = "no"
+# The state of a device that is online. The Android Gradle plugin acts on no other device.
+_ONLINE = "device"
+# What the device tasks of a build do, by the start of their names: the words of the log for a
+# build. The names are the names of the tasks of the Android Gradle plugin.
+_GRADLE_TASKS = (
+    ("uninstall", GRADLE_UNINSTALL),
+    ("install", GRADLE_INSTALL),
+    ("connected", GRADLE_CONNECTED_TEST),
+)
+# How many task paths a message names, and how long each may be: a task path comes from the
+# build scripts of the project.
+_SAID_TASKS = 3
+_MAX_TASK_LENGTH = 100
+_NO_SERIAL_HINT = (
+    ". The build names no device, so the Android Gradle plugin acts on every device that adb"
+    " lists: run the build under banksman run, or set ANDROID_SERIAL to the serial of your"
+    " device"
+)
+_UNCHECKED = {
+    ADB: "adb guard: this adb call is not checked",
+    GRADLE: "adb guard: the device tasks of this build are not checked",
+}
+_NOT_LOGGED = {
+    ADB: "adb guard: warning: this adb call is not in the log",
+    GRADLE: "adb guard: warning: this build is not in the log",
+}
 # Commands, besides kill-server and disconnect without an address, that act on every device:
 # `forward --remove-all` removes the port forwards of every device, not only of the chosen one.
 _FOR_EVERY_DEVICE = (["reconnect", "offline"], ["forward", "--remove-all"])
@@ -146,6 +193,12 @@ class Call:
     console: bool = False
     # `adb devices` or `adb devices -l`, which lists the devices.
     lists: bool = False
+    # The program of the call: adb, or gradle for the device tasks of a build.
+    tool: str = ADB
+    # For a build, the paths of its device tasks, which a refusal names.
+    tasks: tuple[str, ...] = ()
+    # What the caller can do about a refusal, after the text of the refusal.
+    hint: str = ""
 
 
 @dataclass(frozen=True)
@@ -183,27 +236,36 @@ RUNS = Decision()
 
 
 def main(argv: Sequence[str]) -> int:
-    """Run `banksman guard adb -- ARGUMENT ...` for the adb wrapper.
+    """Run `banksman guard adb -- ARGUMENT ...` for the adb wrapper, or
+    `banksman guard gradle -- TASK ...` for the part of the guard for Gradle.
 
-    Print the path of the adb to run and exit with status 0 when the call may run, or exit with
-    status 3 when it is refused.
+    Exit with status 0 when the call may run, for adb with the path of the adb to run on standard
+    output, or with status 3 when it is refused.
     """
-    if argv[:1] != ["adb"]:
+    if argv[:1] not in ([ADB], [GRADLE]):
         print(USAGE, file=sys.stderr)
         return 2
+    tool = argv[0]
     arguments = list(argv[1:])
     fallback = None
-    if arguments[:1] == [FALLBACK_OPTION] and len(arguments) > 1:
+    if tool == ADB and arguments[:1] == [FALLBACK_OPTION] and len(arguments) > 1:
         fallback, arguments = arguments[1], arguments[2:]
+    serials: list[str] = []
+    while tool == GRADLE and arguments[:1] == [SERIAL_OPTION] and len(arguments) > 1:
+        serials.append(arguments[1])
+        arguments = arguments[2:]
     if arguments[:1] == ["--"]:
         arguments = arguments[1:]
+    if tool == GRADLE and not arguments:
+        print(USAGE, file=sys.stderr)
+        return 2
     # Without an sdk in the configuration, the adb that the wrapper saved is the best guess: the
     # default SDK can be missing, or have an adb of another version, which would restart the adb
     # server.
-    adb = fallback or android.adb_path(Android())
+    adb = None if tool == GRADLE else fallback or android.adb_path(Android())
     status = None
     try:
-        status = _decide(argv, arguments, fallback, adb, Machine())
+        status = _decide(argv, tool, arguments, fallback, adb, Machine(), serials)
         return status
     finally:
         # A trace that cannot be written changes no decision.
@@ -212,7 +274,13 @@ def main(argv: Sequence[str]) -> int:
 
 
 def _decide(
-    argv: Sequence[str], arguments: list[str], fallback: str | None, adb: str, system: System
+    argv: Sequence[str],
+    tool: str,
+    arguments: list[str],
+    fallback: str | None,
+    adb: str | None,
+    system: System,
+    serials: Sequence[str] = (),
 ) -> int:
     failure = None
     rules = HolderRules()
@@ -221,14 +289,17 @@ def _decide(
         rules = config.holder
         if config.log.trace:
             trace.start(["guard", *argv])
-        if config.android.sdk is not None or fallback is None:
-            adb = android.adb_path(config.android)
-        decision = check(arguments, config, os.environ, system)
+        if tool == GRADLE:
+            decision = check_gradle(arguments, config, os.environ, system, serials=serials)
+        else:
+            if config.android.sdk is not None or fallback is None:
+                adb = android.adb_path(config.android)
+            decision = check(arguments, config, os.environ, system)
     except Exception as exc:
         # A broken guard that blocks every device is worse than a short time without
         # protection, so the call runs, and the person who reads the output sees why.
         failure = _reason(exc)
-        _say(f"adb guard: this adb call is not checked: {failure}")
+        _say(f"{_UNCHECKED[tool]}: {failure}")
         decision = RUNS
     if decision.note is not None:
         _say(decision.note)
@@ -248,15 +319,20 @@ def _decide(
             record(verdict)
         except Exception as exc:
             # The decision stands: a log that cannot be written never refuses a call.
-            _say(f"adb guard: warning: this adb call is not in the log: {_reason(exc)}")
+            _say(f"{_NOT_LOGGED[tool]}: {_reason(exc)}")
         if verdict.action == REFUSED:
             return EXIT_REFUSED
-    print(adb)
+    if adb is not None:
+        print(adb)
     return 0
 
 
 def _trace(
-    decision: Decision, touched: Sequence[Lease], adb: str, failure: object, rules: HolderRules
+    decision: Decision,
+    touched: Sequence[Lease],
+    adb: str | None,
+    failure: object,
+    rules: HolderRules,
 ) -> None:
     if not trace.has_caller():
         # Without the process list, which the decision did not need: the guard runs before
@@ -319,13 +395,126 @@ def check(
     if trace.active():
         with contextlib.suppress(Exception):
             trace.caller(caller.known_holder())
+    return _with_holding(decision, snapshot)
+
+
+def check_gradle(
+    tasks: Sequence[str],
+    config: Config,
+    env: Mapping[str, str],
+    system: System,
+    listing: Listing | None = None,
+    serials: Sequence[str] = (),
+) -> Decision:
+    """Return whether the device tasks of a Gradle build are refused or warned, and the leases of
+    the caller that the build uses.
+
+    `tasks` are the paths of the tasks, and `serials` the values of the --serial option of the
+    build, which its connected tests take before `ANDROID_SERIAL`. The other tasks, and the
+    connected tests without the option, act on the serials in `ANDROID_SERIAL`, as the Android
+    Gradle plugin reads it, or on every online device that adb lists while the variable is not
+    set; `listing` lists them as `adb devices -l` does, and by default it runs adb. `env` is the
+    environment of the client of the build, which the daemon takes for each build.
+    """
+    snapshot = peek(default_state_dir(), default_quarantine_dir())
+    caller = Caller(env, snapshot.leases, system, config.holder, from_env=True)
+    devices = _devices(snapshot, config)
+    strict = config.guard.strict
+    # The tasks and the devices that they act on, and whether the build names those devices.
+    groups: list[tuple[list[str], list[str], bool]] = []
+    connected = [task for task in tasks if _gradle_word(task) == GRADLE_CONNECTED_TEST]
+    rest = list(tasks)
+    if serials and connected:
+        groups.append((connected, list(serials), True))
+        rest = [task for task in tasks if task not in connected]
+    named = android_serials(env)
+    if rest and named is not None:
+        groups.append((rest, named, True))
+    elif rest and (strict or devices.leases or devices.unreadable):
+        # Without a lease, nothing is refused and nothing is touched, so adb is not asked.
+        found = listing() if listing is not None else android.transports(config.android)
+        groups.append((rest, [each.serial for each in found if each.state == _ONLINE], False))
+    decisions = [
+        decide_device(gradle_call(group, serial, named=is_named), caller, devices, strict, serial)
+        for group, found, is_named in groups
+        for serial in found
+    ]
+    if trace.active():
+        with contextlib.suppress(Exception):
+            trace.caller(caller.known_holder())
+    return _with_holding(_first(decisions), snapshot)
+
+
+def _with_holding(decision: Decision, snapshot: Snapshot) -> Decision:
+    """Return a decision that uses every held lease of the holdings that it uses."""
     if not decision.used:
         return decision
     # The other leases of the holding, such as a port, are not leases of a device, and their
     # idle timeout can be shorter than the one of the device.
     holdings = {lease.holding for lease in decision.used}
     held = [lease for lease in snapshot.leases if lease.state in HELD and lease.holding in holdings]
-    return Decision(used=tuple(held), serial=decision.serial)
+    return replace(decision, used=tuple(held))
+
+
+def _first(decisions: Sequence[Decision]) -> Decision:
+    """Return the decision for a build from the decisions for each device that it acts on: the
+    first refusal, else the first warning, else a decision without a verdict.
+
+    A refused build runs nothing, so it uses nothing. A warned build runs, so it uses the leases
+    of the caller's devices among them, as a build without a warning does.
+    """
+    used = {lease.lease_id: lease for decision in decisions for lease in decision.used}
+    for action in (REFUSED, WARNED):
+        for decision in decisions:
+            if decision.verdict is not None and decision.verdict.action == action:
+                if action == REFUSED:
+                    return decision
+                return replace(decision, used=tuple(used.values()))
+    return Decision(used=tuple(used.values()), serial=decisions[0].serial if decisions else None)
+
+
+def android_serials(env: Mapping[str, str]) -> list[str] | None:
+    """Return the serials in ANDROID_SERIAL as the Android Gradle plugin reads them: a list with
+    commas, or None while the variable is not set or empty, when the plugin acts on every
+    device."""
+    value = env.get("ANDROID_SERIAL", "")
+    if not value:
+        return None
+    return [each.strip() for each in value.split(",") if each.strip()]
+
+
+def gradle_call(tasks: Sequence[str], serial: str, *, named: bool) -> Call:
+    """Return the call of the device tasks of a build on one device.
+
+    The command has the words of the log: `gradle`, and what the tasks do, by the names of the
+    tasks of the Android Gradle plugin. `named` says whether ANDROID_SERIAL names the device;
+    without it, the plugin acts on every device, and a refusal says what to do about that.
+    """
+    words = {word for task in tasks if (word := _gradle_word(task)) is not None}
+    return Call(
+        DEVICE,
+        " ".join([GRADLE, *sorted(words)]),
+        serial,
+        tool=GRADLE,
+        tasks=tuple(tasks),
+        hint="" if named else _NO_SERIAL_HINT,
+    )
+
+
+def _gradle_word(path: str) -> str | None:
+    name = path.rpartition(":")[2]
+    return next((word for prefix, word in _GRADLE_TASKS if name.startswith(prefix)), None)
+
+
+def _said(call: Call) -> str:
+    """Return the words that a message names the call by, such as "adb shell" or
+    "gradle :app:installDebug"."""
+    if call.tool != GRADLE:
+        return f"adb {call.command}"
+    shown = [task[:_MAX_TASK_LENGTH] for task in call.tasks[:_SAID_TASKS]]
+    if len(call.tasks) > _SAID_TASKS:
+        shown.append(f"and {len(call.tasks) - _SAID_TASKS} more")
+    return f"gradle {' '.join(shown)}"
 
 
 def parse(arguments: Sequence[str]) -> Call:
@@ -400,13 +589,23 @@ class Caller:
     """
 
     def __init__(
-        self, env: Mapping[str, str], leases: Sequence[Lease], system: System, rules: HolderRules
+        self,
+        env: Mapping[str, str],
+        leases: Sequence[Lease],
+        system: System,
+        rules: HolderRules,
+        *,
+        from_env: bool = False,
     ) -> None:
         self.env = env
         self.leases = leases
         self.system = system
         self.rules = rules
         self.pid = os.getpid()
+        # Whether `env` is the environment of a client that runs now, as for a Gradle build,
+        # rather than the environment that the caller got from its ancestors (see
+        # `identity.find_agent`).
+        self.from_env = from_env
 
     def token_holding(self) -> str | None:
         """Return the holding of the lease that `banksman run` gives its command, if any."""
@@ -422,13 +621,15 @@ class Caller:
 
     def holder(self) -> Holder:
         """Return the caller as acquire would record it: the worktree, the agent, and the issue."""
-        return find_holder(self._table, self.rules, env=self.env, pid=self.pid)
+        return find_holder(
+            self._table, self.rules, env=self.env, pid=self.pid, from_env=self.from_env
+        )
 
     def known_holder(self) -> Holder:
         """Return the caller as `holder` does, but without the agent when no question so far has
         read the process list."""
         table = self.__dict__.get("_table", {})
-        return find_holder(table, self.rules, env=self.env, pid=self.pid)
+        return find_holder(table, self.rules, env=self.env, pid=self.pid, from_env=self.from_env)
 
     def void(self, lease: Lease) -> str | None:
         """Return why a lease that its file shows as held is void by the rules of the reaper, or
@@ -457,8 +658,10 @@ class Caller:
         process = None if pid is None else self._table.get(pid)
         if process is None or process.started != started:
             return False
-        # A command that has left the process tree of its agent still acts for that agent.
-        return pid in self._above or pid == self._agent
+        # A command that has left the process tree of its agent still acts for that agent. The
+        # ancestors of a caller with the environment of a client say nothing about the client:
+        # the client of another agent can have started the daemon.
+        return pid == self._agent or (not self.from_env and pid in self._above)
 
     @cached_property
     def holdings(self) -> set[str]:
@@ -502,7 +705,9 @@ class Caller:
 
     @cached_property
     def _found(self) -> tuple[int | None, str | None]:
-        return find_agent(self._table, self.rules.agents, self.pid, self.env)
+        return find_agent(
+            self._table, self.rules.agents, self.pid, self.env, from_env=self.from_env
+        )
 
 
 class _Started(Mapping[int, str]):
@@ -544,6 +749,13 @@ def decide(
     serial = target(call, caller.env, devices, listing)
     if serial is None:
         return RUNS
+    return decide_device(call, caller, devices, strict, serial)
+
+
+def decide_device(
+    call: Call, caller: Caller, devices: Snapshot, strict: str | None, serial: str
+) -> Decision:
+    """Return the decision for a call that acts on the device with this serial (see `decide`)."""
     leases, unreadable = _leases_of(serial, devices)
     if not leases and not unreadable:
         if strict and caller.is_agent():
@@ -572,8 +784,8 @@ def decide(
         return Decision(_refused(call, caller, serial, lease, mine=mine, void=void))
     if unreadable:
         text = (
-            f"adb {call.command}: refused: the lease file of {serial} cannot be read, so the"
-            f" device is out of use: {unreadable[0].error}"
+            f"{_said(call)}: refused: the lease file of {serial} cannot be read, so the"
+            f" device is out of use: {unreadable[0].error}{call.hint}"
         )
         return Decision(Verdict(REFUSED, UNREADABLE, text, call.command, caller, serial))
     used = [lease for lease in leases if lease.state in HELD and lease.holding in caller.holdings]
@@ -822,13 +1034,13 @@ def _leases_of(serial: str, devices: Snapshot) -> tuple[list[Lease], list[Unread
 def _not_leased(call: Call, caller: Caller, serial: str, *, refuse: bool) -> Verdict:
     if refuse:
         text = (
-            f"adb {call.command}: refused: {serial} is not a device of your leases, and the adb"
-            f" guard is strict. {_GUIDE}"
+            f"{_said(call)}: refused: {serial} is not a device of your leases, and the adb"
+            f" guard is strict. {_GUIDE}{call.hint}"
         )
         return Verdict(REFUSED, NOT_LEASED, text, call.command, caller, serial)
     text = (
-        f"warning: adb {call.command}: {serial} is not a device of your leases, and a strict adb"
-        f" guard would refuse this call. {_GUIDE}"
+        f"warning: {_said(call)}: {serial} is not a device of your leases, and a strict adb"
+        f" guard would refuse this call. {_GUIDE}{call.hint}"
     )
     return Verdict(WARNED, NOT_LEASED, text, call.command, caller, serial)
 
@@ -840,14 +1052,14 @@ def _refused(
     if mine:
         why = f"it is {lease.state}" if void is None else VOID_REASONS[void]
         text = (
-            f"adb {call.command}: refused: your lease of {device} is lost: {why}. Stop using the"
-            " device, and acquire one again"
+            f"{_said(call)}: refused: your lease of {device} is lost: {why}. Stop using the"
+            f" device, and acquire one again{call.hint}"
         )
         return Verdict(REFUSED, LOST, text, call.command, caller, serial, (lease,))
     text = (
-        f"adb {call.command}: refused: another holder leases {device}, and the lease is"
+        f"{_said(call)}: refused: another holder leases {device}, and the lease is"
         f" {lease.state}: {_holder(lease)}. Use a device of your own lease; banksman status"
-        " shows who holds what. Run banksman agent-guide and follow it"
+        f" shows who holds what. Run banksman agent-guide and follow it{call.hint}"
     )
     return Verdict(REFUSED, OTHER_HOLDER, text, call.command, caller, serial, (lease,))
 
@@ -857,7 +1069,7 @@ def _every_device_refused(call: Call, caller: Caller, others: Sequence[Lease]) -
     if len(others) > _SHOWN:
         shown.append(f"{len(others) - _SHOWN} more")
     text = (
-        f"adb {call.command}: refused: it acts on every device, also on devices that other"
+        f"{_said(call)}: refused: it acts on every device, also on devices that other"
         f" holders lease and that run now: {', '.join(shown)}"
     )
     return Verdict(REFUSED, EVERY_DEVICE, text, call.command, caller, leases=tuple(others))

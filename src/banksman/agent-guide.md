@@ -83,6 +83,14 @@ banksman run --holding login-tests -- ./scripts/ui-tests.sh --device {serial}
   banksman keeps your lease instead of taking another device. `BANKSMAN_RESOURCE`,
   `BANKSMAN_KIND`, `BANKSMAN_SERIAL`, `BANKSMAN_ACCOUNTS` with accounts, and `BANKSMAN_HANDLE`
   for a remote device carry the other values of the grant.
+- Run a Gradle task that installs on a device, removes from it, or runs tests on it, such as
+  `installDebug`, `installDebugAndroidTest`, `uninstallAll`, or `connectedDebugAndroidTest`,
+  only under `banksman run`, or with `ANDROID_SERIAL` set to the serial of your device; the
+  connected tests also take `--serial <serial>`. The Android Gradle plugin does not run `adb`,
+  so the adb guard does not see it, and without a serial it acts on every device of the
+  machine, also on the devices of other holders. On a
+  machine with the adb guard for Gradle, such a build fails with a `banksman: gradle ...:
+  refused` line before it reaches a device.
 - When your holding has several devices, the command runs under all of them, and stops when
   any lease is lost: pass `{serials}`, the serials with commas, to a tool that uses several
   devices. `{resources}` lists the devices, and the command gets the same lists in
@@ -125,6 +133,9 @@ banksman release --holding login-tests
   the command again: use a device of your own holding.
 - When banksman warns that a strict adb guard would refuse an `adb` call, the call ran on a
   device that is not in your holding. Get a device as this guide says, and use only that one.
+- When a Gradle build fails with a `banksman: gradle ...: refused` line, the build would act on
+  a device that is not in your holding. Run it under `banksman run`, or set `ANDROID_SERIAL` to
+  the serial of your device, and do not run it again as it was.
 - When a device command or a script fails for a reason that it does not explain, for example
   "device not ready", run `banksman held` first. Many scripts hide what banksman says about a
   refused `adb` call, and `held` shows the calls that banksman refused or warned about. Act on

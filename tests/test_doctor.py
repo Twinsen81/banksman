@@ -135,6 +135,8 @@ def test_a_complete_setup_passes(
     set_path(monkeypatch, wrapper.parent, sdk / "platform-tools", banksman_bin)
     save(home / doctor.GRADLE_INIT, printed.gradle_init())
     save(home / doctor.GRADLE_BUILD_SLOT, printed.build_slot())
+    save(home / doctor.GRADLE_GUARD_INIT, printed.gradle_guard_init())
+    save(home / doctor.GRADLE_GUARD, printed.gradle_guard())
     save(home / doctor.SKILLS["claude"], printed.agent_guide())
 
     found = checks(capsys)
@@ -149,6 +151,8 @@ def test_a_complete_setup_passes(
         "adb-wrapper": "ok",
         "gradle-init": "ok",
         "gradle-build-slot": "ok",
+        "gradle-guard-init": "ok",
+        "gradle-guard": "ok",
         "skill:claude": "ok",
         "skill:codex": "skip",
         "state-dir": "ok",
@@ -443,6 +447,41 @@ def test_a_stale_build_slot_part_fails_and_a_part_alone_is_a_warning(capsys, con
     found = checks(capsys, status=1)
     assert statuses(found)["gradle-init"] == "warn"
     assert statuses(found)["gradle-build-slot"] == "fail"
+
+
+def test_the_gradle_guard_is_optional_and_the_doctor_says_how_to_install_it(capsys, config_path):
+    configure(config_path)
+    found = checks(capsys)
+    assert found["gradle-guard-init"]["status"] == "skip"
+    assert found["gradle-guard-init"]["detail"].endswith("; banksman admin gradle-guard prints it")
+    assert found["gradle-guard"]["status"] == "skip"
+
+
+def test_the_gradle_guard_init_script_without_its_part_is_a_warning(capsys, config_path, home):
+    # The init script fails no build without the part: it says that the build is not checked.
+    configure(config_path)
+    save(home / doctor.GRADLE_GUARD_INIT, printed.gradle_guard_init())
+    found = checks(capsys)
+    assert found["gradle-guard-init"]["status"] == "ok"
+    assert found["gradle-guard"]["status"] == "warn"
+    assert found["gradle-guard"]["detail"].startswith(
+        "every build on Gradle 7.4 and later says that its device tasks are not checked: "
+    )
+    assert found["gradle-guard"]["fix"] == (
+        f"mkdir -p {home / '.gradle' / 'banksman'} && banksman admin gradle-guard --part >"
+        f" {home / doctor.GRADLE_GUARD}"
+    )
+
+
+def test_a_stale_gradle_guard_part_fails_and_a_part_alone_is_a_warning(capsys, config_path, home):
+    configure(config_path)
+    save(home / doctor.GRADLE_GUARD, "// an older part\n")
+    found = checks(capsys, status=1)
+    assert statuses(found)["gradle-guard-init"] == "warn"
+    assert found["gradle-guard-init"]["fix"] == (
+        f"banksman admin gradle-guard > {home / doctor.GRADLE_GUARD_INIT}"
+    )
+    assert statuses(found)["gradle-guard"] == "fail"
 
 
 def test_quarantined_leases_are_a_warning(capsys, state_dir):

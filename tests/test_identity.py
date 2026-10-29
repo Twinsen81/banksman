@@ -555,3 +555,42 @@ def test_whoami_finds_the_agent_by_the_variable_on_the_real_machine(tmp_path):
         agent.wait()
     shown = json.loads(result.stdout)
     assert (shown["agent"], shown["owner_pid"]) == ("claude", agent.pid)
+
+
+# The environment of a Gradle build: the daemon takes the environment of the client of each build.
+
+
+def test_the_environment_of_a_build_names_the_agent_also_for_a_daemon_older_than_the_agent():
+    # A daemon that an earlier build started, and a client of an agent that started later.
+    table = detached(agent_started="2001")
+    assert find_agent(table, ("claude",), 500, {"CLAUDE_PID": "300"}) == (None, None)
+    assert find_agent(table, ("claude",), 500, {"CLAUDE_PID": "300"}, from_env=True) == (
+        300,
+        "claude",
+    )
+
+
+def test_with_the_environment_of_a_build_the_named_agent_wins_over_an_agent_above_the_caller():
+    # The agent whose client started the daemon can still run above it, while the build is
+    # another agent's.
+    table = processes(
+        (500, "/bin/sh"), (400, "codex"), (300, "/usr/local/bin/claude"), (200, "/bin/zsh")
+    )
+    env = {"CLAUDE_PID": "300"}
+    assert find_agent(table, ("claude", "codex"), 500, env) == (400, "codex")
+    assert find_agent(table, ("claude", "codex"), 500, env, from_env=True) == (300, "claude")
+
+
+def test_with_the_environment_of_a_build_the_walk_finds_the_agent_without_a_variable():
+    assert find_agent(AGENT_IN_AN_APP, ("claude",), 500, {}, from_env=True) == (300, "claude")
+
+
+@pytest.mark.parametrize(
+    ("table", "value"),
+    [(detached(), "301"), (detached(agent_program="/bin/zsh"), "300"), (detached(), "500")],
+)
+def test_with_the_environment_of_a_build_the_process_must_still_be_the_agent(table, value):
+    assert find_agent(table, ("claude",), 500, {"CLAUDE_PID": value}, from_env=True) == (
+        None,
+        None,
+    )

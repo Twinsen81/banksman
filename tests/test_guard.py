@@ -1788,3 +1788,269 @@ def test_the_fast_path_adds_little_time_to_an_adb_call(shim, fake_adb, tmp_path)
     with_guard = median([str(shim), *arguments])
     print(f"\nthe adb guard adds {1000 * (with_guard - alone):.0f} ms to an adb call")
     assert with_guard - alone < 0.5
+
+
+# The device tasks of a Gradle build: `banksman guard gradle`, which the part of the guard for
+# Gradle runs before such a build runs its first task.
+
+TASKS = [":app:installDebug", ":app:connectedDebugAndroidTest"]
+SAID = "gradle :app:installDebug :app:connectedDebugAndroidTest"
+NO_SERIAL = (
+    ". The build names no device, so the Android Gradle plugin acts on every device that adb"
+    " lists: run the build under banksman run, or set ANDROID_SERIAL to the serial of your device"
+)
+
+
+def gradle(system, *, env=None, adb=no_adb, tasks=TASKS, serials=()):
+    return guard.check_gradle(
+        list(tasks), load_config(), env or {}, system, adb, serials=list(serials)
+    )
+
+
+def gradle_check(system, **kwargs):
+    """Return the text of a refusal, or None when the build runs without a warning."""
+    found = gradle(system, **kwargs).verdict
+    if found is None:
+        return None
+    assert found.action == REFUSED, found.text
+    return found.text
+
+
+def test_a_build_on_the_device_of_another_holding_in_android_serial_is_refused(store, system):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    assert gradle_check(system, env={"ANDROID_SERIAL": "emulator-5554"}) == (
+        f"{SAID}: refused: another holder leases emulator-5554 (e2e_phone), and the lease is"
+        " ready: codex · #123 · verify the tablet layout. Use a device of your own lease;"
+        " banksman status shows who holds what. Run banksman agent-guide and follow it"
+    )
+
+
+def test_a_build_on_the_device_of_the_caller_passes_and_uses_its_holding(store, system):
+    granted = lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    decision = gradle(system, env={"ANDROID_SERIAL": "emulator-5554"})
+    assert decision.verdict is None
+    assert [each.lease_id for each in decision.used] == [granted.lease_id]
+
+
+def test_the_lease_id_of_banksman_run_passes_a_build_without_the_process_list(store, system):
+    granted = lease(store, system, "e2e_phone", mine(owner_pid=None), serial="emulator-5554")
+    env = {"BANKSMAN_LEASE": granted.lease_id, "ANDROID_SERIAL": "emulator-5554"}
+    assert gradle_check(NoProcessList(), env=env) is None
+
+
+def test_every_serial_of_the_list_in_android_serial_is_checked(store, system):
+    # The Android Gradle plugin reads a list with commas.
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    lease(store, system, "e2e_tablet", other(), serial="emulator-5556")
+    env = {"ANDROID_SERIAL": "emulator-5554, emulator-5556"}
+    assert "another holder leases emulator-5556" in gradle_check(system, env=env)
+
+
+def test_without_android_serial_the_build_acts_on_every_device_that_adb_lists(store, system):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    refusal = gradle_check(system, adb=listing(PHONE, EMULATOR))
+    assert refusal.startswith(f"{SAID}: refused: another holder leases emulator-5554 (e2e_phone)")
+    assert refusal.endswith(f"Run banksman agent-guide and follow it{NO_SERIAL}")
+
+
+def test_without_android_serial_a_build_passes_when_only_own_devices_are_listed(store, system):
+    granted = lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    decision = gradle(system, adb=listing(EMULATOR))
+    assert decision.verdict is None
+    assert [each.lease_id for each in decision.used] == [granted.lease_id]
+
+
+def test_a_device_that_is_not_online_is_not_a_device_of_the_build(store, system):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    offline = Transport("emulator-5554", "offline", transport_id="4")
+    assert gradle_check(system, adb=listing(offline)) is None
+
+
+def test_without_leases_a_build_without_android_serial_runs_without_adb(system):
+    assert gradle(NoProcessList()) == guard.RUNS
+
+
+def test_strict_refuses_a_free_device_of_a_build_and_says_what_to_do(store, system, strict):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    assert gradle_check(system, adb=listing(EMULATOR, PHONE)) == (
+        f"{SAID}: refused: R5CR1234ABC is not a device of your leases, and the adb guard is"
+        f" strict. Get a device through banksman: run banksman agent-guide and follow it{NO_SERIAL}"
+    )
+
+
+def test_strict_refuses_a_serial_that_no_lease_of_the_caller_has(store, system, strict):
+    assert gradle_check(system, env={"ANDROID_SERIAL": "emulator-5556"}) == (
+        f"{SAID}: refused: emulator-5556 is not a device of your leases, and the adb guard is"
+        " strict. Get a device through banksman: run banksman agent-guide and follow it"
+    )
+
+
+def test_warn_lets_a_build_run_with_a_warning(store, system, warn):
+    found = gradle(system, env={"ANDROID_SERIAL": "emulator-5556"}).verdict
+    assert (found.action, found.reason, found.serial) == (WARNED, NOT_LEASED, "emulator-5556")
+    assert found.text.startswith(f"warning: {SAID}: emulator-5556 is not a device of your leases")
+
+
+def test_a_refusal_comes_before_a_warning_among_the_devices_of_a_build(store, system, warn):
+    lease(store, system, "e2e_tablet", other(), serial="emulator-5556")
+    tablet = Transport("emulator-5556", "device", transport_id="5")
+    found = gradle(system, adb=listing(PHONE, EMULATOR, tablet)).verdict
+    assert (found.action, found.serial) == (REFUSED, "emulator-5556")
+
+
+def test_a_build_of_a_person_passes_also_on_the_device_of_another_holding(store, system):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    system.parents[ME] = 1
+    assert gradle_check(system, env={"ANDROID_SERIAL": "emulator-5554"}) is None
+
+
+def test_a_daemon_older_than_the_agent_acts_for_the_agent_in_the_environment_of_the_build(
+    store, system
+):
+    # A Gradle daemon that an earlier build started takes the environment of the client of each
+    # build, so the variable of the agent reaches the guard, and the age of the daemon says
+    # nothing about it. For an adb call, the same environment counts for nothing.
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    env = {**detach(system, agent_started="2001"), "ANDROID_SERIAL": "emulator-5554"}
+    assert "another holder" in gradle_check(system, env=env)
+    assert check(system, "-s", "emulator-5554", "shell", env=env) is None
+
+
+def test_the_agent_in_the_environment_of_a_build_wins_over_an_agent_above_the_daemon(
+    store, system
+):
+    # The client of another agent started the daemon, and still runs above it.
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    lease(store, system, "e2e_tablet", other(), serial="emulator-5556")
+    system.parents[ME] = OTHER_AGENT
+    env = {"CLAUDE_PID": str(AGENT), "ANDROID_SERIAL": "emulator-5554"}
+    assert gradle_check(system, env=env) is None
+    env["ANDROID_SERIAL"] = "emulator-5556"
+    assert "another holder" in gradle_check(system, env=env)
+
+
+def test_a_long_list_of_tasks_is_shortened_in_the_refusal(store, system):
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    tasks = [f":m{number}:installDebug" for number in range(5)]
+    refusal = gradle_check(system, env={"ANDROID_SERIAL": "emulator-5554"}, tasks=tasks)
+    assert refusal.startswith(
+        "gradle :m0:installDebug :m1:installDebug :m2:installDebug and 2 more: refused:"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tasks", "command"),
+    [
+        ([":app:installDebug"], "gradle install"),
+        (
+            [":app:uninstallAll", ":a:connectedDebugAndroidTest", ":b:installDebugAndroidTest"],
+            "gradle connectedAndroidTest install uninstall",
+        ),
+        ([":lib:jar"], "gradle"),
+    ],
+)
+def test_the_log_has_the_words_of_a_build_and_never_its_task_names(tasks, command):
+    call = guard.gradle_call(tasks, "emulator-5554", named=True)
+    assert call.command == command
+    assert COMMAND.fullmatch(command)
+
+
+def test_a_refused_build_is_in_the_log_with_the_caller(
+    machine, store, system, worktree, log_path, monkeypatch
+):
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5554")
+    lease(store, system, "e2e_phone", other(), serial="emulator-5554")
+    tasks = [":app:installDebug", ":app:uninstallAll", ":app:connectedDebugAndroidTest"]
+    assert guard.main(["gradle", "--", *tasks]) == guard.EXIT_REFUSED
+    (event,) = logged(log_path)
+    assert (event.command, event.serial, event.reason, event.action) == (
+        "gradle connectedAndroidTest install uninstall",
+        "emulator-5554",
+        OTHER_HOLDER,
+        REFUSED,
+    )
+    assert (event.owner, event.owner_pid, event.agent, event.session) == (
+        worktree,
+        AGENT,
+        "claude",
+        "session-1",
+    )
+
+
+def test_guard_gradle_prints_nothing_when_the_build_may_run(machine, capsys):
+    assert guard.main(["gradle", "--", ":app:installDebug"]) == 0
+    assert capsys.readouterr() == ("", "")
+
+
+def test_guard_gradle_needs_a_task(capsys):
+    assert guard.main(["gradle", "--"]) == 2
+    assert guard.USAGE in capsys.readouterr().err
+
+
+def test_a_guard_that_fails_lets_the_build_run_and_says_so(machine, config_path, capsys):
+    write_config(config_path, "[guard]\nstrict = 7\n")
+    assert guard.main(["gradle", "--", ":app:installDebug"]) == 0
+    assert capsys.readouterr().err.startswith(
+        "banksman: adb guard: the device tasks of this build are not checked: "
+    )
+
+
+def test_a_build_of_the_holder_touches_its_holding(machine, store, system, state_dir, monkeypatch):
+    needs = [Need((Choice(name, "emulator"),)) for name in ("e2e_phone", "e2e_tablet")]
+    store.grant(needs, mine())
+    store.observe([SerialSeen("e2e_phone", "emulator", "emulator-5554", system.now)])
+    system.advance(61)
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5554")
+    assert guard.main(["gradle", "--", ":app:installDebug"]) == 0
+    phone, tablet = touched(state_dir, "e2e_phone", "e2e_tablet")
+    assert phone["awake"]["touched"] == tablet["awake"]["touched"] == system.now
+
+
+def test_the_serial_option_of_the_connected_tests_comes_before_android_serial(store, system):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    lease(store, system, "e2e_tablet", other(), serial="emulator-5556")
+    env = {"ANDROID_SERIAL": "emulator-5554"}
+    assert gradle_check(system, env=env) is None
+    refusal = gradle_check(system, env=env, serials=["emulator-5556"])
+    assert refusal.startswith(
+        "gradle :app:connectedDebugAndroidTest: refused: another holder leases emulator-5556"
+    )
+
+
+def test_the_serial_option_names_no_device_of_an_install(store, system):
+    # An install reads only ANDROID_SERIAL, so without the variable it acts on every device.
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    lease(store, system, "e2e_tablet", other(), serial="emulator-5556")
+    tablet = Transport("emulator-5556", "device", transport_id="5")
+    refusal = gradle_check(system, serials=["emulator-5554"], adb=listing(EMULATOR, tablet))
+    assert refusal.startswith(
+        "gradle :app:installDebug: refused: another holder leases emulator-5556"
+    )
+    # Connected tests alone, with the option, act on the device of the option only.
+    tests = [":app:connectedDebugAndroidTest"]
+    assert gradle_check(system, serials=["emulator-5554"], tasks=tests) is None
+
+
+def test_a_warned_build_still_uses_the_leases_of_its_own_devices(store, system, warn):
+    granted = lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    decision = gradle(system, adb=listing(EMULATOR, PHONE))
+    assert (decision.verdict.action, decision.verdict.serial) == (WARNED, "R5CR1234ABC")
+    assert [each.lease_id for each in decision.used] == [granted.lease_id]
+
+
+def test_a_warned_build_of_the_holder_touches_its_holding(
+    machine, store, system, state_dir, warn, monkeypatch
+):
+    lease(store, system, "e2e_phone", mine(), serial="emulator-5554")
+    system.advance(61)
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5554,emulator-5556")
+    assert guard.main(["gradle", "--", ":app:installDebug"]) == 0
+    (phone,) = touched(state_dir, "e2e_phone")
+    assert phone["awake"]["touched"] == system.now
+
+
+def test_guard_gradle_reads_the_serial_options_before_the_tasks(machine, store, system, capsys):
+    lease(store, system, "e2e_tablet", other(), serial="emulator-5556")
+    tasks = ["--", ":app:connectedDebugAndroidTest"]
+    assert guard.main(["gradle", "--serial", "emulator-5554", "--serial", "emulator-5556", *tasks])
+    assert "another holder leases emulator-5556" in capsys.readouterr().err

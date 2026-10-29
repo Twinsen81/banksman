@@ -473,22 +473,33 @@ def _build_parser() -> argparse.ArgumentParser:
     guard_command = commands.add_parser(
         "guard",
         help="check an adb call against the leases, and print the adb to run; the wrapper that"
-        " admin adb-shim prints runs it",
+        " admin adb-shim prints runs it. With gradle, check the device tasks of a build; the"
+        " Gradle script that admin gradle-guard prints runs it",
         allow_abbrev=False,
     )
     # Only for the help: main gives the arguments of guard to the guard as they are, because
     # argparse would read the arguments of adb as its own.
-    guard_command.add_argument("tool", choices=["adb"], help="the program that the call runs")
+    guard_command.add_argument(
+        "tool", choices=[guard.ADB, guard.GRADLE], help="the program that the call runs"
+    )
     guard_command.add_argument(
         guard.FALLBACK_OPTION,
         metavar="PATH",
-        help="the adb to run when the configuration names no sdk or cannot be read",
+        help="with adb: the adb to run when the configuration names no sdk or cannot be read",
+    )
+    guard_command.add_argument(
+        guard.SERIAL_OPTION,
+        action="append",
+        metavar="SERIAL",
+        help="with gradle: a value of the --serial option of the build, which its connected"
+        " tests take before ANDROID_SERIAL; repeat it for each value",
     )
     guard_command.add_argument(
         "arguments",
         nargs=argparse.REMAINDER,
         metavar="-- ARGUMENT",
-        help="the arguments of the call, after --",
+        help="the arguments of the adb call, or the paths of the device tasks of the build,"
+        " after --",
     )
 
     admin = commands.add_parser("admin", help="commands for the operator", allow_abbrev=False)
@@ -543,6 +554,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="print the optional adb wrapper that runs the adb guard; save it as adb in a"
         " directory that is first on the PATH of the agents",
         allow_abbrev=False,
+    )
+    gradle_guard_command = admin_commands.add_parser(
+        "gradle-guard",
+        help="print the optional Gradle init script that runs the adb guard for the device tasks"
+        " of the Android Gradle plugin, which do not run adb; save it in ~/.gradle/init.d/",
+        allow_abbrev=False,
+    )
+    gradle_guard_command.add_argument(
+        "--part",
+        action="store_true",
+        help="print the part that the init script applies; save it as"
+        " ~/.gradle/banksman/gradle-guard.gradle",
     )
     admin_commands.add_parser(
         "reap-agent",
@@ -2868,6 +2891,12 @@ def _cmd_admin_gradle_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_admin_gradle_guard(args: argparse.Namespace) -> int:
+    # As for the build slots: ~/.gradle belongs to Gradle and to the operator.
+    sys.stdout.write(printed.gradle_guard() if args.part else printed.gradle_guard_init())
+    return 0
+
+
 def _cmd_admin_adb_shim(args: argparse.Namespace) -> int:
     # banksman does not install the wrapper itself: the operator chooses where it goes on the
     # PATH.
@@ -3493,6 +3522,7 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "admin discover": _cmd_admin_discover,
     "admin gradle-init": _cmd_admin_gradle_init,
     "admin adb-shim": _cmd_admin_adb_shim,
+    "admin gradle-guard": _cmd_admin_gradle_guard,
     "admin reap-agent": _cmd_admin_reap_agent,
     "admin doctor": _cmd_admin_doctor,
 }

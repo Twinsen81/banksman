@@ -497,6 +497,25 @@ def guard_call(log_path, ago, resource, *, owner_pid=None, **fields):
     History(log_path).append(event)
 
 
+def test_held_names_a_refused_build_by_the_words_of_its_tasks(
+    capsys, config_path, log_path, other_agent
+):
+    configure(config_path)
+    them = ["--owner-pid", str(other_agent)]
+    _, theirs, _ = acquire(capsys, "--where", "form=phone", "--for", "verify the layout", *them)
+    device = {"serial": "emulator-5554", "kind": "emulator", "state": "ready"}
+    guard_call(log_path, 60, "qa_phone", lease_id=theirs["LEASE"], **device)
+    guard_call(
+        log_path, 30, "qa_phone", lease_id=theirs["LEASE"], command="gradle install", **device
+    )
+    _, calls = held_text(capsys, *ME)
+    (row,) = table_rows(calls.split("\n", 1)[1])
+    assert row["DETAILS"] == (
+        "refused adb shell, gradle install on emulator-5554: another holder leases the device,"
+        " and the lease is ready"
+    )
+
+
 def test_held_shows_the_adb_calls_of_its_agent_process_that_the_guard_refused(
     capsys, config_path, log_path, other_agent
 ):
