@@ -4,12 +4,13 @@
 holder identity, requests by properties, joint acquire with accounts, the console, the
 supervised run, the serial in the lease, the optional build slots, and the optional adb guard
 exist. Sections 3 to 9, 11, 12, and 15 are implemented, with
-`banksman acquire`, `touch`, `release`, `reap`, `banksman whoami`, `banksman held`,
-`banksman agent-guide`, the commands that scripts run (`enter`, `check`, `leave`, and `run`),
-`banksman guard`, `banksman admin discover`,
+`banksman acquire`, `wait`, `touch`, `release`, `reap`, `banksman whoami`, `banksman held`,
+`banksman version`, `banksman agent-guide`, the commands that scripts run (`enter`, `check`,
+`leave`, and `run`), `banksman guard`, `banksman admin discover`,
 `banksman admin release --force`, `banksman admin gradle-init`, `banksman admin adb-shim`,
-and `banksman admin gradle-guard`.
-Of section 10, `status`, `watch`, `log`, and `banksman admin doctor` are implemented.
+`banksman admin gradle-guard`, and `banksman admin reap-agent`.
+Of section 10, `status`, `watch`, `log`, the trace, and `banksman admin doctor` are
+implemented.
 `explain` and the queue of the callers that wait are not implemented yet.
 Resolved decisions and how to change them are in [DECISIONS.md](../DECISIONS.md); the threat
 model is in [SECURITY.md](../SECURITY.md).
@@ -69,8 +70,9 @@ leases instead.
   for example every night on macOS when a file is older than 3 days, and macOS empties
   `/tmp` at boot. But a quarantine must last until a person releases it. So a quarantined
   lease is also kept in `~/.local/state/banksman/quarantine`, where the home directory comes
-  from the user database, as for the configuration file. Every command first restores a
-  quarantined lease whose file in the state directory has gone. The copy is deleted only when
+  from the user database, as for the configuration file. Every command that reads or changes
+  leases first restores a quarantined lease whose file in the state directory has gone.
+  The copy is deleted only when
   the resource is free again, or when a person releases it. `BANKSMAN_QUARANTINE_DIR` changes
   the path for tests. When only `BANKSMAN_STATE_DIR` is set, the quarantines are kept next to
   that directory, so that a state directory for tests never mixes with the real quarantines.
@@ -213,7 +215,8 @@ Checking ownership when a script starts is not enough: one long test run can las
 minutes, and its lease can become void in the middle.
 
 - **The lease id is a token.** The commands that grant a lease print its id. A script passes
-  it to `enter`, `check`, and `leave`, and `touch` and `release` need it too. A
+  it to `enter`, `check`, and `leave`, and `touch` and `release` take it too, or the label
+  of the holding (section 9). A
   script whose token does not name the current lease of the resource has lost it. So a
   script of an earlier lease, for example one of the same worktree, never acts on a newer
   lease. Each lease has its own id, also when one `acquire` grants several leases; those
@@ -263,7 +266,8 @@ minutes, and its lease can become void in the middle.
   log records the processes that still run, with whether stopping was on for the kind
   (section 10). The reason: banksman must never stop a process that the user did not expect,
   whatever agent the user runs. A blocked device costs time; a stopped process costs trust.
-- **A quarantine notice goes to the operator.** Every command reaps first, so a command of
+- **A quarantine notice goes to the operator.** Every command that reads or changes leases
+  reaps first, so a command of
   any caller can quarantine the lease of another holder, for example a build that releases
   its build slot. A person gets the notice on standard error: the processes that still run and
   the command that releases the lease, or why the take-back failed. Every other caller gets
@@ -335,7 +339,9 @@ minutes, and its lease can become void in the middle.
   gave to a new process. It never signals itself, the owner process, a process above either
   of them, or a group that holds one of them. It does not signal a group whose leader has
   ended, because the system can give that group id to a new group.
-- **Reaping** runs at the start of every command, and whenever a caller runs `banksman reap`.
+- **Reaping** runs at the start of every command that reads or changes leases, and whenever a
+  caller runs `banksman reap`. The adb guard, `whoami`, `version`, `agent-guide`,
+  `admin discover`, `admin doctor`, and the `admin` commands that print a file do not reap.
   Only `banksman reap` also looks for emulators without input (section 8), and the reap job
   runs it every 5 minutes.
 
@@ -420,7 +426,8 @@ not code.
   from the current configuration, not from the lease, so when the operator removes a hook,
   it stops at once, also for leases that are already void. The serial in the lease can be old,
   so before the hook runs, the reaper asks discovery for the serial of the instance now, and
-  the hook gets that one. The reaper runs at the start of every command, so a command of any
+  the hook gets that one. The reaper runs at the start of every command that reads or changes
+  leases, so a command of any
   caller, such as `check`, can then wait for that discovery: up to 60 seconds for a `discover`
   hook, or the timeouts of adb, and then the `on_void` hook. It does not hold the lock
   meanwhile, so other commands go on.
@@ -470,7 +477,8 @@ not code.
   lease, for example `"30m"`, counted in awake time. The reaper then ends it (section 8), and the
   next request with `--start` starts the AVD again. It is valid only with the
   `android-emulator` preset, and `[defaults]` cannot set it. It is `"off"` by default: a free
-  emulator then runs until a void lease of its AVD ends it, or the machine restarts. Like the
+  emulator then runs until a void lease of its AVD or a `release --end` (section 4) ends it, or
+  the machine restarts. Like the
   hook, the reaper reads it from the current configuration, so a change applies at once, also
   to the emulators that run now.
 - **`unused_timeout`** is how long a running emulator without a lease can have no input, for
@@ -496,7 +504,8 @@ A run asks for what it needs, not for a resource by name.
 - **Facts** come from the kind's `discover` hook or preset (section 8), and an agent cannot
   set them: `form` (phone, tablet, foldable, watch, tv), `api`, `image`, `abi`,
   `manufacturer`, `model`, `codename`, `display_name`, `avd`, `serial`, `running` (whether the
-  instance runs now), and, for a remote device, `handle` and `ends`. banksman sets four
+  instance runs now), `input_age` (the seconds since the last input on a running emulator,
+  section 8), and, for a remote device, `handle` and `ends`. banksman sets four
   attributes itself, and a hook cannot set them: `kind`; `paid`, from the kind (section 5);
   `account`, which is true when an allowed account is signed in on the instance now, false when
   its accounts are known and none of them is allowed, and missing when its accounts are not
@@ -750,7 +759,8 @@ holdings apart (section 9).
   TABLET_STARTED=false
   ```
 
-  A part name has lowercase letters, digits, and `_`, and becomes the prefix of the keys of
+  A part name starts with a lowercase letter, has at most 16 lowercase letters, digits, and
+  `_`, and becomes the prefix of the keys of
   its part. A request without `--as` has one part, and its keys have no prefix. A request has
   at most 8 parts.
 - **The choice.** banksman chooses for all parts under the lock of the lease store. Each part
@@ -775,7 +785,8 @@ holdings apart (section 9).
   new lease. A holding can also have a label, which names it instead of a lease id
   (section 9); its new leases get the label too.
 - **Accounts.** Some resources are useful only together with a scarcer thing that lives on
-  them, such as a device with a signed-in account. `--accounts N` asks for a resource on
+  them, such as a device with a signed-in account. `--accounts N`, with N from 1 to 10, asks
+  for a resource on
   which at least N allowed accounts are signed in now, and leases N of them with it, in the
   order of their names. The grant names them in `ACCOUNTS`, separated by commas. banksman
   grants exactly the accounts that it names. It does not return the list of candidates,
@@ -862,7 +873,8 @@ holdings apart (section 9).
   operator's tags: each tag and the name patterns of the resources that have it, for example
   `lab = ["qa_*"]`. discover keeps the tags when it writes the file. The operator can edit
   it. banksman
-  refuses an inventory that another user owns or that group or others can write to.
+  refuses an inventory that a user other than the user and root owns, or that group or others
+  can write to.
   `acquire` reads the machine again and grants only what is both allowed and present now
   (section 6). An entry that has gone is reported, not handed out. Counted kinds and kinds
   that list their instances need no inventory: the configuration that declares them is the
@@ -882,10 +894,12 @@ holdings apart (section 9).
   ```
 
   `schema` is the version of this format, now 1. `name` is a resource name. A fact name
-  has lowercase letters, digits, and `_`, and a fact is a text of at most 128 characters
-  without control characters, a whole number, or `true` or `false`. banksman sets the
-  attributes `kind`, `account`, and `tag` itself (section 6), so a hook cannot make an
-  instance look like one of another kind, or like one with an allowed account. `running`
+  starts with a lowercase letter and has at most 32 lowercase letters, digits, and `_`, and a
+  fact is a text of 1 to 128 characters without control characters, a whole number from
+  -10^9 to 10^9, or `true` or `false`. banksman leaves out a fact that breaks these rules, with
+  a note. banksman sets the attributes `kind`, `paid`, `account`, and `tag` itself
+  (section 6), so a hook cannot make an instance look like one of another kind, like one that
+  costs nothing, or like one with an allowed account. `running`
   tells whether the instance runs now.
   `accounts` lists the accounts on the instance; without it, or with `null`, they are not
   known. A value that is not valid is left out with a note, never repaired, and a note never
@@ -956,7 +970,8 @@ holdings apart (section 9).
   AVD, under the boot deadline. When the emulator ends before that, does not complete its boot
   by the boot deadline, or the start is interrupted, banksman ends the emulator and gives the
   lease back. What the emulator prints goes to `<name>.log`, which each start begins again;
-  the reason of a failed start is its last line.
+  when the emulator ends before its boot, the reason of the failed start names the last line of
+  that log.
 
   **The record.** `<kind>-emulators.json` lists the emulators that banksman knows: the ones that
   it started, and the ones that ran when a lease of their AVD ended (section 6), each with its
@@ -1012,7 +1027,8 @@ holdings apart (section 9).
   newer versions with the suffix `(excludingAttention)`. Every input passes through it: the taps
   of a person in the emulator window, `adb shell input`, UI Automator, and Espresso. For each
   emulator that runs and that adb lists as `device`, the full discovery, the one that also reads
-  the accounts, runs `adb shell 'cat /proc/uptime; dumpsys power'` under the adb timeout, and
+  the accounts, runs `adb shell 'cat /proc/uptime; dumpsys power'` under the timeout of
+  15 seconds of each adb call, and
   the fact `input_age` is the uptime minus the time of the input, in whole seconds. When the
   power manager also prints how long ago the input was, that value counts, because the uptime
   also counts the time in which the device itself slept. The uptime of the emulator stops while
@@ -1186,8 +1202,9 @@ agent process when that process runs, its program is the agent that sets the var
 ancestor that they share. In the walk up the process tree, that process is an agent too, and the
 nearest agent wins: when one agent runs another, the variable names the outer one, and the
 nearest agent runs the command. When no agent is in the ancestry, the process that the variable
-names is the agent process. Acquire, `touch`, `release --all`, `held`, `whoami`, and the adb
-guard (section 12) find the agent process in the same way. The map of variables is built in, as
+names is the agent process. Acquire, `touch`, `release --all`, `held`, `whoami`, `status`, and
+the adb guard (section 12) find the agent process in the same way. The map of variables is built
+in, as
 for the session: only `claude` sets a pid variable, and Codex does not.
 
 - The process list that banksman reads already has the process, so the variable costs no more
@@ -1308,7 +1325,8 @@ agent, through its own agent process.
   of letters, a hyphen, and digits, such as `abc-123` in the branch `abc-123-tablet-layout`.
   With a group in the pattern, the issue id is the text of the first group. An empty
   `agents` list turns the agent detection off.
-- An issue id has 1 to 64 letters, digits, and the characters `#`, `.`, `_`, `/`, and `-`.
+- An issue id has 1 to 64 letters, digits, and the characters `#`, `.`, `_`, `/`, and `-`,
+  and starts with a letter, a digit, or `#`.
   A branch name is text that anybody can choose, so a match that is not a valid issue id is
   not used, and an explicit `--issue` that is not valid is an error.
 - `banksman whoami` shows the holder that banksman would record for a lease taken from the
@@ -1351,14 +1369,19 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   refresh reaps, reads the configuration again, and runs discovery. An error is shown in
   place of the table, and the next refresh tries again.
 - `banksman status --json` carries the same data for agents and other tools: for each
-  resource its kind, its state, whether it is present now, its serial, the facts `form`, `api`,
-  and `input_age`, and its lease. The purpose only with `--verbose` (section 9).
+  resource its kind, its state, whether it is present now, whether it is paid, its serial, the
+  facts `form`, `api`, and `input_age`, its lease, for a remote device its reservation
+  (`handle`) and when it ends (`ends`), for an emulator that banksman did not start the agent
+  that started it (`started_by`), and `error` for a lease file that cannot be read;
+  and `notes` for the whole answer. The purpose and the label of the holding only with
+  `--verbose` (section 9).
 - **"Free by"** cannot be known, so it shows three labeled values:
   1. expected: the holder's `--expect`, only a hint, or unknown;
   2. at the latest: the hard cap, which the reaper enforces;
   3. if abandoned: when the lease becomes void if nothing touches it again. That is the last
      touch plus the idle timeout, or plus the owner grace when the owner process has ended,
-     and never later than the hard cap.
+     never later than the hard cap, and for a booting lease never later than its boot
+     deadline.
 
   The table shows them as times of day. The deadlines count awake time (section 3), so a
   time of day moves later when the machine sleeps. The JSON gives each value as a UTC time
@@ -1392,9 +1415,10 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   user database. It is outside `/tmp`, as the quarantines are, because the history must
   outlive restarts and cleaners of temporary files. It has one JSON object for each event,
   each with the output schema number (section 14), and banksman adds to it only under the
-  lock of the lease store. The adb guard takes that lock only to add an event, and waits for it
-  for half a second at most (section 12). At 10 MB, banksman starts a new file and keeps the
-  earlier one as `log.jsonl.1`. When the log cannot be written, the command still does its work
+  lock of the lease store. The adb guard takes that lock only to add an event, or for a touch
+  that is due, and waits for it for half a second at most (section 12). At 10 MB, banksman
+  starts a new file and keeps the earlier one as `log.jsonl.1`. When the log cannot be written,
+  the command still does its work
   and prints a warning: the change to the lease is already written. `log` leaves out a line
   that is not a valid event, and says how many it left out. It also reads the lines of an
   earlier output schema whose events it knows, so an upgrade does not hide the history.
@@ -1437,7 +1461,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
 
   A command that waits, such as `acquire --wait` or `watch`, takes steps for each look, so a
   line keeps the first 50 and the last 50 steps, and says in `steps_left_out` how many it left
-  out between them; `stderr` keeps 100 lines in the same way. `continues` is null, except in the
+  out between them; `stderr` keeps 100 lines in the same way, and says in `stderr_left_out` how
+  many it left out. `continues` is null, except in the
   line of the process that continues the start of `acquire --no-wait` (section 6): that process
   writes a line of its own, with the pid of its `acquire` in `continues`, and its `error` is the
   only place where the error of such a start is kept. Every text in a line has no control
@@ -1463,7 +1488,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   instances discovery finds now, without the accounts, with the notes of the discovery; that the
   adb of the configuration exists, with what `adb version` says, that it can list the devices
   when a kind uses an Android preset, and the emulator for a kind of the `android-emulator`
-  preset; that the first `adb` on the `PATH` is the adb wrapper, when one is saved (section 12);
+  preset; that the first `adb` on the `PATH` is the adb wrapper, when one is saved or when
+  `[guard]` sets `strict` (section 12);
   that the saved adb wrapper, the Gradle files of the build slots (section 11) and of the adb
   guard (section 12), and the guide for agents saved
   as a skill in `~/.claude/skills/banksman/SKILL.md` and `~/.codex/skills/banksman/SKILL.md` are
@@ -1474,7 +1500,8 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   log, and the record of lease ends belong to the user and can be written; whether the trace is
   on, as a warning, so that an operator does not leave it on by accident, and then that its file
   can be written; the quarantined
-  leases, as a warning, with the command that releases them; and the holder that `whoami`
+  leases, as a warning, with the command that releases them, and the lease files that cannot
+  be read; and the holder that `whoami`
   shows in this shell. The doctor is the place where the operator finds that command: the
   notice of the reaper gives it only to a person (section 4). It compares the
   content of each file, so a printed file needs no version stamp, also while every development
@@ -1634,8 +1661,9 @@ is a setup of the operator, and a project needs nothing for it.
 - **Which device.** The guard reads the command line as adb reads it. The device comes from
   `-t`, then `-s`, then `-d` or `-e`, then `ANDROID_SERIAL`, and then it is the only device that
   adb knows. `-s` also takes the other names that adb takes, such as `model:Pixel_8`, a USB
-  address, or a host without its port. For these names, for `-t`, `-d`, and `-e`, and for a
-  command that names no device, the guard asks `adb devices -l`. When adb would find no single
+  address, or a host without its port. The guard compares a host without its port with the
+  serials of the leases. For the other names, for `-t`, `-d`, and `-e`, and for a command that
+  names no device, it asks `adb devices -l`. When adb would find no single
   device, the call runs, and adb refuses it itself. `adb emu` has rules of its own, and the
   guard follows them: it talks to the console of the emulator whose port is in the serial of
   `-s` or `ANDROID_SERIAL`, and without one, to the only emulator, also when physical devices
@@ -1712,7 +1740,7 @@ is a setup of the operator, and a project needs nothing for it.
   device. The log records nothing for a touch, as for every other touch (section 10). A tool
   that talks to the adb server itself does not pass through the guard, and `banksman run`
   touches the lease for it; a Gradle build with the guard for Gradle (see below) touches the
-  holding once, when the build starts.
+  holding when the build starts, and again before each device task when a touch is due.
 - **Starts.** The start of an emulator records its serial before the boot. The serial of a
   remote device, `localhost:<port>`, is a serial like any other, and the start records it in
   the lease before the lease is ready. So the guard protects an instance that banksman starts
@@ -1939,7 +1967,8 @@ is a setup of the operator, and a project needs nothing for it.
   call through the full path of adb, such as the adb of Android Studio; a tool that talks to the
   adb server itself, such as the deploy of Android Studio, or the device tasks of the Android
   Gradle plugin on a machine without the guard for Gradle, for which the `ANDROID_SERIAL` of
-  `banksman run` names the leased device (section 4); and the emulator console. A second connection to an emulator, with `adb connect` to its adb port, has another
+  `banksman run` names the leased device (section 15); and the emulator console.
+  A second connection to an emulator, with `adb connect` to its adb port, has another
   serial, and the guard does not know that it is the same device. The same is true for a
   physical device over USB that also has a connection of `adb connect <host>:<port>`, while its
   lease records the serial over USB. A process that has no agent
@@ -1961,8 +1990,8 @@ banksman acquire [--as <part>] [--where <attr><op><value> ...] [--accounts <n>] 
                  [--for <text>] [--expect <duration>] [--wait <duration>]
                  [--lease <id> | --holding <label>] [--paid] [--start [--no-wait]]
                  [--issue <id>] [--owner-pid <pid>] [--json]
-banksman wait    (--lease <id> | --holding <label>) [--wait <duration>]
-                 [--owner-pid <pid>] [--json]                      # until the holding is ready
+banksman wait    (--lease <id> | --holding <label> [--owner-pid <pid>]) [--wait <duration>]
+                 [--json]                                          # until the holding is ready
 banksman enter   --resource <name> --lease <id> --pid <pid> [--pgid <pgid>]  # check, touch, register
 banksman check   --resource <name> --lease <id>                    # touch; exit 0: yours, 3: lost
 banksman leave   --resource <name> --lease <id> --pid <pid>
@@ -1973,8 +2002,8 @@ banksman run     --where <attr><op><value> ... [--accounts <n>] [--for <text>] [
                  -- <command> ...
 banksman touch   (--lease <id> | --holding <label>) [--resource <name>] [--expect <duration>]
                  [--owner-pid <pid>]
-banksman release (--lease <id> | --holding <label>) [--resource <name>]
-                 [--owner-pid <pid>] [--end]                       # the holding, or one resource
+banksman release (--lease <id> | --holding <label> [--owner-pid <pid>]) [--resource <name>]
+                 [--end]                                           # the holding, or one resource
 banksman release --all [--owner-pid <pid>] [--end]                 # the leases of this agent
 banksman held    [--owner-pid <pid>] [--json]                      # the holdings of this agent,
                                                                    # and its refused adb calls
@@ -1983,9 +2012,10 @@ banksman whoami  [--json]
 banksman agent-guide                                               # the guide for agents
 banksman watch   [--interval <duration>]
 banksman explain --where <attr><op><value> ...
-banksman log     [--since <time>] [--resource <name>] [--json] [--verbose]
-banksman reap
-banksman version [--json]
+banksman log     [--since <time>] [--resource <name>] [--event <event>] [--count] [--json]
+                 [--verbose]
+banksman reap    [--json]
+banksman version [--json]                                          # also banksman --version
 banksman guard adb [--fallback-adb <path>] -- <adb argument> ...  # what the adb wrapper runs
 banksman guard gradle [--serial <serial>] ... -- <task path> ...  # what the Gradle part of
                                                                    # the adb guard runs
@@ -2002,22 +2032,26 @@ banksman admin doctor [--json]                                     # check the i
 Commands that grant a resource print `KEY=value` lines, for example `RESOURCE=`, `SERIAL=`,
 `HANDLE=`, `ACCOUNTS=`, and `LEASE=`, the lease id that the scripts pass back, so that a shell
 script can read them.
-With `--json` they print JSON instead. Exit status 1 is an error, 2 a usage error, 3 a lease
-that is lost, also a label that names no held holding of the agent process, and 4 a request
-whose matching resources are all in use. `run` exits with the
+With `--json` they print JSON instead; `reap --json` prints the leases that it took back.
+Exit status 1 is an error, also a combination of options that does not fit, 2 an option or a
+value that the command cannot parse, 3 a lease that is lost, also a label that names no held
+holding of the agent process, and 4 a request whose matching resources are all in use, or a
+holding that still boots. `run` exits with the
 status of its command, unless banksman fails before the command starts or the lease is lost.
 
 In the command of `banksman run`, each argument that is exactly `{serial}` becomes the serial
 of the lease, and each argument that is exactly `{resource}` becomes the resource: the shell of
 the caller cannot expand a variable that banksman sets only for the command. `run` fails before
-the command starts when the command has `{serial}` and the serial is not known. The command
-gets `BANKSMAN_LEASE`, `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_SERIAL` and
-`BANKSMAN_HANDLE` when they are known, and `ANDROID_SERIAL` for a kind with an Android preset,
+the command starts when the command has `{serial}` or `{serials}` and a serial is not known.
+The command gets `BANKSMAN_LEASE`, `BANKSMAN_RESOURCE`, `BANKSMAN_KIND`, `BANKSMAN_SERIAL`,
+`BANKSMAN_HANDLE`, and `BANKSMAN_ACCOUNTS` when they are known, and `ANDROID_SERIAL` for a kind
+with an Android preset,
 so that a script can, for example, extend the reservation of a remote device by hand.
 `{resources}` and `{serials}` become the resources and the known serials of the run,
 comma-separated, also under one lease, and the command gets the same lists in
 `BANKSMAN_RESOURCES` and `BANKSMAN_SERIALS`. Under several leases, the variables and the
-placeholders of one lease are not set (section 15).
+placeholders of one lease are not set, except `BANKSMAN_LEASE`, which names one lease of the
+holding (section 15).
 
 Every command that only an operator may run is under `banksman admin`, so that an agent's
 permission rules can refuse all of them with one pattern, including ones added later.
@@ -2257,10 +2291,11 @@ Next:
   has its own group.
 - Does each agent run its commands as descendants of its own process, also inside a
   sandbox, and also for background sessions? Holder identity depends on it. Checked for the
-  same setups: the parent of each command is the agent process. Still open: background
-  sessions, whether one agent process serves several sessions of an app, and whether the
-  Codex background server keeps running after its session ends. `banksman whoami` shows
-  what banksman finds in each setup.
+  same setups: the parent of each command is the agent process. Claude Code runs each
+  background session in a process of its own, and an app can move a session to a new agent
+  process (section 9). Still open: the background sessions of Codex, and whether the Codex
+  background server keeps running after its session ends. `banksman whoami` shows what
+  banksman finds in each setup.
 - Can banksman tell the subagents of one session apart? Checked with Claude Code 2.1 and with
   the Codex command-line tool 0.159: no. A subagent runs its commands in the agent process of
   its parent, and `banksman whoami` shows the same agent process for both. Claude Code gives a

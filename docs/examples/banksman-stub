@@ -39,7 +39,7 @@ case $1 in
         ;;
     run)
         shift
-        unset BANKSMAN_ACCOUNTS
+        unset BANKSMAN_ACCOUNTS BANKSMAN_HANDLE
         export BANKSMAN_KIND=stub BANKSMAN_SERIAL=stub-serial ANDROID_SERIAL=stub-serial
         export BANKSMAN_SERIALS=stub-serial BANKSMAN_RESOURCE=stub-0 BANKSMAN_LEASE=stub-lease
         while [ "$#" -gt 0 ]; do

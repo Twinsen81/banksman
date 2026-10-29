@@ -183,7 +183,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance is a model of the catalogue of the service, such as `tokay:34`. `banksman admin
   discover` fetches the catalogue with the `android` command line tool, whose path is the new
   key `cli` in `[android]`, and the new kind key `project` names the Google Cloud project.
-  Every other command reads only local files and adb, never the network. The
+  `cli_state` in `[android]` names the directory where the tool keeps its connections. The
+  discovery of every other command reads only local files and adb, never the network; only a
+  start, a new connection, and a take-back run the tool. The default `rank` of the preset is
+  2. The
   `android-device` preset no longer offers a device whose serial starts with `localhost:`.
 - Paid kinds. The new kind key `paid` marks a kind whose every use costs money; it is true by
   default for `android-remote`. `acquire` and `run --where` offer a paid resource only with
@@ -642,3 +645,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and [docs/PROJECTS.md](docs/PROJECTS.md) now also say that the needs of one project belong in
   its requests, not in the inventory or the `preselect` patterns: an operator who refused the
   emulators below the level of one project refused them to every other project too.
+- The guide for agents now says that a lease that nobody uses for 20 minutes, by default, ends,
+  and how to keep it, and that an unused timeout of the operator can end an emulator that an
+  agent started outside banksman. Its rule for `--no-wait` now names the case that banksman
+  refuses. [docs/PROJECTS.md](docs/PROJECTS.md) now says that `banksman_acquire` takes no
+  `--holding`, because the helper adds `--lease` under `banksman run`, and that a script takes
+  its label from its caller. The stub for tests no longer passes the `BANKSMAN_HANDLE` of its
+  caller to the command, as `banksman run` does not.

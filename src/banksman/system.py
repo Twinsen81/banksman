@@ -1,6 +1,7 @@
 """The machine: the clock, the boot session, and the running processes.
 
-This is the only module that runs `ps` or `sysctl`, reads `/proc`, or sends signals.
+This is the only module that runs `ps` or `sysctl`, reads `/proc`, or signals a process that the
+current command did not start.
 """
 
 from __future__ import annotations

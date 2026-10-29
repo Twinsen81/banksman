@@ -59,8 +59,8 @@ and signals only that process. With the `free_timeout` of its kind, the reaper a
 emulator that banksman started; under the lock of the lease store, it first writes a lease of
 its own for the emulator, so that no request gets the emulator while it ends. `release --end`
 ends an emulator in the same way, as a take-back with the `on_void` hook of the kind, and only
-the emulator of the lease that the command names by its lease id or its label, and only when
-banksman started it.
+the emulator of the lease that the command names by its lease id or its label, or with `--all`
+of the leases of the caller's agent process, and only when banksman started it.
 
 **A start that continues after its command.** With `acquire --start --no-wait`, a banksman
 process continues the start after the command of the caller has ended, so the shell tool of an
@@ -108,8 +108,9 @@ money, such as a remote device; [docs/PROJECTS.md](docs/PROJECTS.md) gives rules
 user before every `--paid`. Like the rules for `banksman admin`, they match the text of a
 command only, and do not see a `--paid` inside a script. The inventory that discovery writes,
 `~/.config/banksman/inventory.toml`, decides what agents may use, so banksman refuses an
-inventory that another user owns or that group or others can write to, as for the
-configuration file. A new scan never allows a name that a person refused. That is a guardrail against a careless
+inventory that a user other than the user and root owns, or that group or others can write to,
+as for the configuration file.
+A new scan never allows a name that a person refused. That is a guardrail against a careless
 agent, not a boundary against a determined one: an agent that runs as the same user can
 edit files that user can edit. Running agents under a separate user account is the
 stronger option. Such agents use that account's state directory, so banksman does not
@@ -169,11 +170,12 @@ account only when the inventory allows it. `status` shows only the resources tha
 declares or the inventory allows, and the resources that have a lease, so it never shows an
 instance that the operator did not allow, which can be personal. A note of discovery can name
 such an instance, so `status` and `acquire` show only why a discovery failed and how many other
-notes it has; only `banksman admin discover` shows the notes.
+notes it has; only `banksman admin discover` and `banksman admin doctor` show the notes.
 
 **A grant is safe to read in a shell.** The `KEY=value` lines of `acquire` carry only the
-resource name, the kind, the lease id, the state, whether the lease was kept, a serial, the id
-of a reservation, and the granted accounts, and each
+resource name, the kind, the lease id, the state, whether the lease was kept, whether the same
+holder used the instance last (`PREVIOUS`), whether banksman started it (`STARTED`), a serial,
+the id of a reservation, and the granted accounts, and each
 value has only the characters of a resource name; several accounts are separated by commas.
 The name of a part, which is the prefix of its keys, has only lowercase letters, digits, and
 `_`. A serial or an id with other characters is not printed, and no other fact is printed.
@@ -189,6 +191,15 @@ of the build: like any purpose, it is untrusted holder text. At the start and at
 each build, the build-slot part gives back every lease whose owner process is the process
 that runs the build. So a lease that another caller gives that owner process, with
 `--owner-pid`, does not outlive the build.
+
+**The guard for Gradle runs in every build of the user, too.** This applies only when the
+operator installs the adb guard for Gradle (DESIGN.md, section 12). Its init script in
+`~/.gradle/init.d/` applies the part in `~/.gradle/banksman/gradle-guard.gradle`, so that file
+is as trusted as the init script: whoever can write it runs code in every build of the user.
+The part runs the `banksman` that the `PATH` of the build finds, and it looks only in absolute
+directories. It fails open, as the adb wrapper does: without `banksman`, without the part, or
+with a banksman that cannot start, the build runs and says that its device tasks are not
+checked.
 
 **No credentials.** For accounts on devices, banksman stores identifiers such as email
 addresses, never passwords or tokens. The account is already signed in on the device; a
@@ -236,7 +247,9 @@ emulator, and a process that has no agent process all pass, and the lease id tha
 call pass is the same token as for the scripts. A process can name an agent process in the pid
 variable of the agent, such as `CLAUDE_PID`, as it can with `--owner-pid`: banksman checks only
 that the process runs, is that agent, and started before the processes that got the variable
-from it. In the same way, a process can set the session variable of an agent, such as
+from it; for a Gradle build, only that the process runs and is that agent, because the Gradle
+daemon can be older than the agent (DECISIONS.md, #91).
+In the same way, a process can set the session variable of an agent, such as
 `CLAUDE_CODE_SESSION_ID`, to another session of that agent, and so use a holding of that session
 whose agent process has ended. The session id is not a secret: the lease files,
 `status --json`, and the log carry it. The wrapper runs
@@ -247,7 +260,8 @@ runs the adb of the SDK of the configuration, or the adb that it saved, never on
 holder as `status` does, with the purpose, which is untrusted text, and with terminal control
 sequences removed. When banksman cannot decide, or cannot start, the call runs with a warning:
 the guard fails open, so a broken configuration or installation costs protection, not every
-device. A refused call, and a call that warn mode lets run, adds an event to the log that
+device. Only a lease file that cannot be read keeps its device out of use, as in every command.
+A refused call, and a call that warn mode lets run, adds an event to the log that
 names the caller and the device, with only the words that name the adb command: never the rest
 of the command line, which can carry tokens, and never the text of the refusal, which can carry
 the purpose of another holder. `banksman held` shows the refused calls of an agent process with

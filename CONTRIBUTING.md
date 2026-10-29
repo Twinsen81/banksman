@@ -25,15 +25,16 @@ that already run on the machine.
 
 ## Project layout
 
-- `src/banksman/`: the package. `cli.py` is the entry point, `store.py` keeps the lease
+- `src/banksman/`: the package. `launcher.py` is the entry point: it starts `guard.py` for
+  `banksman guard` and `cli.py` for every other command. `store.py` keeps the lease
   files, `history.py` keeps the log, `console.py` builds what `status` and `watch` show,
   `config.py` reads the configuration file, `fencing.py` has the rules for the
   scripts that use a resource and for the signals that the reaper may send, `identity.py`
   finds the holder of a lease, `discovery.py` checks what discovery finds, `inventory.py`
   reads and writes the allowlist, `hooks.py` is the only module that runs hook programs
   (through `supervisor.py`), `android.py` is the only module that runs `adb`, and
-  `system.py` is the only module that reads the process list and the boot id, and that sends
-  signals.
+  `system.py` is the only module that reads the process list and the boot id, and that signals
+  processes that the current command did not start.
 - `tests/`: the pytest suite.
 - `docs/DESIGN.md`: architecture and behavior. Read it before proposing structural changes.
 - `DECISIONS.md`: resolved design decisions and how to change them.
@@ -88,7 +89,8 @@ request must carry a sign-off line.
 banksman follows [Semantic Versioning](https://semver.org/). Before `1.0.0`, anything may
 change between minor versions. The surfaces that will be treated as public API are the CLI
 (commands, flags, exit codes, and `KEY=value` output), the JSON output and its `schema`
-number, the lease file format, the configuration files, and the hook contract.
+number, the lease file format, the log file format, the configuration files, and the hook
+contract.
 
 A change of the JSON output needs a change of its recorded shape in `tests/shapes.py`. A new
 field needs only that. A field that is removed or renamed, or that changes its type or its
