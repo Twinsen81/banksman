@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-02
+
+Names for devices. A person names a device by its product, such as "the S24+", and an agent
+can now find it: `banksman status` shows the model and the tags of each resource, and the
+operator gives a device the name that people use for it with `banksman admin tag`. The lease
+schema stays 12, and the output schema stays 6. After the upgrade, save the guide for agents
+again: `banksman admin doctor` names the saved copies that differ.
+
 ### Added
 
 - `banksman admin tag <tag>=<pattern> ...` and `banksman admin untag <tag>[=<pattern>] ...`
@@ -690,5 +698,6 @@ entries below list the changes of the development before this release.
   its label from its caller. The stub for tests no longer passes the `BANKSMAN_HANDLE` of its
   caller to the command, as `banksman run` does not.
 
-[Unreleased]: https://github.com/Twinsen81/banksman/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Twinsen81/banksman/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Twinsen81/banksman/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Twinsen81/banksman/releases/tag/v0.1.0
