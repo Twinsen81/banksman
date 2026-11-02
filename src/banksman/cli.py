@@ -3219,6 +3219,9 @@ def _cmd_admin_discover(args: argparse.Namespace) -> int:
         )
     else:
         print(f"Wrote {path}." if write else "Nothing was written.")
+        # After the write: a tag that the operator adds while the question waits would be lost
+        # when discover writes the tags that it read at its start.
+        _print_untagged(updated if write else inventory, kinds)
     return 0
 
 
@@ -3464,24 +3467,6 @@ def _print_summary(
                 f"{_names(names)} (kind {kind_name}) are allowed but not offered now. They stay"
                 " allowed."
             )
-    for kind in kinds:
-        if kind.preset != ANDROID_DEVICE:
-            continue
-        # A device is named by its serial number, which says nothing to a person who asks an
-        # agent for "the S24+".
-        allowed = updated.kinds.get(kind.name, Decisions()).allowed
-        untagged = [name for name in allowed if not updated.tags_of(name)]
-        if untagged:
-            subject = (
-                f"{untagged[0]} (kind {kind.name}) has"
-                if len(untagged) == 1
-                else f"{_names(untagged)} (kind {kind.name}) have"
-            )
-            _say(
-                f"{subject} no tag. Give each device a tag with the name that people use for it,"
-                " so that an agent can ask for it with --where tag=<tag>: banksman admin tag"
-                f" <tag>={untagged[0]}"
-            )
     unknown = _by_kind(
         (choice.kind, choice.name)
         for choice in chosen
@@ -3561,6 +3546,27 @@ def _print_summary(
             f"Warning: the accounts {_names(names)} are selected, but no preselect pattern"
             " matches them."
         )
+
+
+def _print_untagged(inventory: Inventory, kinds: Sequence[Kind]) -> None:
+    """Name the allowed devices without a tag. A device is named by its serial number, which says
+    nothing to a person who asks an agent for "the S24+"."""
+    for kind in kinds:
+        if kind.preset != ANDROID_DEVICE:
+            continue
+        allowed = inventory.kinds.get(kind.name, Decisions()).allowed
+        untagged = [name for name in allowed if not inventory.tags_of(name)]
+        if untagged:
+            subject = (
+                f"{untagged[0]} (kind {kind.name}) has"
+                if len(untagged) == 1
+                else f"{_names(untagged)} (kind {kind.name}) have"
+            )
+            _say(
+                f"{subject} no tag. Give each device a tag with the name that people use for it,"
+                " so that an agent can ask for it with --where tag=<tag>: banksman admin tag"
+                f" <tag>={untagged[0]}"
+            )
 
 
 def _by_kind(pairs: Iterable[tuple[str, str]]) -> dict[str, list[str]]:

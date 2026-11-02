@@ -48,9 +48,11 @@ banksman acquire --holding login-tests --where form=phone --for "run the login U
   TAGS column shows the names that the operator gave the devices, and the MODEL column shows
   the manufacturer and the model that each device reports, for example `samsung SM-S926B` for
   a Galaxy S24+. Ask for the tag with `--where tag=<tag>`, or for the model with
-  `--where model=<model>`, for example `--where model=SM-S926B`. When no tag and no model is
-  clearly that device, ask the user which device they mean. Do not take another device of the
-  same manufacturer instead.
+  `--where model=<model>`. The model is the text without the manufacturer, as `facts.model` in
+  `banksman status --json` shows it: `--where model=SM-S926B`, not `samsung SM-S926B`. Put a
+  model with spaces in quotes, for example `--where 'model=Pixel 7'`. When no tag and no model
+  is clearly that device, ask the user which device they mean. Do not take another device of
+  the same manufacturer instead.
 - When your project has a minimum API level, put it in every request for an emulator or a
   device, for example `--where 'api>=28'`. The machine can have emulators below that level for
   other projects, and a request without it can get one of them.

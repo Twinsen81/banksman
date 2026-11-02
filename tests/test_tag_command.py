@@ -167,11 +167,15 @@ def test_discover_names_the_devices_without_a_tag(capsys, config_path, monkeypat
     devices(monkeypatch, "R5CR1234ABC", "R5CR5678DEF", "R5CR9999XYZ")
     save_inventory(Inventory(tags={"s24plus": ("R5CR1234ABC",)}))
     assert main(["admin", "discover", "--yes"]) == 0
+    out = capsys.readouterr().out
+    # After the write, so that the operator does not tag a device while discover waits to write
+    # the tags that it read at its start.
+    assert out.index("Wrote ") < out.index("have no tag")
     assert (
         "R5CR5678DEF, R5CR9999XYZ (kind device) have no tag. Give each device a tag with the name"
         " that people use for it, so that an agent can ask for it with --where tag=<tag>:"
         " banksman admin tag <tag>=R5CR5678DEF"
-    ) in summary(capsys.readouterr().out)
+    ) in summary(out)
     tag(capsys, "tag", "s24=R5CR5678DEF")
     assert main(["admin", "discover", "--yes"]) == 0
     assert "R5CR9999XYZ (kind device) has no tag." in summary(capsys.readouterr().out)
