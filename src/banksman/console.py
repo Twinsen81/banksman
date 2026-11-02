@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import os
 import time
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
@@ -54,8 +54,9 @@ UNMANAGED = "unmanaged"
 ABSENT = "absent"
 UNREADABLE = "unreadable"
 # The facts that the console shows, and those of them that the table shows in columns of their
-# own. The others are for requests.
-SHOWN_FACTS = ("form", "api", INPUT_AGE)
+# own. The manufacturer and the model let an agent find the device that a person names. The
+# others are for requests.
+SHOWN_FACTS = ("form", "api", "manufacturer", "model", INPUT_AGE)
 COLUMN_FACTS = ("form", "api")
 NONE = "-"
 
@@ -80,6 +81,8 @@ class Resource:
     ends: float | None = None
     # For an unmanaged instance, the agent process that started it, when banksman finds one.
     started_by: StartedBy | None = None
+    # The tags that the operator gave the resource in the inventory.
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -97,13 +100,18 @@ class Clock:
         return self.wall + (awake - self.awake)
 
 
-def resources(snapshot: Snapshot, found: Search, paid: Collection[str] = ()) -> list[Resource]:
+def resources(
+    snapshot: Snapshot,
+    found: Search,
+    paid: Collection[str] = (),
+    tags: Callable[[str], tuple[str, ...]] = lambda name: (),
+) -> list[Resource]:
     """Return every resource that agents may use or that has a lease file.
 
     `found` is a search with one part without clauses: every permitted resource that is present
     now. A resource that discovery finds but that the operator does not permit is never shown,
     because it can be personal, also to the agents that read the JSON. `paid` names the kinds
-    whose use costs money.
+    whose use costs money, and `tags` gives the tags of a resource, also of an absent one.
     """
     present = {candidate.resource: candidate for candidate in found.candidates[0]}
     absent = {name: kind for kind, name in found.absent}
@@ -156,11 +164,31 @@ def resources(snapshot: Snapshot, found: Search, paid: Collection[str] = ()) -> 
     for name, kind in absent.items():
         if name not in shown:
             shown[name] = Resource(name, kind, ABSENT, False, paid=kind in paid)
-    return sorted(shown.values(), key=lambda each: (each.kind is None, each.kind or "", each.name))
+    return sorted(
+        (replace(each, tags=tags(each.name)) for each in shown.values()),
+        key=lambda each: (each.kind is None, each.kind or "", each.name),
+    )
 
 
 def _shown(facts: Mapping[str, FactValue]) -> dict[str, FactValue]:
     return {name: facts[name] for name in SHOWN_FACTS if name in facts}
+
+
+def model_text(facts: Mapping[str, FactValue]) -> str | None:
+    """Return the model with its manufacturer, for example "samsung SM-S926B", or None."""
+    if "model" not in facts:
+        return None
+    text = fact_text(facts["model"])
+    maker = facts.get("manufacturer")
+    # A device model such as SM-S926B says little without its manufacturer.
+    if isinstance(maker, str) and not text.lower().startswith(maker.lower()):
+        return f"{maker} {text}"
+    return text
+
+
+def fact_text(value: FactValue) -> str:
+    # As a request writes it, for example running=true.
+    return str(value).lower() if isinstance(value, bool) else str(value)
 
 
 def _ends(facts: Mapping[str, FactValue]) -> float | None:
@@ -219,6 +247,7 @@ def _resource_json(
         if item.ends is None
         else {"at": utc(item.ends), "in": round(item.ends - clock.wall)},
         "facts": dict(item.facts),
+        "tags": list(item.tags),
         "lease": None if item.lease is None else lease_json(item.lease, clock, running, verbose),
         "started_by": None
         if item.started_by is None
@@ -301,6 +330,8 @@ STATUS_HEADER = (
     "SERIAL",
     "FORM",
     "API",
+    "MODEL",
+    "TAGS",
     "STATE",
     "SINCE",
     "LAST USE",
@@ -319,6 +350,7 @@ def status_rows(
     for item in items:
         lease = item.lease
         facts = [str(item.facts[name]) if name in item.facts else NONE for name in COLUMN_FACTS]
+        facts += [model_text(item.facts) or NONE, ",".join(item.tags) or NONE]
         serial = item.serial or NONE
         kind = item.kind or NONE
         if item.paid:

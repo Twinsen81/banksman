@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `banksman admin tag <tag>=<pattern> ...` and `banksman admin untag <tag>[=<pattern>] ...`
+  change the tags of the operator in the inventory, with the same checks as when banksman
+  reads the file. Give a device the name that people use for it, for example
+  `banksman admin tag s24plus=R5CR1234ABC`, and an agent gets it with `--where tag=s24plus`.
+  `tag` warns about a pattern that matches no resource that agents may use.
+- `banksman status` shows the model with its manufacturer, such as `samsung SM-S926B`, and
+  the tags of each resource, in the new columns MODEL and TAGS. `status --json` has the facts
+  `manufacturer` and `model`, and a new field `tags` for each resource. The output schema stays
+  6, because these are new fields. A script that reads the table by the position of a column
+  must take the two new columns into account.
+- The summary of `banksman admin discover` names the allowed devices of the `android-device`
+  preset that have no tag, with the command that tags one.
+- The guide for agents tells an agent how to find a device that the user names, for example
+  "the S24+": by its tag or its model in `banksman status`. Save the guide again after the
+  upgrade; `banksman admin doctor` names the saved copies that differ.
+
 ### Changed
 
 - The status is now beta, in the README and in the classifiers of the package: the core

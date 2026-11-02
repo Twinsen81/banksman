@@ -24,6 +24,7 @@ FREE = {
     "handle": None,
     "ends": None,
     "facts": {},
+    "tags": [],
     "lease": None,
     "started_by": None,
 }

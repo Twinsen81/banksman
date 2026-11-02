@@ -168,7 +168,8 @@ most 1 MiB of output. A request grants only what the
 configuration declares or the inventory allows, also when it names a resource, and an
 account only when the inventory allows it. `status` shows only the resources that the configuration
 declares or the inventory allows, and the resources that have a lease, so it never shows an
-instance that the operator did not allow, which can be personal. A note of discovery can name
+instance that the operator did not allow, which can be personal. For those resources, it shows the
+manufacturer and the model, which are such untrusted values too, and the tags of the operator. A note of discovery can name
 such an instance, so `status` and `acquire` show only why a discovery failed and how many other
 notes it has; only `banksman admin discover` and `banksman admin doctor` show the notes.
 

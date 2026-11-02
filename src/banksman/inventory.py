@@ -18,7 +18,7 @@ import stat
 import tempfile
 import tomllib
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from banksman.config import CONFIG_ENV
@@ -39,6 +39,14 @@ _HEADER = """\
 _MAX_PATTERNS = 100
 _MAX_PATTERN_LENGTH = 256
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+TAG_RULE = (
+    "a tag starts with a lowercase letter, has only lowercase letters, digits, '_', and '-',"
+    " and has at most 32 characters"
+)
+PATTERN_RULE = (
+    f"a name pattern has 1 to {_MAX_PATTERN_LENGTH} characters and no control characters,"
+    " where * matches any text and ? matches one character"
+)
 
 
 class InventoryError(BanksmanError):
@@ -177,6 +185,51 @@ def matches(patterns: Sequence[str], name: str) -> bool:
     return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
 
 
+def valid_tag(tag: str) -> bool:
+    return KIND_NAME.fullmatch(tag) is not None
+
+
+def valid_pattern(pattern: str) -> bool:
+    return 0 < len(pattern) <= _MAX_PATTERN_LENGTH and _CONTROL.search(pattern) is None
+
+
+def add_tags(inventory: Inventory, pairs: Iterable[tuple[str, str]]) -> Inventory:
+    """Return the inventory with each pattern added to its tag. A pattern that the tag has
+    already changes nothing."""
+    tags = {tag: list(patterns) for tag, patterns in inventory.tags.items()}
+    for tag, pattern in pairs:
+        patterns = tags.setdefault(tag, [])
+        if pattern not in patterns:
+            patterns.append(pattern)
+    return _with_tags(inventory, tags)
+
+
+def remove_tags(inventory: Inventory, removals: Iterable[tuple[str, str | None]]) -> Inventory:
+    """Return the inventory without each tag, or, with a pattern, without that pattern of the
+    tag. A tag without patterns is removed. A tag or a pattern that the inventory does not have
+    is an error, so that a typing error does not pass for a removal."""
+    tags = {tag: list(patterns) for tag, patterns in inventory.tags.items()}
+    for tag, pattern in removals:
+        if tag not in tags:
+            raise InventoryError(f"the inventory has no tag {tag}")
+        if pattern is None:
+            del tags[tag]
+            continue
+        if pattern not in tags[tag]:
+            raise InventoryError(f"the tag {tag} has no pattern {pattern!r}")
+        tags[tag].remove(pattern)
+        if not tags[tag]:
+            del tags[tag]
+    return _with_tags(inventory, tags)
+
+
+def _with_tags(inventory: Inventory, tags: dict[str, list[str]]) -> Inventory:
+    try:
+        return replace(inventory, tags=_tags(tags))
+    except _Invalid as exc:
+        raise InventoryError(str(exc)) from None
+
+
 def decide(
     decisions: Decisions,
     seen: Iterable[str],
@@ -245,21 +298,12 @@ def _tags(value: object) -> dict[str, tuple[str, ...]]:
     tags = {}
     for tag, patterns in value.items():
         where = f"tags.{tag}"
-        if KIND_NAME.fullmatch(tag) is None:
-            raise _Invalid(
-                where,
-                "a tag starts with a lowercase letter, has only lowercase letters, digits, '_',"
-                " and '-', and has at most 32 characters",
-            )
+        if not valid_tag(tag):
+            raise _Invalid(where, TAG_RULE)
         if (
             not isinstance(patterns, list)
             or not 1 <= len(patterns) <= _MAX_PATTERNS
-            or not all(
-                isinstance(pattern, str)
-                and 0 < len(pattern) <= _MAX_PATTERN_LENGTH
-                and _CONTROL.search(pattern) is None
-                for pattern in patterns
-            )
+            or not all(isinstance(pattern, str) and valid_pattern(pattern) for pattern in patterns)
         ):
             raise _Invalid(
                 where,
