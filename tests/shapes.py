@@ -121,6 +121,7 @@ SHAPES: dict[str, Any] = {
                 "handle": TEXT,
                 "ends": (MOMENT, None),
                 "facts": dict,
+                "tags": [str],
                 "lease": (LEASE, None),
                 "started_by": ({"agent": str, "pid": int, "running": bool}, None),
                 "error?": str,

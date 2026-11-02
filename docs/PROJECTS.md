@@ -7,7 +7,8 @@ example configuration for an Android project, are in section 15 of [DESIGN.md](D
 
 The usual integration leases devices and emulators: the project copies the helper, runs its
 device work with `banksman run`, tests its scripts with the stub, and adds the rules for its
-agents. That is all that this guide describes. Other kinds, such as host ports or a mutex,
+agents. The operator also gives the devices the names that people use for them. That is all
+that this guide describes. Other kinds, such as host ports or a mutex,
 are optional, and a project adds one only when it needs it. Build slots for Gradle
 (DESIGN.md, section 11) are not part of a project's integration: they are an optional setup
 of the operator for every Gradle build on the machine. Do not add them to a project unless
@@ -495,3 +496,35 @@ follow it. Then run the device scripts of this project under your holding, and p
 serial: `banksman run --holding <label> -- ./scripts/ui-tests.sh --device {serial}`.
 ```
 
+## Names for devices
+
+banksman names a physical device by its serial number, such as `R5CR1234ABC`, and
+`banksman status` shows the model that the device reports, such as `samsung SM-S926B`. People
+name the product: "run the check on the S24+". An agent then has to find out which device that
+is, and a guess can take the wrong one. Give each device a tag with the name that people use
+for it. An agent finds the tag in the TAGS column of `banksman status`, and asks for the device
+with `--where tag=s24plus`. A tag gives no access.
+
+```sh
+banksman admin tag s24plus=R5CR1234ABC pixel7=33081FDH2000AB
+banksman admin untag pixel7
+```
+
+banksman does not make these names itself. Many devices do not report the name of the
+product, and a table of product names in banksman would be out of date with every new device.
+An agent can propose the names from the models, but the rules above refuse `banksman admin`
+for agents, so the agent proposes the command and the operator runs it. For example, give an
+agent this task:
+
+```markdown
+Run `banksman status --json`. For each resource of kind `device` with no tags, propose a short
+tag from its manufacturer and model: the name that people use for the product, in lowercase
+letters, digits, and `-`, for example `s24plus` for samsung SM-S926B. If you do not know the
+product of a model, say so, and do not guess. Show me a table of the resource, the model, and
+the tag, and the one `banksman admin tag` command that sets all of them. Do not run it.
+```
+
+Check the names, and run the command in your own shell. In Claude Code, type `!` and then the
+command. `banksman admin discover` names the devices that have no tag after each scan. A tag
+names the serial number, which stays the same over USB and over Wi-Fi, so the tag of a device
+does not change when it moves to Wi-Fi. A new device needs a tag of its own.

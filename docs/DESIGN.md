@@ -851,6 +851,17 @@ holdings apart (section 9).
   in the title of the table. The numbers go on from one table to the next. The summary gives
   one line for each kind, and one note or warning for each group of names, wrapped between
   names. `--json` shows every fact.
+- **Names for devices.** The `android-device` preset names a device by its serial number, and
+  its facts give the model that the device reports, such as `SM-S926B`, not the name of the
+  product, such as "Galaxy S24+" (see the presets below). A person who tells an agent to "use
+  the S24+" names the product, and an agent that guesses which device that is can take the
+  wrong one. So the operator gives each device a tag with the name that people use for it,
+  for example `banksman admin tag s24plus=R5CR1234ABC`, and an agent asks for it with
+  `--where tag=s24plus`. `status` shows the tags and the model of each resource (section 10).
+  The summary of discover names the allowed devices of the `android-device` preset that have
+  no tag, with the command that tags one. An agent can propose the tags from the models, but
+  it does not run the command: the permission rules of agents refuse `banksman admin`
+  (section 15), so the operator checks the names and runs it.
 - **A refusal is a person's decision.** In the interactive mode, a name that the person sees
   and leaves unselected is refused. A refused name stays refused when discover runs again,
   also when a pattern or `--all` matches it, until a person selects it again or edits the
@@ -872,7 +883,13 @@ holdings apart (section 9).
   each kind, and the allowed and the refused accounts. Under `[tags]`, it also holds the
   operator's tags: each tag and the name patterns of the resources that have it, for example
   `lab = ["qa_*"]`. discover keeps the tags when it writes the file. The operator can edit
-  it. banksman
+  it, or change the tags with two commands: `banksman admin tag <tag>=<pattern> ...` adds
+  each pattern to its tag, and `banksman admin untag <tag>[=<pattern>] ...` removes a tag, or
+  one pattern of it. Both check the tags as banksman checks them when it reads the file, and
+  write nothing when one of them is not valid. `untag` of a tag or a pattern that the file
+  does not have is an error, so that a typing error does not pass for a removal. `tag` warns
+  about a pattern that matches no resource that agents may use, which is often a typing error
+  in a serial number, and writes it all the same, because the device can come later. banksman
   refuses an inventory that a user other than the user and root owns, or that group or others
   can write to.
   `acquire` reads the machine again and grants only what is both allowed and present now
@@ -1347,10 +1364,11 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
 
 - `banksman status` prints one table with every resource that agents may use, free ones
   included, and every resource that has a lease file: resource, kind, serial, form and API level,
-  state, since, last use, the three "free by" values, the accounts of the lease, and the
-  holder. The last use of a resource without a lease is the time of the last input of an
-  emulator that runs (section 8), as the time of day that it was if the machine did not sleep
-  since. The state is `free`, `unmanaged` for an instance without a lease that runs but that
+  the model with its manufacturer, the tags of the operator, state, since, last use, the three
+  "free by" values, the accounts of the lease, and the holder. The model and the tags let an
+  agent find the device that a person names (section 8). The last use of a resource without a
+  lease is the time of the last input of an emulator that runs (section 8), as the time of day
+  that it was if the machine did not sleep since. The state is `free`, `unmanaged` for an instance without a lease that runs but that
   banksman did not start (section 6), with the agent process that started it in the holder
   column when banksman finds one, `booting`, `ready`, `draining`, `quarantined`, `absent` for an
   allowed instance that discovery does not find now, or `unreadable` for a lease file that
@@ -1370,7 +1388,7 @@ agent, the issue, and the session, and the purpose only with `--verbose`.
   place of the table, and the next refresh tries again.
 - `banksman status --json` carries the same data for agents and other tools: for each
   resource its kind, its state, whether it is present now, whether it is paid, its serial, the
-  facts `form`, `api`, and `input_age`, its lease, for a remote device its reservation
+  facts `form`, `api`, `manufacturer`, `model`, and `input_age`, its tags, its lease, for a remote device its reservation
   (`handle`) and when it ends (`ends`), for an emulator that banksman did not start the agent
   that started it (`started_by`), and `error` for a lease file that cannot be read;
   and `notes` for the whole answer. The purpose and the label of the holding only with
@@ -2022,6 +2040,8 @@ banksman guard gradle [--serial <serial>] ... -- <task path> ...  # what the Gra
 
 banksman admin discover [--kind <kind>] [--all] [--json] [--yes]
 banksman admin release --force --resource <name>
+banksman admin tag <tag>=<pattern> ...                             # name resources for requests
+banksman admin untag <tag>[=<pattern>] ...
 banksman admin gradle-init [--build-slot]                          # optional build slots
 banksman admin adb-shim                                            # optional adb guard
 banksman admin gradle-guard [--part]                               # its part for Gradle

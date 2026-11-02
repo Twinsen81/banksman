@@ -718,6 +718,11 @@ def test_agent_guide_prints_a_skill_for_the_installed_version(capsys):
     assert "run `banksman held` first" in guide
     # It says that the minimum API level of the project goes in every request.
     assert "When your project has a minimum API level" in guide
+    # It says how to find a device that the user names, such as "the S24+".
+    assert "When the user names a device" in guide
+    assert "`--where tag=<tag>`" in guide
+    # The MODEL column puts the manufacturer first, but a request takes the model alone.
+    assert "`--where model=SM-S926B`, not `samsung SM-S926B`" in guide
 
 
 def test_the_guide_names_every_key_of_the_grant_and_every_variable_of_run(capsys):

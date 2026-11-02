@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from pathlib import Path
 from typing import NoReturn
 
 from banksman import (
@@ -35,6 +36,7 @@ from banksman import (
 )
 from banksman.assign import MAX_ACCOUNTS, MAX_PARTS
 from banksman.config import (
+    ANDROID_DEVICE,
     ANDROID_EMULATOR,
     ANDROID_REMOTE,
     SKIP,
@@ -61,14 +63,20 @@ from banksman.errors import BanksmanError
 from banksman.history import EVENTS, GUARD, Event, History, LogError
 from banksman.identity import agent_session, find_agent, find_holder, session_of
 from banksman.inventory import (
+    PATTERN_RULE,
+    TAG_RULE,
     Decisions,
     Inventory,
+    add_tags,
     decide,
     default_inventory_path,
     load_inventory,
     matches,
     preselected,
+    remove_tags,
     save_inventory,
+    valid_pattern,
+    valid_tag,
 )
 from banksman.lease import (
     BOOTING,
@@ -574,6 +582,30 @@ def _build_parser() -> argparse.ArgumentParser:
         " crontab line",
         allow_abbrev=False,
     )
+    tag_command = admin_commands.add_parser(
+        "tag",
+        help="give resources a tag, a name that a request asks for with --where tag=<tag>; a tag"
+        " gives no access",
+        allow_abbrev=False,
+    )
+    tag_command.add_argument(
+        "pairs",
+        nargs="+",
+        type=_tag_pair,
+        metavar="TAG=PATTERN",
+        help="the tag, and the name of a resource or a name pattern, for example"
+        " s24plus=R5CR1234ABC",
+    )
+    untag_command = admin_commands.add_parser(
+        "untag", help="remove a tag, or one pattern of a tag", allow_abbrev=False
+    )
+    untag_command.add_argument(
+        "removals",
+        nargs="+",
+        type=_tag_removal,
+        metavar="TAG[=PATTERN]",
+        help="the tag to remove, or the tag and the one pattern to remove from it",
+    )
     doctor_command = admin_commands.add_parser(
         "doctor",
         help="check the install, the configuration, and the files that the operator saved, and"
@@ -628,6 +660,33 @@ class _AccountsAction(argparse.Action):
         if part.accounts is not None:
             parser.error("--accounts is given twice for one part")
         part.accounts = values
+
+
+def _tag_pair(text: str) -> tuple[str, str]:
+    tag, equals, pattern = text.partition("=")
+    if not equals:
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: write the tag and the pattern as TAG=PATTERN, for example"
+            " s24plus=R5CR1234ABC"
+        )
+    return _checked_tag(tag), _checked_pattern(pattern)
+
+
+def _tag_removal(text: str) -> tuple[str, str | None]:
+    tag, equals, pattern = text.partition("=")
+    return _checked_tag(tag), _checked_pattern(pattern) if equals else None
+
+
+def _checked_tag(tag: str) -> str:
+    if not valid_tag(tag):
+        raise argparse.ArgumentTypeError(f"{tag!r}: {TAG_RULE}")
+    return tag
+
+
+def _checked_pattern(pattern: str) -> str:
+    if not valid_pattern(pattern):
+        raise argparse.ArgumentTypeError(f"{pattern!r}: {PATTERN_RULE}")
+    return pattern
 
 
 def _part_name(text: str) -> str:
@@ -1098,9 +1157,12 @@ def _status(config: Config) -> _Status:
     store, _ = _reaped_store(config)
     # Discovery finds the free resources and their facts. It runs before the leases are read,
     # because it can take seconds. What it finds about serials goes into the leases first.
-    found = search(config, load_inventory(), [Part()], clock=store.system.clock)
+    inventory = load_inventory()
+    found = search(config, inventory, [Part()], clock=store.system.clock)
     store.observe(found.serials)
-    resources = console.resources(store.snapshot(), found, paid=_paid_kinds(config))
+    resources = console.resources(
+        store.snapshot(), found, paid=_paid_kinds(config), tags=inventory.tags_of
+    )
     machine = store.system
     pids = console.owner_pids(resources)
     return _Status(
@@ -2885,6 +2947,58 @@ def _cmd_admin_release(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_admin_tag(args: argparse.Namespace) -> int:
+    config = load_config()
+    path = default_inventory_path()
+    inventory = load_inventory(path)
+    updated = add_tags(inventory, args.pairs)
+    for tag in dict.fromkeys(tag for tag, _ in args.pairs):
+        print(clean(f"Tag {tag}: {', '.join(updated.tags[tag])}"))
+    # A pattern can name a device that is not plugged in yet, so a pattern that matches nothing
+    # is only a warning. It is often a typing error in a serial number.
+    names = _permitted_names(config, updated)
+    for tag, pattern in dict.fromkeys(args.pairs):
+        if not any(matches((pattern,), name) for name in names):
+            print(
+                clean(
+                    f"Warning: the pattern {pattern} of the tag {tag} matches no resource that"
+                    " agents may use."
+                )
+            )
+    return _write_tags(inventory, updated, path)
+
+
+def _cmd_admin_untag(args: argparse.Namespace) -> int:
+    path = default_inventory_path()
+    inventory = load_inventory(path)
+    updated = remove_tags(inventory, args.removals)
+    for tag in dict.fromkeys(tag for tag, _ in args.removals):
+        if tag in updated.tags:
+            print(clean(f"Tag {tag}: {', '.join(updated.tags[tag])}"))
+        else:
+            print(clean(f"Tag {tag}: removed"))
+    return _write_tags(inventory, updated, path)
+
+
+def _permitted_names(config: Config, inventory: Inventory) -> set[str]:
+    """Return the names of the resources that agents may use: the allowed instances of the
+    inventory, and the instances that the configuration declares."""
+    names = {name for decisions in inventory.kinds.values() for name in decisions.allowed}
+    for kind in config.kinds.values():
+        if not kind.discovered:
+            names.update(kind.instances())
+    return names
+
+
+def _write_tags(inventory: Inventory, updated: Inventory, path: Path) -> int:
+    if updated.tags == inventory.tags:
+        print("The inventory has these tags already. Nothing was written.")
+        return 0
+    save_inventory(updated, path)
+    print(f"Wrote {path}.")
+    return 0
+
+
 def _cmd_admin_gradle_init(args: argparse.Namespace) -> int:
     # banksman does not write the files itself: ~/.gradle belongs to Gradle and to the operator.
     sys.stdout.write(printed.build_slot() if args.build_slot else printed.gradle_init())
@@ -3105,6 +3219,9 @@ def _cmd_admin_discover(args: argparse.Namespace) -> int:
         )
     else:
         print(f"Wrote {path}." if write else "Nothing was written.")
+        # After the write: a tag that the operator adds while the question waits would be lost
+        # when discover writes the tags that it read at its start.
+        _print_untagged(updated if write else inventory, kinds)
     return 0
 
 
@@ -3228,7 +3345,7 @@ def _print_instances(rows: Sequence[tuple[int, _Choice]], common: Mapping[str, F
     lines = []
     for (number, choice), instance in zip(rows, instances):
         details = [
-            f"{key}={_fact_text(value)}"
+            f"{key}={console.fact_text(value)}"
             for key, value in sorted(instance.facts.items())
             if _is_detail(key) and key not in common
         ]
@@ -3282,7 +3399,7 @@ def _common_facts(instances: Sequence[Instance]) -> dict[str, FactValue]:
         for key, value in sorted(first.facts.items())
         if _is_detail(key)
         and all(
-            key in other.facts and _fact_text(other.facts[key]) == _fact_text(value)
+            key in other.facts and console.fact_text(other.facts[key]) == console.fact_text(value)
             for other in others
         )
     }
@@ -3295,21 +3412,13 @@ def _is_detail(key: str) -> bool:
 def _column_text(facts: Mapping[str, FactValue], key: str) -> str:
     if key not in facts:
         return ""
-    text = _fact_text(facts[key])
-    maker = facts.get("manufacturer")
-    # A device model such as SM-S926B says little without its manufacturer.
-    if key == "model" and isinstance(maker, str) and not text.lower().startswith(maker.lower()):
-        return f"{maker} {text}"
-    return text
+    if key == "model":
+        return console.model_text(facts) or ""
+    return console.fact_text(facts[key])
 
 
 def _facts_text(facts: Mapping[str, FactValue]) -> str:
-    return " ".join(f"{key}={_fact_text(value)}" for key, value in facts.items())
-
-
-def _fact_text(value: FactValue) -> str:
-    # As a request writes it, for example running=true.
-    return str(value).lower() if isinstance(value, bool) else str(value)
+    return " ".join(f"{key}={console.fact_text(value)}" for key, value in facts.items())
 
 
 def _choose(choices: list[_Choice], what: str, show: Callable[[], None]) -> None:
@@ -3439,6 +3548,27 @@ def _print_summary(
         )
 
 
+def _print_untagged(inventory: Inventory, kinds: Sequence[Kind]) -> None:
+    """Name the allowed devices without a tag. A device is named by its serial number, which says
+    nothing to a person who asks an agent for "the S24+"."""
+    for kind in kinds:
+        if kind.preset != ANDROID_DEVICE:
+            continue
+        allowed = inventory.kinds.get(kind.name, Decisions()).allowed
+        untagged = [name for name in allowed if not inventory.tags_of(name)]
+        if untagged:
+            subject = (
+                f"{untagged[0]} (kind {kind.name}) has"
+                if len(untagged) == 1
+                else f"{_names(untagged)} (kind {kind.name}) have"
+            )
+            _say(
+                f"{subject} no tag. Give each device a tag with the name that people use for it,"
+                " so that an agent can ask for it with --where tag=<tag>: banksman admin tag"
+                f" <tag>={untagged[0]}"
+            )
+
+
 def _by_kind(pairs: Iterable[tuple[str, str]]) -> dict[str, list[str]]:
     grouped: dict[str, list[str]] = {}
     for kind, name in pairs:
@@ -3524,6 +3654,8 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "admin adb-shim": _cmd_admin_adb_shim,
     "admin gradle-guard": _cmd_admin_gradle_guard,
     "admin reap-agent": _cmd_admin_reap_agent,
+    "admin tag": _cmd_admin_tag,
+    "admin untag": _cmd_admin_untag,
     "admin doctor": _cmd_admin_doctor,
 }
 

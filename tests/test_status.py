@@ -99,6 +99,7 @@ def test_status_shows_every_permitted_resource_also_when_it_is_free(capsys, conf
         "handle": None,
         "ends": None,
         "facts": {"form": "tablet", "api": 33},
+        "tags": [],
         "lease": None,
         "started_by": None,
     }
@@ -600,3 +601,53 @@ def test_a_span_is_short():
         "26m",
         "1h 20m",
     ]
+
+
+def test_status_shows_the_model_and_the_tags_that_name_a_device(capsys, config_path):
+    # A person asks an agent for "the S24+": the model and the tags of the operator let the agent
+    # find that device, also when it is absent now.
+    found = {
+        "schema": 1,
+        "instances": [
+            {
+                "name": "R5CR1234ABC",
+                "facts": {
+                    "form": "phone",
+                    "api": 35,
+                    "manufacturer": "samsung",
+                    "model": "SM-S926B",
+                    "codename": "e2s",
+                },
+            },
+            {"name": "R5CR5678DEF", "facts": {"manufacturer": "Google", "model": "Google Pixel 7"}},
+        ],
+    }
+    write_config(
+        config_path,
+        "[holder]\nagents = []\n"
+        f"[kinds.device]\ndiscover = {json.dumps(hook(PRINT_ARGUMENT, json.dumps(found)))}\n",
+    )
+    save_inventory(
+        Inventory(
+            kinds={"device": Decisions(allowed=("R5CR1234ABC", "R5CR5678DEF", "R5CR0000GON"))},
+            tags={"s24plus": ("R5CR1234ABC",), "lab": ("R5CR*",), "s23": ("R5CR0000GON",)},
+        )
+    )
+    assert main(["status"]) == 0
+    rows = {row["RESOURCE"]: row for row in table_rows(capsys.readouterr().out)}
+    assert {name: (row["MODEL"], row["TAGS"]) for name, row in rows.items()} == {
+        "R5CR0000GON": ("-", "lab,s23"),
+        "R5CR1234ABC": ("samsung SM-S926B", "lab,s24plus"),
+        # The manufacturer is not repeated when the model starts with it.
+        "R5CR5678DEF": ("Google Pixel 7", "lab"),
+    }
+    shown = status_json(capsys)
+    assert shown["R5CR1234ABC"]["facts"] == {
+        "form": "phone",
+        "api": 35,
+        "manufacturer": "samsung",
+        "model": "SM-S926B",
+    }
+    assert shown["R5CR1234ABC"]["tags"] == ["lab", "s24plus"]
+    absent = shown["R5CR0000GON"]
+    assert (absent["state"], absent["tags"]) == ("absent", ["lab", "s23"])
